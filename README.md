@@ -18,7 +18,6 @@ oak-d/
       viewer3d.py      pyqtgraph GLViewWidget — trajectory, drone triad, grid
       panels.py        telemetry side-panel
       mainwindow.py    top-level QMainWindow + toolbar (view presets)
-  legacy/              reference DepthAI scripts from rtr-research (Apr 2025)
   tools/
     view_pose3d.py     entry — launches the 3D viewer
   run.sh
