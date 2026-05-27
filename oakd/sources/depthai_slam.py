@@ -74,14 +74,19 @@ class OakBasaltSlamSource(PoseSource):
             stereo.initialConfig.setLeftRightCheckThreshold(10)
             stereo.setDepthAlign(dai.CameraBoardSocket.CAM_B)
 
-            # RTABMap params: enable loop closure + (optional) persistent DB
+            # RTABMap params: enable loop closure + (optional) persistent DB.
+            # NOTE: even when we don't visualise the occupancy grid, RTABMap's
+            # internal LocalGrid asserts cellSize > 0 — leave defaults and just
+            # disable grid publishing, don't zero the cell size.
             slam_params = {
-                "Rtabmap/DetectionRate": "1",         # try loop closure every 1s
+                "Rtabmap/DetectionRate": "1",         # loop-closure attempt rate
                 "Rtabmap/SaveWMState": "true",
-                "RGBD/CreateOccupancyGrid": "false",  # we don't render maps yet
+                "Grid/CellSize": "0.05",              # 5 cm; must be > 0
+                "Grid/FromDepth": "false",            # skip depth->grid work
                 "Mem/IncrementalMemory": "true",
             }
             slam.setParams(slam_params)
+            slam.setPublishGrid(False)                # don't emit occupancyGridMap
             if self.database_path:
                 slam.setDatabasePath(self.database_path)
                 slam.setLoadDatabaseOnStart(self.load_database)
