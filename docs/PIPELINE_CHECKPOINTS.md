@@ -6,7 +6,7 @@ output từng giai đoạn với baseline để debug và đo accuracy.
 
 **Ngày soạn**: 2026-05-29 (rewrite: nguyên tắc "chỉ show dữ liệu thật")
 **Pipeline tham chiếu**: `oakd/sources/depthai_slam.py` (live) + `depthai_vo.py` (VIO-only)
-**Target so sánh**: `skyslam/` (chưa viết — xem `docs/SKYSLAM_ROADMAP.md`)
+**Target so sánh**: `skyslam/` (chưa viết — kế hoạch chi tiết tại `docs/SKYSLAM_RESEARCH.md`)
 
 ---
 
@@ -110,8 +110,9 @@ với chính dữ liệu fake cũ → vô nghĩa).
 | C1 | Input: IMU sample | ✅ live | `IMU.out` | 200 Hz |
 | C2 | VIO pose (Basalt) | ✅ live | `BasaltVIO.transform` | FLU world |
 | C3 | SLAM pose (RTABMap, loop-corrected) | ✅ live | `RTABMapSLAM.transform` | FLU world |
-| C4 | Keyframe selected | ❌ blob hidden | TODO: parse `rtabmap.db` SQLite | offline tool |
-| C5 | Loop closure detected | ⚠️ derived | jump > thr trong `odomCorrection` stream | precision OK, không có BoW score |
+| C4 | Keyframe selected | ✅ offline | `rtabmap.db` SQLite (`Node` table) | `tools/extract_kf_from_db.py` — auto-run sau record |
+| C4+ | Loop closure links (rich) | ✅ offline | `rtabmap.db` SQLite (`Link` types 1/2/3) | cùng tool, → `kf_loops.jsonl` |
+| C5 | Loop closure detected (derived) | ⚠️ derived | jump > thr trong `odomCorrection` stream | precision OK, không có BoW score live |
 | C6 | Tracking lost/recovered | ⚠️ derived | gap > thr trong SLAM pose stream | đủ để vẽ timeline |
 | C7 | Frontend features per frame | ❌ blob hidden | **chỉ skyslam mới có** | KHÔNG fake bằng FeatureTracker |
 | C8 | IMU preintegration delta | ❌ blob hidden | chỉ skyslam | |
@@ -212,21 +213,30 @@ Mọi record có 2 field bắt buộc: `ts_ns` (uint64) + `seq` (uint32, monoton
 
 Same schema as C2, `source = rtabmap_slam` hoặc `sky_slam`.
 
-### C4 — kf_event
+### C4 — kf_event ✅ DONE (offline)
 
 ```jsonl
-{"ts_ns": ..., "seq": 42, "event": "keyframe_added",
- "kf_id": 17, "frame_seq": 42,
- "pos": [...], "quat_wxyz": [...],
- "reason": "translation_threshold"}
+{"ts_ns": 2402326697, "kf_id": 1, "weight": 0,
+ "pos": [0.0007, 0.0022, 0.0707],
+ "quat_wxyz": [0.6513, -0.0671, -0.7532, -0.0629]}
 ```
 
-- RTABMap expose `dataOutputQueue` với keyframe data; phải subscribe để bắt event.
-- `reason` enum: `first_frame` | `translation_threshold` | `rotation_threshold`
-  | `feature_drop` | `time_threshold`.
-- **STATUS**: chưa implement live — depthai `RTABMapSLAM` node không expose
-  KF event. Sẽ extract từ SQLite `rtabmap.db` (`Node` table) bằng tool riêng
-  `tools/extract_kf_from_db.py` (TODO, làm sau).
+- Source: SQLite `rtabmap.db` table `Node`, pose là BLOB 48-byte (3x4 float32
+  row-major `[R|t]`), stamp giây từ device boot.
+- Extract tool: `tools/extract_kf_from_db.py` — auto-chạy ở cuối
+  `record_session.py` (xem dòng cuối log: `kf: N keyframes, M loop links`).
+- Loop links phụ (C4+) ghi song song vào `kf_loops.jsonl` từ `Link` table
+  với type ∈ {1=global, 2=local_space, 3=local_time}:
+
+```jsonl
+{"ts_ns": ..., "from_kf": 12, "to_kf": 3, "type": 1, "type_name": "global",
+ "transform_pos": [...], "transform_quat_wxyz": [...]}
+```
+
+- `weight=-9` là intermediate node của RTABMap (graph reduction); `weight=0`
+  là keyframe bình thường.
+- Viewer (`viz_session.py`) render KF = chấm vàng + loop closure = đường
+  vàng giữa 2 KF trong tab Pose 3D.
 
 ### C5 — loop_event
 
@@ -241,8 +251,10 @@ Same schema as C2, `source = rtabmap_slam` hoặc `sky_slam`.
   `pos > 10 cm` hoặc `rot > 5°`) = loop closure đã apply correction.
 - Bỏ qua `LOOP_WARMUP_S` (default 3s) đầu tiên vì RTABMap publish correction
   bất định khi map đang khởi tạo (sẽ gây hàng chục false-positive).
-- Schema BoW (`kf_query`, `score`, `inliers`) chỉ available qua SQLite database
-  post-run — sẽ thêm khi viết `extract_kf_from_db.py`.
+- Schema BoW (`kf_query`, `score`, `inliers`) chỉ available qua SQLite —
+  `tools/extract_kf_from_db.py` đã extract `Link` table (loop edges với
+  transform + type) ra `kf_loops.jsonl`. Score + inlier count thì cột
+  `information` của `Link` table có nhưng chưa parse (TODO nếu cần).
 - Raw stream được dump song song ở `basalt/odom_correction.jsonl` để debug.
 
 ### C6 — track_event
@@ -429,23 +441,26 @@ plot regression chart "skyslam vs basalt" theo thời gian.
 
 ## 9. Implementation TODO
 
-Cần làm trước khi skyslam start:
+Pre-skyslam infra ✅ DONE:
 
-- [ ] `oakd/recorder.py` — fan-out tap mọi queue của depthai pipeline
-- [ ] `tools/record_session.py` — CLI wrapper `--source slam --record <path>`
-- [ ] `tools/compare_sessions.py` — load 2 sessions, tính ATE/RPE/KF/loop metrics
-- [ ] Record 5 gold sessions
-- [ ] Document RTABMap event subscription cách subscribe KF + loop events
-  (cần thử nghiệm; nếu RTABMap node không expose, phải đọc từ database file
-  sau khi run xong)
+- [x] `oakd/recorder.py` — fan-out tap mọi queue
+- [x] `tools/record_session.py` — CLI với `--duration`, `--no-pcl`, `-f`
+- [x] `tools/compare_sessions.py` — ATE/RPE giữa 2 pose streams
+- [x] Record 6 gold sessions (xem `docs/GOLD_SESSIONS.md`)
+- [x] `tools/extract_kf_from_db.py` — extract KF + loop từ rtabmap.db
+- [x] `tools/baseline_report.py` — emit Markdown baseline
+- [x] Frozen baseline (`docs/GOLD_BASELINE.md`)
 
-Estimate: ~2-3 ngày AI coding cho recorder + compare tool.
+Skyslam work — xem **`docs/SKYSLAM_RESEARCH.md`** Part 3 cho plan v3
+(9 phases với acceptance gates).
 
 ---
 
 ## 10. Cross-references
 
-- Long-term plan: `docs/SKYSLAM_ROADMAP.md`
+- **Skyslam plan v3 (research-backed)**: `docs/SKYSLAM_RESEARCH.md`
+- Gold regression suite: `docs/GOLD_SESSIONS.md` + `docs/GOLD_BASELINE.md`
+- Long-term hardware/FC vision: `docs/SKYSLAM_ROADMAP.md`
 - Current SLAM source: `oakd/sources/depthai_slam.py`
 - Current VIO source: `oakd/sources/depthai_vo.py`
 - Pose data structure: `oakd/pose.py`
@@ -457,3 +472,6 @@ Estimate: ~2-3 ngày AI coding cho recorder + compare tool.
 | Ngày | Thay đổi | Tác giả |
 |---|---|---|
 | 2026-05-29 | Draft đầu | Bảo + Copilot |
+| 2026-05-29 | Honest pipeline rewrite (drop fake FeatureTracker overlay) | Bảo + Copilot |
+| 2026-05-29 | C4 done: KF + loop links từ rtabmap.db SQLite | Bảo + Copilot |
+| 2026-05-29 | Gold suite mở rộng → 6 sessions (thêm loop_closure_45s) | Bảo + Copilot |

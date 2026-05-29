@@ -1,8 +1,20 @@
 # SkySLAM — Kế hoạch toàn diện: Tự chủ phần cứng + phần mềm SLAM
 
+> ⚠️ **SUPERSEDED cho phần software plan (2026-05-29)**
+>
+> Kế hoạch software chi tiết (stack, phases, math, acceptance gates) đã được
+> rewrite thành **`docs/SKYSLAM_RESEARCH.md`** sau khi đọc thorough source
+> code của depthai-core, basalt, rtabmap, ORB-SLAM3, OpenVINS. Plan v3 đó
+> dùng `numpy + opencv + gtsam + pyDBoW3` (Python-first), KHÁC với plan
+> C99-from-scratch ở đây.
+>
+> File này GIỮ LẠI làm **long-term hardware/system vision** (HW V1 IMX570
+> ToF, HW V2 custom MIPI board, FC↔SLAM link planning, drone integration).
+> Đừng đọc Section 3 "Software architecture" — đã obsolete.
+
 **Tác giả**: Bảo + Copilot
-**Ngày soạn**: 2026-05-27
-**Trạng thái**: Draft — kế hoạch dài hạn, dùng song song với project `oak-d` hiện tại.
+**Ngày soạn**: 2026-05-27 (HW vision retained; SW plan superseded 2026-05-29)
+**Trạng thái**: HW vision = long-term reference; SW plan = obsolete → xem `SKYSLAM_RESEARCH.md`.
 **Mục tiêu cuối**: Drone autonomous với SLAM stack tự thiết kế hoàn toàn (HW + SW), production-ready, không phụ thuộc Basalt / RTAB-Map / Luxonis ở runtime.
 
 ---

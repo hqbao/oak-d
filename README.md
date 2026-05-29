@@ -65,15 +65,23 @@ This gives camera-frame axes (right-handed, OpenCV convention):
 - [x] Fake pose source (figure-8) for UI bring-up
 - [x] Real visual-inertial odometry from OAK-D (BasaltVIO)
 - [x] SLAM with loop closure (RTABMapSLAM)
+- [x] Logging + offline replay (`tools/record_session.py` + `tools/viz_session.py`)
+- [x] Persistent SLAM database (auto save `rtabmap.db` + extract KF/loop via `tools/extract_kf_from_db.py`)
+- [x] Gold regression suite (6 sessions, see `docs/GOLD_SESSIONS.md`)
 - [ ] UDP / UART link to flight-controller
-- [ ] Persistent SLAM database (save / reload map across sessions)
 - [ ] Tracking-lost UI badge
-- [ ] Logging + offline replay source
 - [ ] Calibration check tool
 - [ ] Port to RPi5
+- [ ] `skyslam` Python package (replace Basalt + RTABMap)
 
 ## Long-term
 
-See [docs/SKYSLAM_ROADMAP.md](docs/SKYSLAM_ROADMAP.md) for the plan to rewrite
-the SLAM stack from scratch in C99 targeting custom hardware (no Basalt /
-RTAB-Map / depthai at runtime).
+- **Software plan (current, research-backed)**: [docs/SKYSLAM_RESEARCH.md](docs/SKYSLAM_RESEARCH.md)
+  — plan v3 với 9 phases, `numpy + opencv + gtsam + pyDBoW3`, acceptance gates,
+  viết sau khi đọc thorough source code depthai-core / basalt / rtabmap /
+  ORB-SLAM3 / OpenVINS.
+- **Pipeline checkpoints (debug contract)**: [docs/PIPELINE_CHECKPOINTS.md](docs/PIPELINE_CHECKPOINTS.md)
+  — schema C0–C9 để compare skyslam vs baseline khi build.
+- **Hardware vision (long-term)**: [docs/SKYSLAM_ROADMAP.md](docs/SKYSLAM_ROADMAP.md)
+  — chỉ đọc phần HW V1 / V2 / FC link (Section 3 software architecture đã
+  superseded by SKYSLAM_RESEARCH.md).
