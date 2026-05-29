@@ -342,14 +342,15 @@ class FrameTab(QWidget):
                     if d_mm == 0:
                         fill = (140, 140, 140)  # gray = no depth
                     else:
-                        # Map depth -> intensity 60..255 (dark=near, light=far)
+                        # Map depth -> dark red (near) ... white (far).
+                        # BGR: near (0,0,128), far (255,255,255).
                         t = (np.clip(d_mm, d_min_mm, d_max_mm) - d_min_mm) \
                             / (d_max_mm - d_min_mm)
-                        v = int(60 + t * 195)
-                        fill = (v, v, 0)  # BGR cyan-ish: blue + green, no red
-                    # 1-px black border for contrast, then 2-px filled dot
-                    cv2.circle(left_disp, (cx, cy), 3, (0, 0, 0), 1, cv2.LINE_AA)
-                    cv2.circle(left_disp, (cx, cy), 2, fill, -1, cv2.LINE_AA)
+                        b = int(t * 255)
+                        g = int(t * 255)
+                        r = int(128 + t * 127)
+                        fill = (b, g, r)
+                    cv2.circle(left_disp, (cx, cy), 3, fill, -1, cv2.LINE_AA)
 
         if left_disp.ndim == 2:
             self._set_gray(self.lbl_left["img"], left_disp)
