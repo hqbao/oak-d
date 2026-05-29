@@ -103,25 +103,31 @@ def _load_features(path: Path) -> tuple[np.ndarray, list[np.ndarray]]:
     return ts, pts
 
 
-def _load_pointclouds(session_dir: Path) -> np.ndarray:
-    """Concatenate every .f32 dump under basalt/pointcloud/ into one Nx3.
-    Returns empty array if no PCL recorded."""
+def _load_pointcloud_stream(
+    session_dir: Path,
+) -> tuple[np.ndarray, list[str], list[np.ndarray]]:
+    """Load every point cloud emission as a separate frame.
+
+    Returns ``(ts_s, kinds, clouds)`` parallel arrays. RTABMap republishes
+    the FULL cumulative cloud per emission, so viewers should pick the
+    latest emission per kind that has ``ts_s <= playhead_t`` and union the
+    two kinds — NOT concatenate every emission (that would 30x-duplicate).
+    """
     idx_path = session_dir / "basalt" / "pointcloud.jsonl"
     recs = _load_jsonl(idx_path)
     if not recs:
-        return np.zeros((0, 3), dtype=np.float32)
-    # Use only the most recent emission per kind to avoid duplicate accumulation
-    # (RTABMap republishes the FULL cloud on each emit).
-    latest: dict[str, dict] = {}
+        return np.zeros(0), [], []
+    ts = np.array([r["ts_ns"] for r in recs], dtype=np.float64) / 1e9
+    kinds: list[str] = []
+    clouds: list[np.ndarray] = []
     for r in recs:
-        latest[r.get("kind", "obstacle")] = r
-    arrs = []
-    for r in latest.values():
+        kinds.append(r.get("kind", "obstacle"))
         p = session_dir / "basalt" / r["path"]
         if p.exists():
-            arrs.append(np.fromfile(p, dtype=np.float32).reshape(-1, 3))
-    return np.concatenate(arrs, axis=0) if arrs else np.zeros((0, 3),
-                                                              dtype=np.float32)
+            clouds.append(np.fromfile(p, dtype=np.float32).reshape(-1, 3))
+        else:
+            clouds.append(np.zeros((0, 3), dtype=np.float32))
+    return ts, kinds, clouds
 
 
 # ============================================================================
@@ -447,13 +453,29 @@ class PoseTab(QWidget):
     """C2/C3: 3D trajectory + pos/quat timeseries with live markers."""
 
     def __init__(self, vio: dict, slam: dict, t_offset: float,
-                 pcl: np.ndarray | None = None,
+                 pcl_ts: np.ndarray | None = None,
+                 pcl_kinds: list[str] | None = None,
+                 pcl_clouds: list[np.ndarray] | None = None,
                  parent=None) -> None:
         super().__init__(parent)
         self._vio_ts = vio["ts_s"] - t_offset
         self._vio_pos = vio["pos"]
         self._slam_ts = slam["ts_s"] - t_offset
         self._slam_pos = slam["pos"]
+
+        # Point cloud stream rebased to shared timeline. We keep ALL emissions
+        # in memory and pick the latest <= t per kind in on_time().
+        if pcl_ts is not None and len(pcl_ts):
+            self._pcl_ts = pcl_ts - t_offset
+            self._pcl_kinds = list(pcl_kinds or [])
+            self._pcl_clouds = list(pcl_clouds or [])
+            total_pts = sum(int(c.shape[0]) for c in self._pcl_clouds)
+        else:
+            self._pcl_ts = np.zeros(0)
+            self._pcl_kinds = []
+            self._pcl_clouds = []
+            total_pts = 0
+        self._pcl_last_key: tuple = ()  # cache to skip redundant setData
 
         lay = QVBoxLayout(self)
         lay.setContentsMargins(8, 8, 8, 8)
@@ -494,18 +516,14 @@ class PoseTab(QWidget):
                 pos=slam["pos"].astype(np.float32),
                 color=pg.glColor(theme.GOOD), width=2, antialias=True,
             ))
-        # RTABMap point cloud (obstacle + ground, in world frame).
-        if pcl is not None and len(pcl):
-            # Sub-sample if huge so OpenGL doesn't stall.
-            if len(pcl) > 200_000:
-                idx = np.random.choice(len(pcl), 200_000, replace=False)
-                pcl_draw = pcl[idx]
-            else:
-                pcl_draw = pcl
-            gl_widget.addItem(gl.GLScatterPlotItem(
-                pos=pcl_draw.astype(np.float32),
-                color=(0.6, 0.6, 0.9, 0.35), size=2.0, pxMode=True,
-            ))
+        # RTABMap point cloud (obstacle + ground), animated by Playhead.
+        # Start empty; on_time() will fill with the latest cumulative emission
+        # whose timestamp <= current playhead time.
+        self._pcl_scatter = gl.GLScatterPlotItem(
+            pos=np.zeros((1, 3), dtype=np.float32),
+            color=(0.6, 0.6, 0.9, 0.35), size=2.0, pxMode=True,
+        )
+        gl_widget.addItem(self._pcl_scatter)
         # Live position markers
         self._mark_vio = gl.GLScatterPlotItem(
             pos=np.zeros((1, 3), dtype=np.float32),
@@ -521,7 +539,8 @@ class PoseTab(QWidget):
         legend = QLabel(
             f'<span style="color:{theme.WARN}">●</span> VIO (Basalt)   '
             f'<span style="color:{theme.GOOD}">●</span> SLAM (RTABMap)   '
-            f'<span style="color:#9999ff">·</span> point cloud ({len(pcl) if pcl is not None else 0:,} pts)'
+            f'<span style="color:#9999ff">·</span> point cloud ('
+            f'{len(self._pcl_ts)} emissions, peak {total_pts:,} pts)'
         )
         legend.setStyleSheet(f"color:{theme.TEXT}; padding:4px;")
 
@@ -609,6 +628,30 @@ class PoseTab(QWidget):
         self._mark_slam.setData(
             pos=self._interp_pos(self._slam_ts, self._slam_pos, t_s)[None, :]
         )
+        self._update_pcl(t_s)
+
+    def _update_pcl(self, t_s: float) -> None:
+        if not len(self._pcl_ts):
+            return
+        # Pick latest emission index per kind whose ts <= t_s.
+        latest_idx: dict[str, int] = {}
+        for i, ts in enumerate(self._pcl_ts):
+            if ts > t_s:
+                break
+            latest_idx[self._pcl_kinds[i]] = i
+        key = tuple(sorted(latest_idx.items()))
+        if key == self._pcl_last_key:
+            return
+        self._pcl_last_key = key
+        if not latest_idx:
+            self._pcl_scatter.setData(pos=np.zeros((1, 3), dtype=np.float32))
+            return
+        arrs = [self._pcl_clouds[i] for i in latest_idx.values()]
+        pts = np.concatenate(arrs, axis=0)
+        if len(pts) > 200_000:
+            sel = np.random.choice(len(pts), 200_000, replace=False)
+            pts = pts[sel]
+        self._pcl_scatter.setData(pos=pts.astype(np.float32))
 
 
 class EventsTab(QWidget):
@@ -825,7 +868,7 @@ class SessionViewer(QMainWindow):
         loop_events = _load_jsonl(session_dir / "basalt" / "loop_events.jsonl")
         track_events = _load_jsonl(session_dir / "basalt" / "track_events.jsonl")
         feat_ts, feat_pts = _load_features(session_dir / "basalt" / "features.jsonl")
-        pcl = _load_pointclouds(session_dir)
+        pcl_ts, pcl_kinds, pcl_clouds = _load_pointcloud_stream(session_dir)
 
         # Shared timeline rebased to 0
         starts, ends = [], []
@@ -848,7 +891,9 @@ class SessionViewer(QMainWindow):
         self.tab_frame = FrameTab(session_dir, frames, t_offset,
                                   feat_ts=feat_ts, feat_pts=feat_pts)
         self.tab_imu = IMUTab(imu, t_offset)
-        self.tab_pose = PoseTab(vio, slam, t_offset, pcl=pcl)
+        self.tab_pose = PoseTab(vio, slam, t_offset,
+                                pcl_ts=pcl_ts, pcl_kinds=pcl_kinds,
+                                pcl_clouds=pcl_clouds)
         self.tab_events = EventsTab(loop_events, track_events, t_offset, t_end)
 
         tabs = QTabWidget()
