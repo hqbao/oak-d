@@ -1,0 +1,156 @@
+<mxfile host="app.diagrams.net" agent="copilot" version="24.0.0">
+  <diagram name="OAK-D SLAM pipeline" id="pipeline">
+    <mxGraphModel dx="1800" dy="1100" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="2400" pageHeight="1400" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="lane_hw" value="HARDWARE - OAK-D W" style="html=1;swimlane;horizontal=0;startSize=30;fillColor=#1f3a5f;strokeColor=#5fa8d3;fontColor=#ffffff;fontSize=14;fontStyle=1;swimlaneFillColor=#0d1a2f;" vertex="1" parent="1">
+          <mxGeometry x="40" y="40" width="320" height="1240" as="geometry" />
+        </mxCell>
+        <mxCell id="lane_vpu" value="ON-DEVICE VPU (Myriad X, depthai blobs)" style="html=1;swimlane;horizontal=0;startSize=30;fillColor=#2b4f3e;strokeColor=#7bc99a;fontColor=#ffffff;fontSize=14;fontStyle=1;swimlaneFillColor=#0e1f17;" vertex="1" parent="1">
+          <mxGeometry x="380" y="40" width="380" height="1240" as="geometry" />
+        </mxCell>
+        <mxCell id="lane_vio" value="VIO - BasaltVIO node (host CPU, ThreadedHostNode)" style="html=1;swimlane;horizontal=0;startSize=30;fillColor=#5a3a1a;strokeColor=#e2a45f;fontColor=#ffffff;fontSize=14;fontStyle=1;swimlaneFillColor=#1f1408;" vertex="1" parent="1">
+          <mxGeometry x="780" y="40" width="460" height="1240" as="geometry" />
+        </mxCell>
+        <mxCell id="lane_slam" value="SLAM - RTABMapSLAM node (host CPU)" style="html=1;swimlane;horizontal=0;startSize=30;fillColor=#5a1a3a;strokeColor=#e25fa4;fontColor=#ffffff;fontSize=14;fontStyle=1;swimlaneFillColor=#1f0814;" vertex="1" parent="1">
+          <mxGeometry x="1260" y="40" width="540" height="1240" as="geometry" />
+        </mxCell>
+        <mxCell id="lane_out" value="APP + STORAGE (oak-d project)" style="html=1;swimlane;horizontal=0;startSize=30;fillColor=#2b2b50;strokeColor=#8aa0e8;fontColor=#ffffff;fontSize=14;fontStyle=1;swimlaneFillColor=#0c0c20;" vertex="1" parent="1">
+          <mxGeometry x="1820" y="40" width="540" height="1240" as="geometry" />
+        </mxCell>
+        <mxCell id="caml" value="&lt;b&gt;Left mono camera&lt;/b&gt;&#10;OmniVision OV9282 (W)&#10;800x800 @ 30 fps&#10;global shutter, IR-cut" style="html=1;rounded=1;fillColor=#2d5a8a;strokeColor=#ffffff;fontColor=#ffffff;align=center;whiteSpace=wrap;" vertex="1" parent="1">
+          <mxGeometry x="80" y="120" width="240" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="camr" value="&lt;b&gt;Right mono camera&lt;/b&gt;&#10;OmniVision OV9282 (W)&#10;800x800 @ 30 fps&#10;hw-trigger sync with left" style="html=1;rounded=1;fillColor=#2d5a8a;strokeColor=#ffffff;fontColor=#ffffff;align=center;whiteSpace=wrap;" vertex="1" parent="1">
+          <mxGeometry x="80" y="240" width="240" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="imu" value="&lt;b&gt;IMU&lt;/b&gt; - Bosch BMI270&#10;3-axis gyro + 3-axis accel&#10;200 Hz, hw-timestamped&#10;same clock domain as camera" style="html=1;rounded=1;fillColor=#2d5a8a;strokeColor=#ffffff;fontColor=#ffffff;align=center;whiteSpace=wrap;" vertex="1" parent="1">
+          <mxGeometry x="80" y="380" width="240" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="isp" value="&lt;b&gt;ISP + ImageManip&lt;/b&gt;&#10;AE/AGC, gamma&#10;downscale: 800x800 to 640x400 gray8&#10;&lt;i&gt;algo:&lt;/i&gt; bilinear/area resize&#10;&lt;b&gt;out:&lt;/b&gt; gray8 frame + ts_ns" style="html=1;rounded=1;fillColor=#3a6b53;strokeColor=#ffffff;fontColor=#ffffff;align=center;whiteSpace=wrap;" vertex="1" parent="1">
+          <mxGeometry x="420" y="120" width="300" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="rect" value="&lt;b&gt;Stereo rectification&lt;/b&gt;&#10;Apply factory intrinsics + R_lr extrinsic&#10;&lt;i&gt;algo:&lt;/i&gt; precomputed remap LUT (bilinear)&#10;&lt;b&gt;out:&lt;/b&gt; rectifiedLeft, rectifiedRight (gray8)" style="html=1;rounded=1;fillColor=#3a6b53;strokeColor=#ffffff;fontColor=#ffffff;align=center;whiteSpace=wrap;" vertex="1" parent="1">
+          <mxGeometry x="420" y="260" width="300" height="110" as="geometry" />
+        </mxCell>
+        <mxCell id="sgbm" value="&lt;b&gt;StereoDepth node&lt;/b&gt; (dense)&#10;&lt;i&gt;algo:&lt;/i&gt; Semi-Global Block Matching (SGBM)&#10;cost: census/SAD, 8-path aggregation&#10;left-right consistency check, sub-pixel quad-fit, speckle filter&#10;&lt;b&gt;out:&lt;/b&gt; disparity (uint16)" style="html=1;rounded=1;fillColor=#3a6b53;strokeColor=#ffffff;fontColor=#ffffff;align=center;whiteSpace=wrap;" vertex="1" parent="1">
+          <mxGeometry x="420" y="410" width="300" height="140" as="geometry" />
+        </mxCell>
+        <mxCell id="depth" value="&lt;b&gt;Depth conversion&lt;/b&gt;&#10;z = fx * baseline / disparity&#10;&lt;b&gt;out:&lt;/b&gt; depth uint16 mm (0=invalid)&#10;+ confidenceMap (uint8)" style="html=1;rounded=1;fillColor=#3a6b53;strokeColor=#ffffff;fontColor=#ffffff;align=center;whiteSpace=wrap;" vertex="1" parent="1">
+          <mxGeometry x="420" y="590" width="300" height="95" as="geometry" />
+        </mxCell>
+        <mxCell id="imusync" value="&lt;b&gt;IMU sync block&lt;/b&gt;&#10;buffer IMU samples, attach common ts_ns&#10;&lt;b&gt;out:&lt;/b&gt; IMU.out @ 200 Hz" style="html=1;rounded=1;fillColor=#3a6b53;strokeColor=#ffffff;fontColor=#ffffff;align=center;whiteSpace=wrap;" vertex="1" parent="1">
+          <mxGeometry x="420" y="720" width="300" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="fast" value="&lt;b&gt;Frontend: corner detection&lt;/b&gt;&#10;&lt;i&gt;algo:&lt;/i&gt; FAST-9 / Shi-Tomasi&#10;grid bucketing (e.g. 8x8 cells)&#10;non-max suppression, target 150-300 corners&#10;&lt;b&gt;out:&lt;/b&gt; 2D keypoints" style="html=1;rounded=1;fillColor=#7a5028;strokeColor=#ffffff;fontColor=#ffffff;align=center;whiteSpace=wrap;" vertex="1" parent="1">
+          <mxGeometry x="820" y="120" width="400" height="130" as="geometry" />
+        </mxCell>
+        <mxCell id="klt" value="&lt;b&gt;Frame-to-frame tracking&lt;/b&gt;&#10;&lt;i&gt;algo:&lt;/i&gt; Pyramidal Lucas-Kanade KLT&#10;4 pyramid levels, 21x21 window, sub-pixel refine&#10;outlier reject via fundamental-matrix RANSAC" style="html=1;rounded=1;fillColor=#7a5028;strokeColor=#ffffff;fontColor=#ffffff;align=center;whiteSpace=wrap;" vertex="1" parent="1">
+          <mxGeometry x="820" y="270" width="400" height="130" as="geometry" />
+        </mxCell>
+        <mxCell id="stmatch" value="&lt;b&gt;Stereo match (new landmarks)&lt;/b&gt;&#10;&lt;i&gt;algo:&lt;/i&gt; epipolar 1-D search + ZNCC patch&#10;disparity to 3D point via baseline&#10;parameterize as inverse-depth (anchored to host KF)" style="html=1;rounded=1;fillColor=#7a5028;strokeColor=#ffffff;fontColor=#ffffff;align=center;whiteSpace=wrap;" vertex="1" parent="1">
+          <mxGeometry x="820" y="420" width="400" height="140" as="geometry" />
+        </mxCell>
+        <mxCell id="preimu" value="&lt;b&gt;IMU preintegration&lt;/b&gt;&#10;&lt;i&gt;algo:&lt;/i&gt; Forster et al. 2017 (midpoint on SO(3))&#10;accumulate dR, dv, dp between consecutive KFs&#10;maintain first-order bias-update Jacobians&#10;&lt;b&gt;out:&lt;/b&gt; preintegrated factor + covariance" style="html=1;rounded=1;fillColor=#7a5028;strokeColor=#ffffff;fontColor=#ffffff;align=center;whiteSpace=wrap;" vertex="1" parent="1">
+          <mxGeometry x="820" y="580" width="400" height="150" as="geometry" />
+        </mxCell>
+        <mxCell id="ba" value="&lt;b&gt;Sliding-window BA (backend)&lt;/b&gt;&#10;&lt;i&gt;algo:&lt;/i&gt; non-linear least squares, Levenberg-Marquardt&#10;state: 5-7 keyframes (p, q, v, b_g, b_a) + landmark inv-depths&#10;factors: reprojection (Huber) + IMU preintegration + prior&#10;sparse Cholesky via Schur on landmarks" style="html=1;rounded=1;fillColor=#7a5028;strokeColor=#ffffff;fontColor=#ffffff;align=center;whiteSpace=wrap;" vertex="1" parent="1">
+          <mxGeometry x="820" y="750" width="400" height="170" as="geometry" />
+        </mxCell>
+        <mxCell id="marg" value="&lt;b&gt;Marginalization&lt;/b&gt;&#10;drop oldest KF when window full&#10;&lt;i&gt;algo:&lt;/i&gt; Schur complement to linearised prior factor" style="html=1;rounded=1;fillColor=#7a5028;strokeColor=#ffffff;fontColor=#ffffff;align=center;whiteSpace=wrap;" vertex="1" parent="1">
+          <mxGeometry x="820" y="940" width="400" height="110" as="geometry" />
+        </mxCell>
+        <mxCell id="posev" value="&lt;b&gt;BasaltVIO.transform&lt;/b&gt; (C2)&#10;SE(3) pose, 20-30 Hz&#10;frame: FLU world (Basalt convention)" style="html=1;rounded=1;fillColor=#a06430;strokeColor=#ffffff;fontColor=#ffffff;align=center;whiteSpace=wrap;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="820" y="1080" width="400" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="kfsel" value="&lt;b&gt;Keyframe selection&lt;/b&gt;&#10;trigger on any of:&#10;  |dT translation| &gt; 0.1 m&#10;  |dR rotation| &gt; 10 deg&#10;  elapsed &gt; 1.0 s (idle KF)&#10;&lt;b&gt;out:&lt;/b&gt; new KF (rgb, depth, pose, ts)" style="html=1;rounded=1;fillColor=#7a2854;strokeColor=#ffffff;fontColor=#ffffff;align=center;whiteSpace=wrap;" vertex="1" parent="1">
+          <mxGeometry x="1300" y="120" width="460" height="160" as="geometry" />
+        </mxCell>
+        <mxCell id="fex" value="&lt;b&gt;Feature extraction (for BoW)&lt;/b&gt;&#10;&lt;i&gt;algo:&lt;/i&gt; GFTT / Shi-Tomasi + BRIEF descriptor&#10;(configurable: ORB, SURF)&#10;typical ~400 features per KF" style="html=1;rounded=1;fillColor=#7a2854;strokeColor=#ffffff;fontColor=#ffffff;align=center;whiteSpace=wrap;" vertex="1" parent="1">
+          <mxGeometry x="1300" y="300" width="460" height="135" as="geometry" />
+        </mxCell>
+        <mxCell id="bow" value="&lt;b&gt;BoW quantization&lt;/b&gt;&#10;&lt;i&gt;algo:&lt;/i&gt; DBoW2 hierarchical k-means vocab tree&#10;(branch-k=10, depth=6, about 1e6 words)&#10;each descriptor to word id with tf-idf weight" style="html=1;rounded=1;fillColor=#7a2854;strokeColor=#ffffff;fontColor=#ffffff;align=center;whiteSpace=wrap;" vertex="1" parent="1">
+          <mxGeometry x="1300" y="455" width="460" height="145" as="geometry" />
+        </mxCell>
+        <mxCell id="bay" value="&lt;b&gt;Loop hypothesis (place recognition)&lt;/b&gt;&#10;score current KF vs all WM KFs (cosine on tf-idf BoW)&#10;&lt;i&gt;algo:&lt;/i&gt; Bayesian discrete filter over loop hypotheses&#10;(temporal coherence + virtual no-loop state)&#10;threshold: posterior &gt; 0.11" style="html=1;rounded=1;fillColor=#7a2854;strokeColor=#ffffff;fontColor=#ffffff;align=center;whiteSpace=wrap;" vertex="1" parent="1">
+          <mxGeometry x="1300" y="620" width="460" height="155" as="geometry" />
+        </mxCell>
+        <mxCell id="pnp" value="&lt;b&gt;Geometric verification&lt;/b&gt;&#10;match descriptors via direct-index&#10;&lt;i&gt;algo:&lt;/i&gt; PnP + RANSAC (3D-2D)&#10;accept if inliers &gt;= ~20, emit loop constraint T_loop_curr" style="html=1;rounded=1;fillColor=#7a2854;strokeColor=#ffffff;fontColor=#ffffff;align=center;whiteSpace=wrap;" vertex="1" parent="1">
+          <mxGeometry x="1300" y="795" width="460" height="135" as="geometry" />
+        </mxCell>
+        <mxCell id="pg" value="&lt;b&gt;Pose-graph optimization&lt;/b&gt;&#10;nodes = KF poses; edges = odom (VIO) + loop constraints&#10;&lt;i&gt;algo:&lt;/i&gt; g2o or GTSAM, LM on SE(3)&#10;robust kernel (Huber/Cauchy)&#10;output: corrected KF poses + map-to-odom" style="html=1;rounded=1;fillColor=#7a2854;strokeColor=#ffffff;fontColor=#ffffff;align=center;whiteSpace=wrap;" vertex="1" parent="1">
+          <mxGeometry x="1300" y="950" width="460" height="170" as="geometry" />
+        </mxCell>
+        <mxCell id="mem" value="&lt;b&gt;Memory management (RTABMap-specific)&lt;/b&gt;&#10;STM (Short-Term) - recent KFs, exempt from loop search&#10;WM (Working Memory) - active KFs, searched every frame&#10;LTM (Long-Term) - swapped to SQLite, retrieved on demand" style="html=1;rounded=1;fillColor=#a04074;strokeColor=#ffffff;fontColor=#ffffff;align=center;whiteSpace=wrap;" vertex="1" parent="1">
+          <mxGeometry x="1300" y="1140" width="460" height="120" as="geometry" />
+        </mxCell>
+        <mxCell id="poses" value="&lt;b&gt;RTABMapSLAM.transform&lt;/b&gt; (C3)&#10;loop-corrected SE(3) pose" style="html=1;rounded=1;fillColor=#3a6b53;strokeColor=#ffffff;fontColor=#ffffff;align=center;whiteSpace=wrap;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="1300" y="1290" width="220" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="corr" value="&lt;b&gt;odomCorrection&lt;/b&gt;&#10;map-to-odom SE(3) delta" style="html=1;rounded=1;fillColor=#3a6b53;strokeColor=#ffffff;fontColor=#ffffff;align=center;whiteSpace=wrap;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="1540" y="1290" width="220" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="rec" value="&lt;b&gt;SessionRecorder&lt;/b&gt;&#10;oakd/recorder.py&#10;fan-out tap on every depthai queue:&#10;  stereo + depth to PNG / raw16&#10;  IMU to imu.jsonl&#10;  VIO pose to vio_pose.jsonl (C2)&#10;  SLAM pose to slam_pose.jsonl (C3)&#10;  odomCorrection to odom_correction.jsonl&#10;  PCL to pointcloud/NNNN.f32 + index" style="html=1;rounded=1;fillColor=#3a3a70;strokeColor=#ffffff;fontColor=#ffffff;align=left;whiteSpace=wrap;" vertex="1" parent="1">
+          <mxGeometry x="1860" y="120" width="460" height="220" as="geometry" />
+        </mxCell>
+        <mxCell id="derived" value="&lt;b&gt;Derived events (close-time)&lt;/b&gt;&#10;C5 loop_event from jump in odomCorrection&#10;   ( |dp| &gt; 10 cm or |dr| &gt; 5 deg )&#10;C6 track_event from gap in slam_pose stream&#10;   ( gap &gt; 0.5 s )" style="html=1;rounded=1;fillColor=#3a3a70;strokeColor=#ffffff;fontColor=#ffffff;align=left;whiteSpace=wrap;" vertex="1" parent="1">
+          <mxGeometry x="1860" y="370" width="460" height="130" as="geometry" />
+        </mxCell>
+        <mxCell id="pcl" value="&lt;b&gt;Dense reconstruction (RTABMap)&lt;/b&gt;&#10;depth re-projected to 3D in map frame&#10;voxel filter ~5 cm, ground/obstacle split&#10;&lt;b&gt;out:&lt;/b&gt; obstaclePCL + groundPCL (Nx3 float32)" style="html=1;rounded=1;fillColor=#3a6b53;strokeColor=#ffffff;fontColor=#ffffff;align=center;whiteSpace=wrap;" vertex="1" parent="1">
+          <mxGeometry x="1860" y="530" width="460" height="120" as="geometry" />
+        </mxCell>
+        <mxCell id="db" value="&lt;b&gt;rtabmap.db (SQLite)&lt;/b&gt;&#10;persisted at session close (setSaveDatabaseOnClose)&#10;tables: Node, Link, Data, Word, Statistics, GlobalDescriptor, Info" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;fillColor=#3a3a70;strokeColor=#ffffff;fontColor=#ffffff;align=center;" vertex="1" parent="1">
+          <mxGeometry x="1860" y="690" width="460" height="160" as="geometry" />
+        </mxCell>
+        <mxCell id="ext" value="&lt;b&gt;tools/extract_kf_from_db.py&lt;/b&gt;&#10;runs automatically at end of record_session.py&#10;Node 3x4 float32 BLOB to (pos, quat_wxyz)&#10;Link types 1=global, 2=local_space, 3=local_time to loops&#10;Shepperd rotation to quaternion" style="html=1;rounded=1;fillColor=#3a3a70;strokeColor=#ffffff;fontColor=#ffffff;align=left;whiteSpace=wrap;" vertex="1" parent="1">
+          <mxGeometry x="1860" y="880" width="460" height="140" as="geometry" />
+        </mxCell>
+        <mxCell id="kfjl" value="&lt;b&gt;kf_events.jsonl (C4)&lt;/b&gt; - keyframes&#10;&lt;b&gt;kf_loops.jsonl (C4+)&lt;/b&gt; - loop edges with transform" style="html=1;rounded=1;fillColor=#a04074;strokeColor=#ffffff;fontColor=#ffffff;align=center;whiteSpace=wrap;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="1860" y="1050" width="460" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="viz" value="&lt;b&gt;tools/viz_session.py&lt;/b&gt;&#10;offline replay viewer:&#10;Pose 3D overlays VIO (blue) + SLAM (red)&#10;+ KF (yellow dots) + loop edges (yellow lines)" style="html=1;rounded=1;fillColor=#3a3a70;strokeColor=#ffffff;fontColor=#ffffff;align=left;whiteSpace=wrap;" vertex="1" parent="1">
+          <mxGeometry x="1860" y="1160" width="460" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="e1" style="endArrow=block;html=1;strokeColor=#5fa8d3;strokeWidth=2;" edge="1" parent="1" source="caml" target="isp"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e2" style="endArrow=block;html=1;strokeColor=#5fa8d3;strokeWidth=2;" edge="1" parent="1" source="camr" target="isp"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e3" style="endArrow=block;html=1;strokeColor=#5fa8d3;strokeWidth=2;" edge="1" parent="1" source="imu" target="imusync"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e4" style="endArrow=block;html=1;strokeColor=#7bc99a;strokeWidth=2;" edge="1" parent="1" source="isp" target="rect"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e5" style="endArrow=block;html=1;strokeColor=#7bc99a;strokeWidth=2;" edge="1" parent="1" source="rect" target="sgbm"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e6" style="endArrow=block;html=1;strokeColor=#7bc99a;strokeWidth=2;" edge="1" parent="1" source="sgbm" target="depth"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e7" value="rectifiedLeft" style="endArrow=block;html=1;strokeColor=#e2a45f;strokeWidth=2;fontColor=#ffd9a0;fontSize=10;" edge="1" parent="1" source="rect" target="fast"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e8" value="rectifiedRight" style="endArrow=block;html=1;strokeColor=#e2a45f;strokeWidth=2;fontColor=#ffd9a0;fontSize=10;" edge="1" parent="1" source="rect" target="stmatch"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e9" value="IMU.out 200 Hz" style="endArrow=block;html=1;strokeColor=#e2a45f;strokeWidth=2;fontColor=#ffd9a0;fontSize=10;" edge="1" parent="1" source="imusync" target="preimu"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e10" style="endArrow=block;html=1;strokeColor=#e2a45f;strokeWidth=2;" edge="1" parent="1" source="fast" target="klt"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e11" style="endArrow=block;html=1;strokeColor=#e2a45f;strokeWidth=2;" edge="1" parent="1" source="klt" target="ba"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e12" style="endArrow=block;html=1;strokeColor=#e2a45f;strokeWidth=2;" edge="1" parent="1" source="stmatch" target="ba"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e13" style="endArrow=block;html=1;strokeColor=#e2a45f;strokeWidth=2;" edge="1" parent="1" source="preimu" target="ba"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e14" style="endArrow=block;html=1;strokeColor=#e2a45f;strokeWidth=2;" edge="1" parent="1" source="ba" target="marg"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e15" style="endArrow=block;html=1;strokeColor=#e2a45f;strokeWidth=2;" edge="1" parent="1" source="marg" target="posev"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e16" value="odom (SE3, 20-30 Hz)" style="endArrow=block;html=1;strokeColor=#e25fa4;strokeWidth=2;fontColor=#ffb0d8;fontSize=10;" edge="1" parent="1" source="posev" target="kfsel"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e17" value="rectifiedLeft" style="endArrow=block;html=1;strokeColor=#e25fa4;strokeWidth=1;dashed=1;fontColor=#ffb0d8;fontSize=10;" edge="1" parent="1" source="rect" target="kfsel"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e18" value="depth" style="endArrow=block;html=1;strokeColor=#e25fa4;strokeWidth=1;dashed=1;fontColor=#ffb0d8;fontSize=10;" edge="1" parent="1" source="depth" target="kfsel"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e19" style="endArrow=block;html=1;strokeColor=#e25fa4;strokeWidth=2;" edge="1" parent="1" source="kfsel" target="fex"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e20" style="endArrow=block;html=1;strokeColor=#e25fa4;strokeWidth=2;" edge="1" parent="1" source="fex" target="bow"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e21" style="endArrow=block;html=1;strokeColor=#e25fa4;strokeWidth=2;" edge="1" parent="1" source="bow" target="bay"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e22" value="candidate KF" style="endArrow=block;html=1;strokeColor=#e25fa4;strokeWidth=2;fontColor=#ffb0d8;fontSize=10;" edge="1" parent="1" source="bay" target="pnp"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e23" value="loop edge T_loop_curr" style="endArrow=block;html=1;strokeColor=#e25fa4;strokeWidth=2;fontColor=#ffb0d8;fontSize=10;" edge="1" parent="1" source="pnp" target="pg"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e24" style="endArrow=classic;startArrow=classic;html=1;strokeColor=#e25fa4;strokeWidth=1;dashed=1;" edge="1" parent="1" source="mem" target="bay"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e25" style="endArrow=block;html=1;strokeColor=#e25fa4;strokeWidth=2;" edge="1" parent="1" source="pg" target="poses"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e26" style="endArrow=block;html=1;strokeColor=#e25fa4;strokeWidth=2;" edge="1" parent="1" source="pg" target="corr"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e27" value="depth + pose" style="endArrow=block;html=1;strokeColor=#8aa0e8;strokeWidth=1;dashed=1;fontColor=#cfd8ff;fontSize=10;" edge="1" parent="1" source="depth" target="pcl"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e28" style="endArrow=block;html=1;strokeColor=#8aa0e8;strokeWidth=1;dashed=1;" edge="1" parent="1" source="poses" target="pcl"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e29" value="all streams" style="endArrow=block;html=1;strokeColor=#8aa0e8;strokeWidth=2;fontColor=#cfd8ff;fontSize=10;" edge="1" parent="1" source="posev" target="rec"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e30" style="endArrow=block;html=1;strokeColor=#8aa0e8;strokeWidth=2;" edge="1" parent="1" source="poses" target="rec"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e31" style="endArrow=block;html=1;strokeColor=#8aa0e8;strokeWidth=2;" edge="1" parent="1" source="corr" target="rec"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e32" style="endArrow=block;html=1;strokeColor=#8aa0e8;strokeWidth=2;" edge="1" parent="1" source="pcl" target="rec"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e33" style="endArrow=block;html=1;strokeColor=#8aa0e8;strokeWidth=2;" edge="1" parent="1" source="rec" target="derived"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e34" value="persist on close" style="endArrow=block;html=1;strokeColor=#8aa0e8;strokeWidth=2;dashed=1;fontColor=#cfd8ff;fontSize=10;" edge="1" parent="1" source="mem" target="db"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e35" style="endArrow=block;html=1;strokeColor=#8aa0e8;strokeWidth=2;" edge="1" parent="1" source="db" target="ext"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e36" style="endArrow=block;html=1;strokeColor=#8aa0e8;strokeWidth=2;" edge="1" parent="1" source="ext" target="kfjl"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e37" style="endArrow=block;html=1;strokeColor=#8aa0e8;strokeWidth=1;dashed=1;" edge="1" parent="1" source="rec" target="viz"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e38" style="endArrow=block;html=1;strokeColor=#8aa0e8;strokeWidth=1;dashed=1;" edge="1" parent="1" source="kfjl" target="viz"><mxGeometry relative="1" as="geometry" /></mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
