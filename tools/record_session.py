@@ -82,6 +82,10 @@ def main() -> int:
                     help="record every Nth stereo frame (1 = keep all)")
     ap.add_argument("-f", "--force", action="store_true",
                     help="delete out_dir if it already exists")
+    ap.add_argument("--no-pcl", action="store_true",
+                    help="disable RTABMap point cloud publishing (saves disk)")
+    ap.add_argument("--no-features", action="store_true",
+                    help="disable FeatureTracker overlay stream")
     args = ap.parse_args()
 
     import depthai as dai  # lazy
@@ -117,6 +121,7 @@ def main() -> int:
         stereo = p.create(dai.node.StereoDepth)
         vio = p.create(dai.node.BasaltVIO)
         slam = p.create(dai.node.RTABMapSLAM)
+        ft = None if args.no_features else p.create(dai.node.FeatureTracker)
 
         imu.enableIMUSensor(
             [dai.IMUSensor.ACCELEROMETER_RAW, dai.IMUSensor.GYROSCOPE_RAW],
@@ -142,8 +147,8 @@ def main() -> int:
             "Mem/IncrementalMemory": "true",
         })
         slam.setPublishGrid(False)
-        slam.setPublishObstacleCloud(False)
-        slam.setPublishGroundCloud(False)
+        slam.setPublishObstacleCloud(not args.no_pcl)
+        slam.setPublishGroundCloud(not args.no_pcl)
 
         left.requestOutput((args.width, args.height)).link(stereo.left)
         right.requestOutput((args.width, args.height)).link(stereo.right)
@@ -153,6 +158,8 @@ def main() -> int:
         stereo.depth.link(slam.depth)
         stereo.rectifiedLeft.link(slam.rect)
         vio.transform.link(slam.odom)
+        if ft is not None:
+            stereo.rectifiedLeft.link(ft.inputImage)
 
         # Fan-out: tap every stream we need for C0/C1/C2/C3.
         q_left = stereo.rectifiedLeft.createOutputQueue()
@@ -162,6 +169,9 @@ def main() -> int:
         q_vio = vio.transform.createOutputQueue()
         q_slam = slam.transform.createOutputQueue()
         q_corr = slam.odomCorrection.createOutputQueue()
+        q_feat = ft.outputFeatures.createOutputQueue() if ft is not None else None
+        q_obs_pcl = None if args.no_pcl else slam.obstaclePCL.createOutputQueue()
+        q_gnd_pcl = None if args.no_pcl else slam.groundPCL.createOutputQueue()
 
         p.start()
 
@@ -272,6 +282,31 @@ def main() -> int:
                 pos, quat = _quat_from_transform(corr_msg)
                 rec.on_odom_correction(pos, quat, ts_ns=rec.now_ns())
 
+            if q_feat is not None:
+                feat_msg = q_feat.tryGet()
+                if feat_msg is not None:
+                    got_any = True
+                    pts = [(f.position.x, f.position.y, f.id, f.age)
+                           for f in feat_msg.trackedFeatures]
+                    rec.on_features(pts, ts_ns=rec.now_ns())
+
+            for q, kind in (
+                (q_obs_pcl, "obstacle"),
+                (q_gnd_pcl, "ground"),
+            ):
+                if q is None:
+                    continue
+                pcl_msg = q.tryGet()
+                if pcl_msg is not None:
+                    got_any = True
+                    try:
+                        pts = pcl_msg.getPoints()  # Nx3 float
+                        if pts is not None and len(pts):
+                            rec.on_pointcloud(np.asarray(pts), kind=kind,
+                                              ts_ns=rec.now_ns())
+                    except Exception:
+                        pass
+
             if not got_any:
                 time.sleep(0.002)
 
@@ -281,7 +316,8 @@ def main() -> int:
                     f"[record] t={now-t_start:5.1f}s  "
                     f"frames={rec._frame_seq}  imu={rec._imu_seq}  "
                     f"vio={rec._vio_seq}  slam={rec._slam_seq}  "
-                    f"corr={rec._corr_seq}",
+                    f"corr={rec._corr_seq}  feat={rec._feat_seq}  "
+                    f"pcl={rec._pcl_seq}",
                     flush=True,
                 )
 
@@ -292,6 +328,8 @@ def main() -> int:
     print(f"  vio:    {rec._vio_seq}")
     print(f"  slam:   {rec._slam_seq}")
     print(f"  corr:   {rec._corr_seq}")
+    print(f"  feat:   {rec._feat_seq}")
+    print(f"  pcl:    {rec._pcl_seq}")
     return 0
 
 

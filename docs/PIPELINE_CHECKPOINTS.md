@@ -41,7 +41,7 @@ output từng giai đoạn với baseline để debug và đo accuracy.
 | C4 | Keyframe selected | L2 | jsonl | kf_event | Compare KF selection policy |
 | C5 | Loop closure detected | L2 | jsonl | loop_event | Compare loop detection recall/precision |
 | C6 | Tracking lost / recovered | L2 | jsonl | track_event | Compare robustness |
-| C7 | Frontend features per frame | L3 | jsonl | features | (chỉ khi skyslam, không record từ Basalt) |
+| C7 | Frontend features per frame | L3 | jsonl | features | Visualize tracked corners; compare frontend |
 | C8 | IMU preintegration delta | L3 | jsonl | imu_preint | (chỉ skyslam) |
 | C9 | Optimizer state | L4 | binary | optim_state | (chỉ skyslam) |
 
@@ -143,6 +143,31 @@ Same schema as C2, `source = rtabmap_slam` hoặc `sky_slam`.
 
 - Derive bằng cách scan SLAM pose stream tìm gap > `TRACK_GAP_S` (default
   0.5s). Done trong `SessionRecorder.close()`.
+
+### C7 — features (tracked corners on rectified-left)
+
+```jsonl
+{"ts_ns": ..., "seq": 42, "n": 87,
+ "pts": [[x_px, y_px, track_id, age], ...]}
+```
+
+- Source: separate `dai.node.FeatureTracker` (Harris/Shi-Tomasi) tapping
+  the rectified-left stream. Independent of Basalt's internal tracker.
+- Mục đích: visualize trong viewer (overlay xanh lên ảnh left) + sau này
+  so sánh chất lượng frontend của skyslam vs depthai stock tracker.
+- Disable với `record_session --no-features` nếu không cần.
+
+### Point cloud (RTABMap obstacle + ground)
+
+Index `basalt/pointcloud.jsonl`:
+```jsonl
+{"ts_ns": ..., "seq": 0, "kind": "obstacle", "n_points": 5421,
+ "path": "pointcloud/000000_obstacle.f32"}
+```
+- Binary file: raw `Nx3 float32` little-endian, world (FLU map) frame.
+- RTABMap publish lại TOÀN BỘ cloud mỗi keyframe → viewer chỉ load
+  emission gần nhất per kind (tránh trùng).
+- Disable với `record_session --no-pcl`.
 
 ### C7-C9 — chỉ implement khi skyslam tự viết
 

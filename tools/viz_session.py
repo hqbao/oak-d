@@ -92,6 +92,38 @@ def _frame_ts_array(frames: list[dict]) -> np.ndarray:
             if frames else np.zeros(0))
 
 
+def _load_features(path: Path) -> tuple[np.ndarray, list[np.ndarray]]:
+    """Returns (ts_s array, list of Nx2 px arrays — one per frame)."""
+    recs = _load_jsonl(path)
+    if not recs:
+        return np.zeros(0), []
+    ts = np.array([r["ts_ns"] for r in recs], dtype=np.float64) / 1e9
+    pts = [np.array([[p[0], p[1]] for p in r["pts"]], dtype=np.float32)
+           if r["n"] else np.zeros((0, 2), dtype=np.float32) for r in recs]
+    return ts, pts
+
+
+def _load_pointclouds(session_dir: Path) -> np.ndarray:
+    """Concatenate every .f32 dump under basalt/pointcloud/ into one Nx3.
+    Returns empty array if no PCL recorded."""
+    idx_path = session_dir / "basalt" / "pointcloud.jsonl"
+    recs = _load_jsonl(idx_path)
+    if not recs:
+        return np.zeros((0, 3), dtype=np.float32)
+    # Use only the most recent emission per kind to avoid duplicate accumulation
+    # (RTABMap republishes the FULL cloud on each emit).
+    latest: dict[str, dict] = {}
+    for r in recs:
+        latest[r.get("kind", "obstacle")] = r
+    arrs = []
+    for r in latest.values():
+        p = session_dir / "basalt" / r["path"]
+        if p.exists():
+            arrs.append(np.fromfile(p, dtype=np.float32).reshape(-1, 3))
+    return np.concatenate(arrs, axis=0) if arrs else np.zeros((0, 3),
+                                                              dtype=np.float32)
+
+
 # ============================================================================
 # Playhead (shared timeline)
 # ============================================================================
@@ -196,14 +228,23 @@ class OverviewTab(QWidget):
 
 
 class FrameTab(QWidget):
-    """C0: stereo left + right + depth colormap; driven by Playhead."""
+    """C0: stereo left + right + depth colormap; driven by Playhead.
+
+    If ``features`` is provided, tracked corners are overlaid on the left
+    image (green circles) — nearest record by timestamp.
+    """
 
     def __init__(self, session_dir: Path, frames: list[dict],
-                 t_offset: float, parent=None) -> None:
+                 t_offset: float,
+                 feat_ts: np.ndarray | None = None,
+                 feat_pts: list[np.ndarray] | None = None,
+                 parent=None) -> None:
         super().__init__(parent)
         self.session_dir = session_dir
         self.frames = frames
         self.ts = _frame_ts_array(frames) - t_offset
+        self.feat_ts = (feat_ts - t_offset) if feat_ts is not None and len(feat_ts) else np.zeros(0)
+        self.feat_pts = feat_pts or []
         self._last_idx = -1
 
         lay = QVBoxLayout(self)
@@ -266,7 +307,27 @@ class FrameTab(QWidget):
         right = cv2.imread(str(base / rec["right_path"]), cv2.IMREAD_GRAYSCALE)
         depth = np.fromfile(base / rec["depth_path"], dtype="<u2").reshape(h, w)
 
-        self._set_gray(self.lbl_left["img"], left)
+        # Overlay tracked features on LEFT image (C7).
+        left_disp = left
+        n_feat = 0
+        if len(self.feat_ts):
+            fi = int(np.searchsorted(self.feat_ts, t_query))
+            if fi >= len(self.feat_ts):
+                fi = len(self.feat_ts) - 1
+            elif fi > 0 and (t_query - self.feat_ts[fi - 1]) < (self.feat_ts[fi] - t_query):
+                fi -= 1
+            pts = self.feat_pts[fi]
+            n_feat = len(pts)
+            if n_feat:
+                left_disp = cv2.cvtColor(left, cv2.COLOR_GRAY2BGR)
+                for x, y in pts:
+                    cv2.circle(left_disp, (int(x), int(y)), 3,
+                               (0, 255, 0), 1, cv2.LINE_AA)
+
+        if left_disp.ndim == 2:
+            self._set_gray(self.lbl_left["img"], left_disp)
+        else:
+            self._set_bgr(self.lbl_left["img"], left_disp)
         self._set_gray(self.lbl_right["img"], right)
         self._set_depth(self.lbl_depth["img"], depth)
 
@@ -277,8 +338,19 @@ class FrameTab(QWidget):
             f"t={ts_frame:7.3f}s ({skew_ms:+.0f}ms)   {w}x{h}   "
             f"depth: valid={int((depth > 0).sum())}/{w*h}  "
             f"min={int(depth[depth>0].min()) if (depth>0).any() else 0}mm  "
-            f"max={int(depth.max())}mm"
+            f"max={int(depth.max())}mm   feats={n_feat}"
         )
+
+    @staticmethod
+    def _set_bgr(label: QLabel, img: np.ndarray) -> None:
+        h, w = img.shape[:2]
+        rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        qimg = QImage(rgb.tobytes(), w, h, 3 * w, QImage.Format.Format_RGB888)
+        pm = QPixmap.fromImage(qimg).scaled(
+            label.size(), Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        label.setPixmap(pm)
 
     @staticmethod
     def _set_gray(label: QLabel, img: np.ndarray | None) -> None:
@@ -375,6 +447,7 @@ class PoseTab(QWidget):
     """C2/C3: 3D trajectory + pos/quat timeseries with live markers."""
 
     def __init__(self, vio: dict, slam: dict, t_offset: float,
+                 pcl: np.ndarray | None = None,
                  parent=None) -> None:
         super().__init__(parent)
         self._vio_ts = vio["ts_s"] - t_offset
@@ -421,6 +494,18 @@ class PoseTab(QWidget):
                 pos=slam["pos"].astype(np.float32),
                 color=pg.glColor(theme.GOOD), width=2, antialias=True,
             ))
+        # RTABMap point cloud (obstacle + ground, in world frame).
+        if pcl is not None and len(pcl):
+            # Sub-sample if huge so OpenGL doesn't stall.
+            if len(pcl) > 200_000:
+                idx = np.random.choice(len(pcl), 200_000, replace=False)
+                pcl_draw = pcl[idx]
+            else:
+                pcl_draw = pcl
+            gl_widget.addItem(gl.GLScatterPlotItem(
+                pos=pcl_draw.astype(np.float32),
+                color=(0.6, 0.6, 0.9, 0.35), size=2.0, pxMode=True,
+            ))
         # Live position markers
         self._mark_vio = gl.GLScatterPlotItem(
             pos=np.zeros((1, 3), dtype=np.float32),
@@ -435,7 +520,8 @@ class PoseTab(QWidget):
 
         legend = QLabel(
             f'<span style="color:{theme.WARN}">●</span> VIO (Basalt)   '
-            f'<span style="color:{theme.GOOD}">●</span> SLAM (RTABMap)'
+            f'<span style="color:{theme.GOOD}">●</span> SLAM (RTABMap)   '
+            f'<span style="color:#9999ff">·</span> point cloud ({len(pcl) if pcl is not None else 0:,} pts)'
         )
         legend.setStyleSheet(f"color:{theme.TEXT}; padding:4px;")
 
@@ -738,6 +824,8 @@ class SessionViewer(QMainWindow):
         slam = _stack_poses(_load_jsonl(session_dir / "basalt" / "slam_pose.jsonl"))
         loop_events = _load_jsonl(session_dir / "basalt" / "loop_events.jsonl")
         track_events = _load_jsonl(session_dir / "basalt" / "track_events.jsonl")
+        feat_ts, feat_pts = _load_features(session_dir / "basalt" / "features.jsonl")
+        pcl = _load_pointclouds(session_dir)
 
         # Shared timeline rebased to 0
         starts, ends = [], []
@@ -757,9 +845,10 @@ class SessionViewer(QMainWindow):
             imu_n=len(imu["ts_s"]), frame_n=len(frames),
             vio_n=len(vio["ts_s"]), slam_n=len(slam["ts_s"]),
         )
-        self.tab_frame = FrameTab(session_dir, frames, t_offset)
+        self.tab_frame = FrameTab(session_dir, frames, t_offset,
+                                  feat_ts=feat_ts, feat_pts=feat_pts)
         self.tab_imu = IMUTab(imu, t_offset)
-        self.tab_pose = PoseTab(vio, slam, t_offset)
+        self.tab_pose = PoseTab(vio, slam, t_offset, pcl=pcl)
         self.tab_events = EventsTab(loop_events, track_events, t_offset, t_end)
 
         tabs = QTabWidget()
