@@ -20,10 +20,17 @@ oak-d/
       panels.py        telemetry side-panel
       mainwindow.py    top-level QMainWindow + toolbar (view presets)
   tools/
-    view_pose3d.py     entry — launches the 3D viewer
+    view_pose3d.py       live 3D viewer from OAK over USB (run.sh entry)
+    record_session.py    dump C0..C6 + PCL from a live run to sessions/<name>/
+    viz_session.py       offline multi-tab replay of a recorded session
+    compare_sessions.py  ATE/RPE between two pose streams (VIO vs SLAM, etc.)
+    baseline_report.py   scan sessions/gold/, emit Markdown baseline report
   run.sh
   requirements.txt
 ```
+
+See `docs/PIPELINE_CHECKPOINTS.md` for the recording schema + migration
+plan, and `docs/GOLD_SESSIONS.md` for the regression suite scenarios.
 
 ## Camera mount
 
