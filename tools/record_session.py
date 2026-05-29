@@ -80,14 +80,22 @@ def main() -> int:
     ap.add_argument("--imu-rate", type=int, default=200)
     ap.add_argument("--every-n", type=int, default=1,
                     help="record every Nth stereo frame (1 = keep all)")
+    ap.add_argument("-f", "--force", action="store_true",
+                    help="delete out_dir if it already exists")
     args = ap.parse_args()
 
     import depthai as dai  # lazy
 
     out = Path(args.out_dir).resolve()
     if out.exists() and any(out.iterdir()):
-        print(f"refusing to record into non-empty folder: {out}", file=sys.stderr)
-        return 2
+        if args.force:
+            import shutil
+            shutil.rmtree(out)
+            print(f"[record] wiped existing folder: {out}", file=sys.stderr)
+        else:
+            print(f"refusing to record into non-empty folder: {out} "
+                  f"(use -f to overwrite)", file=sys.stderr)
+            return 2
 
     rec: SessionRecorder | None = None
     stop = {"flag": False}
