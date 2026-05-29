@@ -314,6 +314,7 @@ class FrameTab(QWidget):
         depth = np.fromfile(base / rec["depth_path"], dtype="<u2").reshape(h, w)
 
         # Overlay tracked features on LEFT image (C7).
+        # Color = depth at that pixel (Turbo: near=red, far=blue, none=gray).
         left_disp = left
         n_feat = 0
         if len(self.feat_ts):
@@ -326,9 +327,39 @@ class FrameTab(QWidget):
             n_feat = len(pts)
             if n_feat:
                 left_disp = cv2.cvtColor(left, cv2.COLOR_GRAY2BGR)
-                for x, y in pts:
-                    cv2.circle(left_disp, (int(x), int(y)), 3,
-                               (0, 255, 0), 1, cv2.LINE_AA)
+                # Depth lookup with a small 3x3 max-window to dodge invalid
+                # pixels right on the corner.
+                xs = np.clip(pts[:, 0].astype(np.int32), 1, w - 2)
+                ys = np.clip(pts[:, 1].astype(np.int32), 1, h - 2)
+                # gather a 3x3 neighborhood per point, take the closest valid
+                depths_mm = np.zeros(n_feat, dtype=np.uint16)
+                for k, (x, y) in enumerate(zip(xs, ys)):
+                    patch = depth[y - 1:y + 2, x - 1:x + 2]
+                    valid = patch[patch > 0]
+                    if valid.size:
+                        depths_mm[k] = int(valid.min())
+                # Normalize against scene range (5cm..6m) for stable colors.
+                d_min_mm, d_max_mm = 500, 6000
+                valid_mask = depths_mm > 0
+                norm = np.zeros(n_feat, dtype=np.uint8)
+                if valid_mask.any():
+                    d_clip = np.clip(depths_mm[valid_mask].astype(np.float32),
+                                     d_min_mm, d_max_mm)
+                    norm[valid_mask] = (
+                        (d_clip - d_min_mm) / (d_max_mm - d_min_mm) * 255.0
+                    ).astype(np.uint8)
+                # Turbo colormap: 256 colors (BGR)
+                lut = cv2.applyColorMap(
+                    np.arange(256, dtype=np.uint8).reshape(-1, 1),
+                    cv2.COLORMAP_TURBO,
+                ).reshape(-1, 3)
+                for (x_, y_), v, ok in zip(pts, norm, valid_mask):
+                    if ok:
+                        c = tuple(int(x) for x in lut[v])
+                    else:
+                        c = (128, 128, 128)  # gray = no depth
+                    cv2.circle(left_disp, (int(x_), int(y_)), 3, c, -1,
+                               cv2.LINE_AA)
 
         if left_disp.ndim == 2:
             self._set_gray(self.lbl_left["img"], left_disp)
