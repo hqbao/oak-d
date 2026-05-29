@@ -161,6 +161,7 @@ def main() -> int:
         q_imu = imu.out.createOutputQueue()
         q_vio = vio.transform.createOutputQueue()
         q_slam = slam.transform.createOutputQueue()
+        q_corr = slam.odomCorrection.createOutputQueue()
 
         p.start()
 
@@ -265,6 +266,12 @@ def main() -> int:
                 pos, quat = _quat_from_transform(slam_msg)
                 rec.on_slam_pose(pos, quat, ts_ns=rec.now_ns())
 
+            corr_msg = q_corr.tryGet()
+            if corr_msg is not None:
+                got_any = True
+                pos, quat = _quat_from_transform(corr_msg)
+                rec.on_odom_correction(pos, quat, ts_ns=rec.now_ns())
+
             if not got_any:
                 time.sleep(0.002)
 
@@ -273,7 +280,8 @@ def main() -> int:
                 print(
                     f"[record] t={now-t_start:5.1f}s  "
                     f"frames={rec._frame_seq}  imu={rec._imu_seq}  "
-                    f"vio={rec._vio_seq}  slam={rec._slam_seq}",
+                    f"vio={rec._vio_seq}  slam={rec._slam_seq}  "
+                    f"corr={rec._corr_seq}",
                     flush=True,
                 )
 
@@ -283,6 +291,7 @@ def main() -> int:
     print(f"  imu:    {rec._imu_seq}")
     print(f"  vio:    {rec._vio_seq}")
     print(f"  slam:   {rec._slam_seq}")
+    print(f"  corr:   {rec._corr_seq}")
     return 0
 
 

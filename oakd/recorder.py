@@ -12,6 +12,9 @@ Folder layout follows ``docs/PIPELINE_CHECKPOINTS.md``::
       basalt/
         vio_pose.jsonl                (C2: Basalt VIO, FLU world)
         slam_pose.jsonl               (C3: RTABMap SLAM, FLU world)
+        odom_correction.jsonl         (raw map<-odom transform stream)
+        loop_events.jsonl             (C5: derived in close() from odom_correction)
+        track_events.jsonl            (C6: derived in close() from slam pose gaps)
 
 All ``ts_ns`` values are host-monotonic nanoseconds from the recorder's t0.
 All poses are stored in the **FLU world** frame as emitted by Basalt /
@@ -56,12 +59,18 @@ class SessionRecorder:
         self._f_frames = (self.out_dir / "input" / "frames.jsonl").open("w", buffering=1)
         self._f_vio = (self.basalt_dir / "vio_pose.jsonl").open("w", buffering=1)
         self._f_slam = (self.basalt_dir / "slam_pose.jsonl").open("w", buffering=1)
+        self._f_corr = (self.basalt_dir / "odom_correction.jsonl").open("w", buffering=1)
 
         self._frame_seq = 0
         self._imu_seq = 0
         self._vio_seq = 0
         self._slam_seq = 0
+        self._corr_seq = 0
         self._closed = False
+
+        # In-memory snapshots used for post-process event derivation in close().
+        self._slam_pose_log: list[tuple[int, np.ndarray, np.ndarray]] = []
+        self._corr_log: list[tuple[int, np.ndarray, np.ndarray]] = []
 
     # ---------------- timing ----------------
 
@@ -183,8 +192,38 @@ class SessionRecorder:
             seq = self._slam_seq
             self._slam_seq += 1
             ts = self.now_ns() if ts_ns is None else int(ts_ns)
+            self._slam_pose_log.append((
+                ts, np.asarray(pos_flu, dtype=np.float64),
+                np.asarray(quat_wxyz, dtype=np.float64),
+            ))
         self._write_pose(self._f_slam, seq, ts, pos_flu, quat_wxyz,
                          "rtabmap_slam", tracking_ok)
+
+    # ---------------- odom correction (raw stream for C5 derivation) ----------------
+
+    def on_odom_correction(
+        self,
+        pos_flu: Sequence[float],
+        quat_wxyz: Sequence[float],
+        ts_ns: int | None = None,
+    ) -> None:
+        """map<-odom correction transform from RTABMap. Big jumps = loop closure."""
+        with self._lock:
+            if self._closed:
+                return
+            seq = self._corr_seq
+            self._corr_seq += 1
+            ts = self.now_ns() if ts_ns is None else int(ts_ns)
+            p = np.asarray(pos_flu, dtype=np.float64)
+            q = np.asarray(quat_wxyz, dtype=np.float64)
+            self._corr_log.append((ts, p, q))
+        rec = {
+            "ts_ns": ts,
+            "seq": seq,
+            "pos": [float(x) for x in p],
+            "quat_wxyz": [float(x) for x in q],
+        }
+        self._f_corr.write(json.dumps(rec) + "\n")
 
     # ---------------- shutdown ----------------
 
@@ -194,12 +233,18 @@ class SessionRecorder:
                 return
             self._closed = True
             duration_s = self.now_ns() / 1e9
-            for fp in (self._f_imu, self._f_frames, self._f_vio, self._f_slam):
+            for fp in (self._f_imu, self._f_frames, self._f_vio,
+                       self._f_slam, self._f_corr):
                 try:
                     fp.flush()
                     fp.close()
                 except Exception:
                     pass
+
+        # Derive C5 (loop closure) + C6 (tracking) events post-hoc.
+        loop_n = self._derive_loop_events()
+        track_n = self._derive_tracking_events()
+
         meta = {
             "session_id": self.out_dir.name,
             "pipeline": self._pipeline,
@@ -210,9 +255,82 @@ class SessionRecorder:
                 "imu_samples": self._imu_seq,
                 "vio_poses": self._vio_seq,
                 "slam_poses": self._slam_seq,
+                "odom_corrections": self._corr_seq,
+                "loop_events": loop_n,
+                "tracking_events": track_n,
             },
             "params": self._params,
             "created_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
         }
         with (self.out_dir / "meta.json").open("w") as f:
             json.dump(meta, f, indent=2)
+
+    # ---------------- event derivation ----------------
+
+    # Threshold above which a jump in odomCorrection is treated as a loop closure.
+    LOOP_POS_JUMP_M = 0.05
+    LOOP_ROT_JUMP_DEG = 2.0
+    # If two consecutive SLAM poses are further apart than this in time, the
+    # tracking is considered lost between them.
+    TRACK_GAP_S = 0.5
+
+    def _derive_loop_events(self) -> int:
+        """Scan odomCorrection stream; emit a loop_event whenever the
+        correction jumps more than the threshold from the previous sample."""
+        path = self.basalt_dir / "loop_events.jsonl"
+        n_events = 0
+        prev_p, prev_q = None, None
+        with path.open("w") as f:
+            for ts, p, q in self._corr_log:
+                if prev_p is None:
+                    prev_p, prev_q = p, q
+                    continue
+                d_pos = float(np.linalg.norm(p - prev_p))
+                # quaternion angular distance (smallest)
+                dot = float(np.clip(abs(np.dot(prev_q, q)), -1.0, 1.0))
+                d_rot_deg = float(np.degrees(2.0 * np.arccos(dot)))
+                if d_pos > self.LOOP_POS_JUMP_M or d_rot_deg > self.LOOP_ROT_JUMP_DEG:
+                    rec = {
+                        "ts_ns": ts,
+                        "event": "loop_closure",
+                        "pos_jump_m": d_pos,
+                        "rot_jump_deg": d_rot_deg,
+                        "correction_pos": [float(x) for x in p],
+                        "correction_quat_wxyz": [float(x) for x in q],
+                    }
+                    f.write(json.dumps(rec) + "\n")
+                    n_events += 1
+                prev_p, prev_q = p, q
+        return n_events
+
+    def _derive_tracking_events(self) -> int:
+        """Scan SLAM pose stream; emit lost/recovered events around gaps."""
+        path = self.basalt_dir / "track_events.jsonl"
+        n_events = 0
+        prev_ts: int | None = None
+        prev_seq: int | None = None
+        lost = False
+        with path.open("w") as f:
+            for seq, (ts, _p, _q) in enumerate(self._slam_pose_log):
+                if prev_ts is not None:
+                    dt_s = (ts - prev_ts) / 1e9
+                    if not lost and dt_s > self.TRACK_GAP_S:
+                        f.write(json.dumps({
+                            "ts_ns": prev_ts,
+                            "event": "tracking_lost",
+                            "gap_s": dt_s,
+                            "last_pose_seq": prev_seq,
+                        }) + "\n")
+                        n_events += 1
+                        lost = True
+                    elif lost and dt_s <= self.TRACK_GAP_S:
+                        f.write(json.dumps({
+                            "ts_ns": ts,
+                            "event": "tracking_recovered",
+                            "first_pose_seq": seq,
+                        }) + "\n")
+                        n_events += 1
+                        lost = False
+                prev_ts = ts
+                prev_seq = seq
+        return n_events

@@ -12,6 +12,7 @@ Tabs
 - C0 Frame   : rectified-left, rectified-right, depth colormap
 - C1 IMU     : 6-channel gyro + accel time series
 - C2/C3 Pose : 3D trajectory (VIO vs SLAM overlay) + pos/quat timeseries
+- C5/C6 Evts : loop closures (odom_correction jumps) + tracking-lost gaps
 
 Playback bar at the bottom drives all tabs from a shared timeline
 (seconds since the earliest sample across every stream).
@@ -524,6 +525,97 @@ class PoseTab(QWidget):
         )
 
 
+class EventsTab(QWidget):
+    """C5 (loop closures) + C6 (tracking-lost gaps) on a shared time axis.
+
+    Top plot: loop closure jump magnitudes (pos in m, rot in deg) as stems.
+    Bottom plot: tracking-ok timeline (1=ok, 0=lost) derived from track_events.
+    """
+
+    def __init__(self, loop_events: list[dict], track_events: list[dict],
+                 t_offset: float, t_end: float, parent=None) -> None:
+        super().__init__(parent)
+        self._cursors: list[pg.InfiniteLine] = []
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(8, 8, 8, 8)
+
+        info = QLabel(
+            f"loop closures: {len(loop_events)}    "
+            f"tracking events: {len(track_events)}"
+        )
+        info.setObjectName("HeaderSub")
+        lay.addWidget(info)
+
+        pg.setConfigOption("background", theme.BG)
+        pg.setConfigOption("foreground", theme.TEXT)
+
+        # --- loop closure stems ---
+        self.p_loop = pg.PlotWidget(title="C5 · LOOP CLOSURES (odom_correction jump)")
+        self.p_loop.showGrid(x=True, y=True, alpha=0.3)
+        self.p_loop.addLegend()
+        self.p_loop.setLabel("left", "jump")
+        self.p_loop.setLabel("bottom", "time (s)")
+
+        if loop_events:
+            ts = np.array([e["ts_ns"] for e in loop_events], dtype=np.float64) / 1e9 - t_offset
+            pos_j = np.array([e["pos_jump_m"] for e in loop_events])
+            rot_j = np.array([e["rot_jump_deg"] for e in loop_events])
+            # stems: vertical line per event
+            for t, dp, dr in zip(ts, pos_j, rot_j):
+                self.p_loop.plot([t, t], [0, dp],
+                                 pen=pg.mkPen(theme.AXIS_N, width=2))
+                self.p_loop.plot([t, t], [0, dr / 50.0],  # scale rot for overlay
+                                 pen=pg.mkPen(theme.AXIS_E, width=2))
+            # markers + legend handles
+            self.p_loop.plot(ts, pos_j, pen=None,
+                             symbol="o", symbolBrush=theme.AXIS_N,
+                             symbolSize=8, name="pos jump (m)")
+            self.p_loop.plot(ts, rot_j / 50.0, pen=None,
+                             symbol="t", symbolBrush=theme.AXIS_E,
+                             symbolSize=8, name="rot jump (deg ÷ 50)")
+        self.p_loop.setXRange(0.0, max(t_end, 1e-3))
+
+        # --- tracking-ok timeline ---
+        self.p_track = pg.PlotWidget(title="C6 · TRACKING STATE (1=ok, 0=lost)")
+        self.p_track.showGrid(x=True, y=True, alpha=0.3)
+        self.p_track.setLabel("left", "tracking_ok")
+        self.p_track.setLabel("bottom", "time (s)")
+        self.p_track.setYRange(-0.2, 1.2)
+        self.p_track.setXLink(self.p_loop)
+
+        # build step signal from track_events (lost / recovered toggles)
+        ts_track = [0.0]
+        v_track = [1]
+        ok = True
+        for e in sorted(track_events, key=lambda r: r["ts_ns"]):
+            t = e["ts_ns"] / 1e9 - t_offset
+            if e["event"] == "tracking_lost" and ok:
+                ts_track += [t, t]; v_track += [1, 0]; ok = False
+            elif e["event"] == "tracking_recovered" and not ok:
+                ts_track += [t, t]; v_track += [0, 1]; ok = True
+        ts_track.append(max(t_end, 1e-3))
+        v_track.append(v_track[-1])
+        self.p_track.plot(np.array(ts_track), np.array(v_track),
+                          pen=pg.mkPen(theme.GOOD, width=2))
+        self.p_track.setXRange(0.0, max(t_end, 1e-3))
+
+        cursor_pen = pg.mkPen(theme.ACCENT, width=1, style=Qt.PenStyle.DashLine)
+        for p in (self.p_loop, self.p_track):
+            ln = pg.InfiniteLine(pos=0.0, angle=90, pen=cursor_pen, movable=False)
+            p.addItem(ln, ignoreBounds=True)
+            self._cursors.append(ln)
+
+        split = QSplitter(Qt.Orientation.Vertical)
+        split.addWidget(self.p_loop)
+        split.addWidget(self.p_track)
+        lay.addWidget(split, 1)
+
+    def on_time(self, t_s: float) -> None:
+        for ln in self._cursors:
+            ln.setPos(t_s)
+
+
 # ============================================================================
 # Playback bar
 # ============================================================================
@@ -644,6 +736,8 @@ class SessionViewer(QMainWindow):
         imu = _stack_imu(_load_jsonl(session_dir / "input" / "imu.jsonl"))
         vio = _stack_poses(_load_jsonl(session_dir / "basalt" / "vio_pose.jsonl"))
         slam = _stack_poses(_load_jsonl(session_dir / "basalt" / "slam_pose.jsonl"))
+        loop_events = _load_jsonl(session_dir / "basalt" / "loop_events.jsonl")
+        track_events = _load_jsonl(session_dir / "basalt" / "track_events.jsonl")
 
         # Shared timeline rebased to 0
         starts, ends = [], []
@@ -666,18 +760,21 @@ class SessionViewer(QMainWindow):
         self.tab_frame = FrameTab(session_dir, frames, t_offset)
         self.tab_imu = IMUTab(imu, t_offset)
         self.tab_pose = PoseTab(vio, slam, t_offset)
+        self.tab_events = EventsTab(loop_events, track_events, t_offset, t_end)
 
         tabs = QTabWidget()
         tabs.addTab(self.tab_overview, "Overview")
         tabs.addTab(self.tab_frame, "C0 · Frame")
         tabs.addTab(self.tab_imu, "C1 · IMU")
         tabs.addTab(self.tab_pose, "C2/C3 · Pose")
+        tabs.addTab(self.tab_events, "C5/C6 · Events")
 
         bar = PlaybackBar(self.playhead)
 
         self.playhead.timeChanged.connect(self.tab_frame.on_time)
         self.playhead.timeChanged.connect(self.tab_imu.on_time)
         self.playhead.timeChanged.connect(self.tab_pose.on_time)
+        self.playhead.timeChanged.connect(self.tab_events.on_time)
 
         root = QWidget()
         v = QVBoxLayout(root)

@@ -113,25 +113,34 @@ Same schema as C2, `source = rtabmap_slam` hoặc `sky_slam`.
 - RTABMap expose `dataOutputQueue` với keyframe data; phải subscribe để bắt event.
 - `reason` enum: `first_frame` | `translation_threshold` | `rotation_threshold`
   | `feature_drop` | `time_threshold`.
+- **STATUS**: chưa implement live — depthai `RTABMapSLAM` node không expose
+  KF event. Sẽ extract từ SQLite `rtabmap.db` (`Node` table) bằng tool riêng
+  `tools/extract_kf_from_db.py` (TODO, làm sau).
 
 ### C5 — loop_event
 
 ```jsonl
-{"ts_ns": ..., "kf_query": 142, "kf_match": 17,
- "score": 0.87, "inliers": 64,
- "relative_pose": {"pos": [...], "quat_wxyz": [...]}}
+{"ts_ns": ..., "event": "loop_closure",
+ "pos_jump_m": 0.18, "rot_jump_deg": 3.4,
+ "correction_pos": [...], "correction_quat_wxyz": [...]}
 ```
 
-- `score` từ BoW similarity 0..1.
-- `inliers` số RANSAC inlier khi geometric verify.
-- Trong RTABMap đọc qua `Statistics` event hoặc database after run.
+- Detect bằng cách tap output `RTABMapSLAM.odomCorrection` (map←odom transform)
+  và đo delta giữa hai sample liên tiếp. Jump lớn (default
+  `pos > 5 cm` hoặc `rot > 2°`) = loop closure đã apply correction.
+- Schema BoW (`kf_query`, `score`, `inliers`) chỉ available qua SQLite database
+  post-run — sẽ thêm khi viết `extract_kf_from_db.py`.
+- Raw stream được dump song song ở `basalt/odom_correction.jsonl` để debug.
 
 ### C6 — track_event
 
 ```jsonl
-{"ts_ns": ..., "event": "tracking_lost", "last_pose_seq": 142}
+{"ts_ns": ..., "event": "tracking_lost", "last_pose_seq": 142, "gap_s": 0.72}
 {"ts_ns": ..., "event": "tracking_recovered", "first_pose_seq": 158}
 ```
+
+- Derive bằng cách scan SLAM pose stream tìm gap > `TRACK_GAP_S` (default
+  0.5s). Done trong `SessionRecorder.close()`.
 
 ### C7-C9 — chỉ implement khi skyslam tự viết
 
@@ -151,9 +160,10 @@ sessions/
     ├── basalt/                 # output từ pipeline hiện tại
     │   ├── vio_pose.jsonl      # C2
     │   ├── slam_pose.jsonl     # C3
-    │   ├── kf_events.jsonl     # C4
-    │   ├── loop_events.jsonl   # C5
-    │   └── track_events.jsonl  # C6
+    │   ├── odom_correction.jsonl  # raw map<-odom stream (C5 derivation)
+    │   ├── kf_events.jsonl     # C4 (TODO: extract từ rtabmap.db)
+    │   ├── loop_events.jsonl   # C5 (derived from odom_correction jumps)
+    │   └── track_events.jsonl  # C6 (derived from slam pose gaps)
     └── skyslam/                # output từ skyslam tương lai
         ├── vio_pose.jsonl
         ├── slam_pose.jsonl
