@@ -8,10 +8,14 @@ Usage::
 
 Tabs
 ----
-- Overview : meta.json + calib summary + record counts
-- C0 Frame : rectified-left, rectified-right, depth colormap; slider scrub
-- C1 IMU   : 6-channel gyro + accel time series
+- Overview   : meta.json + calib summary + record counts
+- C0 Frame   : rectified-left, rectified-right, depth colormap
+- C1 IMU     : 6-channel gyro + accel time series
 - C2/C3 Pose : 3D trajectory (VIO vs SLAM overlay) + pos/quat timeseries
+
+Playback bar at the bottom drives all tabs from a shared timeline
+(seconds since the earliest sample across every stream).
+Hotkeys: SPACE play/pause, LEFT/RIGHT step ±0.1s, HOME jump to start.
 """
 from __future__ import annotations
 
@@ -25,11 +29,14 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from PyQt6.QtCore import Qt                                  # noqa: E402
-from PyQt6.QtGui import QImage, QPixmap                      # noqa: E402
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal              # noqa: E402
+from PyQt6.QtGui import (                                    # noqa: E402
+    QImage, QKeySequence, QPixmap, QShortcut,
+)
 from PyQt6.QtWidgets import (                                # noqa: E402
-    QApplication, QHBoxLayout, QLabel, QMainWindow, QSlider, QSplitter,
-    QTabWidget, QTextEdit, QVBoxLayout, QWidget,
+    QApplication, QComboBox, QFrame, QHBoxLayout, QLabel, QMainWindow,
+    QPushButton, QSlider, QSplitter, QTabWidget, QTextEdit, QVBoxLayout,
+    QWidget,
 )
 
 import pyqtgraph as pg                                       # noqa: E402
@@ -55,7 +62,6 @@ def _load_jsonl(path: Path) -> list[dict]:
 
 
 def _stack_poses(records: list[dict]) -> dict[str, np.ndarray]:
-    """Return ts_s, pos (N,3), quat (N,4 wxyz)."""
     if not records:
         return {
             "ts_s": np.zeros(0),
@@ -78,6 +84,70 @@ def _stack_imu(records: list[dict]) -> dict[str, np.ndarray]:
     gyro = np.array([r["gyro"] for r in records], dtype=np.float64)
     accel = np.array([r["accel"] for r in records], dtype=np.float64)
     return {"ts_s": ts, "gyro": gyro, "accel": accel}
+
+
+def _frame_ts_array(frames: list[dict]) -> np.ndarray:
+    return (np.array([r["ts_ns"] for r in frames], dtype=np.float64) / 1e9
+            if frames else np.zeros(0))
+
+
+# ============================================================================
+# Playhead (shared timeline)
+# ============================================================================
+
+class Playhead(QWidget):
+    """Master clock. Emits ``timeChanged(t_s)`` at ~30 Hz when playing."""
+
+    timeChanged = pyqtSignal(float)
+
+    def __init__(self, t_start: float, t_end: float, parent=None) -> None:
+        super().__init__(parent)
+        self.t_start = float(t_start)
+        self.t_end = float(max(t_end, t_start + 1e-3))
+        self.t = self.t_start
+        self.speed = 1.0
+        self._playing = False
+        self._tick_dt_ms = 33     # ~30 Hz UI tick
+
+        self._timer = QTimer(self)
+        self._timer.setTimerType(Qt.TimerType.PreciseTimer)
+        self._timer.setInterval(self._tick_dt_ms)
+        self._timer.timeout.connect(self._on_tick)
+
+    def play(self) -> None:
+        if self._playing:
+            return
+        if self.t >= self.t_end - 1e-3:
+            self.t = self.t_start
+        self._playing = True
+        self._timer.start()
+
+    def pause(self) -> None:
+        self._playing = False
+        self._timer.stop()
+
+    def toggle(self) -> None:
+        self.pause() if self._playing else self.play()
+
+    def is_playing(self) -> bool:
+        return self._playing
+
+    def seek(self, t_s: float) -> None:
+        self.t = float(np.clip(t_s, self.t_start, self.t_end))
+        self.timeChanged.emit(self.t)
+
+    def step(self, dt_s: float) -> None:
+        self.seek(self.t + dt_s)
+
+    def set_speed(self, s: float) -> None:
+        self.speed = float(s)
+
+    def _on_tick(self) -> None:
+        self.t += self.speed * (self._tick_dt_ms / 1000.0)
+        if self.t >= self.t_end:
+            self.t = self.t_end
+            self.pause()
+        self.timeChanged.emit(self.t)
 
 
 # ============================================================================
@@ -106,38 +176,34 @@ class OverviewTab(QWidget):
             f"border:1px solid {theme.PANEL_EDGE}; padding:8px;"
         )
 
-        lines = []
-        lines.append("=== META ===")
-        lines.append(json.dumps(meta, indent=2))
-        lines.append("")
-        lines.append("=== COUNTS (actual files) ===")
-        lines.append(f"  frames    : {frame_n}")
-        lines.append(f"  imu       : {imu_n}")
-        lines.append(f"  vio poses : {vio_n}")
-        lines.append(f"  slam poses: {slam_n}")
+        lines = ["=== META ===", json.dumps(meta, indent=2), "",
+                 "=== COUNTS (actual files) ===",
+                 f"  frames    : {frame_n}",
+                 f"  imu       : {imu_n}",
+                 f"  vio poses : {vio_n}",
+                 f"  slam poses: {slam_n}"]
         dur = meta.get("duration_s", 0.0)
         if dur > 0:
-            lines.append("")
-            lines.append("=== RATES (avg) ===")
-            lines.append(f"  frames : {frame_n/dur:6.2f} Hz")
-            lines.append(f"  imu    : {imu_n/dur:6.2f} Hz")
-            lines.append(f"  vio    : {vio_n/dur:6.2f} Hz")
-            lines.append(f"  slam   : {slam_n/dur:6.2f} Hz")
-        lines.append("")
-        lines.append("=== CALIBRATION ===")
-        lines.append(json.dumps(calib, indent=2))
-
+            lines += ["", "=== RATES (avg) ===",
+                      f"  frames : {frame_n/dur:6.2f} Hz",
+                      f"  imu    : {imu_n/dur:6.2f} Hz",
+                      f"  vio    : {vio_n/dur:6.2f} Hz",
+                      f"  slam   : {slam_n/dur:6.2f} Hz"]
+        lines += ["", "=== CALIBRATION ===", json.dumps(calib, indent=2)]
         txt.setPlainText("\n".join(lines))
         lay.addWidget(txt, 1)
 
 
 class FrameTab(QWidget):
-    """C0: stereo left + right + depth colormap; scrub via slider."""
+    """C0: stereo left + right + depth colormap; driven by Playhead."""
 
-    def __init__(self, session_dir: Path, frames: list[dict], parent=None) -> None:
+    def __init__(self, session_dir: Path, frames: list[dict],
+                 t_offset: float, parent=None) -> None:
         super().__init__(parent)
         self.session_dir = session_dir
         self.frames = frames
+        self.ts = _frame_ts_array(frames) - t_offset
+        self._last_idx = -1
 
         lay = QVBoxLayout(self)
         lay.setContentsMargins(8, 8, 8, 8)
@@ -155,17 +221,21 @@ class FrameTab(QWidget):
             img_row.addWidget(grp["frame"], 1)
         lay.addLayout(img_row, 1)
 
-        ctl_row = QHBoxLayout()
-        self.slider = QSlider(Qt.Orientation.Horizontal)
-        self.slider.setMinimum(0)
-        self.slider.setMaximum(max(0, len(frames) - 1))
-        self.slider.valueChanged.connect(self._on_seek)
-        ctl_row.addWidget(QLabel("frame:"))
-        ctl_row.addWidget(self.slider, 1)
-        lay.addLayout(ctl_row)
-
         if frames:
-            self._on_seek(0)
+            self.on_time(0.0)
+
+    def on_time(self, t_s: float) -> None:
+        if not self.frames:
+            return
+        idx = int(np.searchsorted(self.ts, t_s))
+        if idx >= len(self.ts):
+            idx = len(self.ts) - 1
+        elif idx > 0 and (t_s - self.ts[idx - 1]) < (self.ts[idx] - t_s):
+            idx -= 1
+        if idx == self._last_idx:
+            return
+        self._last_idx = idx
+        self._show(idx, t_s)
 
     def _make_img_label(self, title: str) -> dict:
         frame = QWidget()
@@ -187,13 +257,10 @@ class FrameTab(QWidget):
         v.addWidget(img_lbl, 1)
         return {"frame": frame, "title": title_lbl, "img": img_lbl}
 
-    def _on_seek(self, idx: int) -> None:
-        if not self.frames:
-            return
+    def _show(self, idx: int, t_query: float) -> None:
         rec = self.frames[idx]
         w, h = int(rec["width"]), int(rec["height"])
         base = self.session_dir / "input"
-
         left = cv2.imread(str(base / rec["left_path"]), cv2.IMREAD_GRAYSCALE)
         right = cv2.imread(str(base / rec["right_path"]), cv2.IMREAD_GRAYSCALE)
         depth = np.fromfile(base / rec["depth_path"], dtype="<u2").reshape(h, w)
@@ -202,9 +269,11 @@ class FrameTab(QWidget):
         self._set_gray(self.lbl_right["img"], right)
         self._set_depth(self.lbl_depth["img"], depth)
 
-        ts_s = rec["ts_ns"] / 1e9
+        ts_frame = self.ts[idx]
+        skew_ms = (ts_frame - t_query) * 1000.0
         self.info.setText(
-            f"frame  seq={rec['seq']:>5d}   t={ts_s:7.3f}s   {w}x{h}   "
+            f"frame  seq={rec['seq']:>5d}   "
+            f"t={ts_frame:7.3f}s ({skew_ms:+.0f}ms)   {w}x{h}   "
             f"depth: valid={int((depth > 0).sum())}/{w*h}  "
             f"min={int(depth[depth>0].min()) if (depth>0).any() else 0}mm  "
             f"max={int(depth.max())}mm"
@@ -213,8 +282,7 @@ class FrameTab(QWidget):
     @staticmethod
     def _set_gray(label: QLabel, img: np.ndarray | None) -> None:
         if img is None:
-            label.clear()
-            return
+            label.clear(); return
         h, w = img.shape
         qimg = QImage(img.tobytes(), w, h, w, QImage.Format.Format_Grayscale8)
         pm = QPixmap.fromImage(qimg).scaled(
@@ -227,9 +295,7 @@ class FrameTab(QWidget):
     def _set_depth(label: QLabel, depth_u16: np.ndarray) -> None:
         valid = depth_u16 > 0
         if not valid.any():
-            label.clear()
-            return
-        # Normalize valid range to 0..255, invalid stays black
+            label.clear(); return
         vmax = float(depth_u16[valid].max())
         norm = np.zeros_like(depth_u16, dtype=np.uint8)
         norm[valid] = np.clip(
@@ -238,7 +304,6 @@ class FrameTab(QWidget):
         colored = cv2.applyColorMap(norm, cv2.COLORMAP_TURBO)
         colored[~valid] = 0
         h, w = colored.shape[:2]
-        # BGR -> RGB
         rgb = cv2.cvtColor(colored, cv2.COLOR_BGR2RGB)
         qimg = QImage(rgb.tobytes(), w, h, 3 * w, QImage.Format.Format_RGB888)
         pm = QPixmap.fromImage(qimg).scaled(
@@ -249,9 +314,9 @@ class FrameTab(QWidget):
 
 
 class IMUTab(QWidget):
-    """C1: 6-channel gyro + accel time series."""
+    """C1: 6-channel gyro + accel time series; vertical cursor follows time."""
 
-    def __init__(self, imu: dict, parent=None) -> None:
+    def __init__(self, imu: dict, t_offset: float, parent=None) -> None:
         super().__init__(parent)
         lay = QVBoxLayout(self)
         lay.setContentsMargins(8, 8, 8, 8)
@@ -260,13 +325,14 @@ class IMUTab(QWidget):
         info = QLabel(f"IMU samples: {n}" if n else "(no IMU data)")
         info.setObjectName("HeaderSub")
         lay.addWidget(info)
+        self._cursors: list[pg.InfiniteLine] = []
         if n == 0:
             return
 
         pg.setConfigOption("background", theme.BG)
         pg.setConfigOption("foreground", theme.TEXT)
 
-        ts = imu["ts_s"] - imu["ts_s"][0]
+        ts = imu["ts_s"] - t_offset
 
         self.p_gyro = pg.PlotWidget(title="GYRO (rad/s)")
         self.p_gyro.showGrid(x=True, y=True, alpha=0.3)
@@ -286,20 +352,35 @@ class IMUTab(QWidget):
             self.p_acc.plot(ts, imu["accel"][:, i],
                             pen=pg.mkPen(color, width=1), name=name)
 
-        # Link x-axes
         self.p_acc.setXLink(self.p_gyro)
+
+        cursor_pen = pg.mkPen(theme.ACCENT, width=1, style=Qt.PenStyle.DashLine)
+        for p in (self.p_gyro, self.p_acc):
+            ln = pg.InfiniteLine(pos=0.0, angle=90, pen=cursor_pen, movable=False)
+            p.addItem(ln, ignoreBounds=True)
+            self._cursors.append(ln)
 
         split = QSplitter(Qt.Orientation.Vertical)
         split.addWidget(self.p_gyro)
         split.addWidget(self.p_acc)
         lay.addWidget(split, 1)
 
+    def on_time(self, t_s: float) -> None:
+        for ln in self._cursors:
+            ln.setPos(t_s)
+
 
 class PoseTab(QWidget):
-    """C2/C3: 3D trajectory + position/quaternion timeseries (overlay)."""
+    """C2/C3: 3D trajectory + pos/quat timeseries with live markers."""
 
-    def __init__(self, vio: dict, slam: dict, parent=None) -> None:
+    def __init__(self, vio: dict, slam: dict, t_offset: float,
+                 parent=None) -> None:
         super().__init__(parent)
+        self._vio_ts = vio["ts_s"] - t_offset
+        self._vio_pos = vio["pos"]
+        self._slam_ts = slam["ts_s"] - t_offset
+        self._slam_pos = slam["pos"]
+
         lay = QVBoxLayout(self)
         lay.setContentsMargins(8, 8, 8, 8)
 
@@ -317,22 +398,18 @@ class PoseTab(QWidget):
         gl_widget = gl.GLViewWidget()
         gl_widget.setBackgroundColor(theme.BG)
         gl_widget.setCameraPosition(distance=10, elevation=25, azimuth=-60)
-        # ground grid
         grid = gl.GLGridItem()
         grid.setColor(pg.mkColor(theme.GRID))
-        grid.setSize(20, 20)
-        grid.setSpacing(1, 1)
+        grid.setSize(20, 20); grid.setSpacing(1, 1)
         gl_widget.addItem(grid)
-        # world axes
         ax_len = 1.0
         for v, color in (((ax_len, 0, 0), theme.AXIS_N),
                          ((0, ax_len, 0), theme.AXIS_E),
                          ((0, 0, ax_len), theme.AXIS_U)):
-            ln = gl.GLLinePlotItem(
+            gl_widget.addItem(gl.GLLinePlotItem(
                 pos=np.array([[0, 0, 0], v]),
                 color=pg.glColor(color), width=2, antialias=True,
-            )
-            gl_widget.addItem(ln)
+            ))
         if len(vio["pos"]) >= 2:
             gl_widget.addItem(gl.GLLinePlotItem(
                 pos=vio["pos"].astype(np.float32),
@@ -343,8 +420,18 @@ class PoseTab(QWidget):
                 pos=slam["pos"].astype(np.float32),
                 color=pg.glColor(theme.GOOD), width=2, antialias=True,
             ))
+        # Live position markers
+        self._mark_vio = gl.GLScatterPlotItem(
+            pos=np.zeros((1, 3), dtype=np.float32),
+            color=pg.glColor(theme.WARN), size=14.0, pxMode=True,
+        )
+        self._mark_slam = gl.GLScatterPlotItem(
+            pos=np.zeros((1, 3), dtype=np.float32),
+            color=pg.glColor(theme.GOOD), size=14.0, pxMode=True,
+        )
+        gl_widget.addItem(self._mark_vio)
+        gl_widget.addItem(self._mark_slam)
 
-        # legend overlay (Qt label)
         legend = QLabel(
             f'<span style="color:{theme.WARN}">●</span> VIO (Basalt)   '
             f'<span style="color:{theme.GOOD}">●</span> SLAM (RTABMap)'
@@ -352,69 +439,187 @@ class PoseTab(QWidget):
         legend.setStyleSheet(f"color:{theme.TEXT}; padding:4px;")
 
         left_pane = QWidget()
-        lp = QVBoxLayout(left_pane)
-        lp.setContentsMargins(0, 0, 0, 0)
-        lp.addWidget(legend)
-        lp.addWidget(gl_widget, 1)
+        lp = QVBoxLayout(left_pane); lp.setContentsMargins(0, 0, 0, 0)
+        lp.addWidget(legend); lp.addWidget(gl_widget, 1)
         split.addWidget(left_pane)
 
-        # --- timeseries (pos x/y/z, quat w/x/y/z) ---
+        # --- timeseries ---
         pg.setConfigOption("background", theme.BG)
         pg.setConfigOption("foreground", theme.TEXT)
 
         ts_panel = QWidget()
-        tsv = QVBoxLayout(ts_panel)
-        tsv.setContentsMargins(0, 0, 0, 0)
+        tsv = QVBoxLayout(ts_panel); tsv.setContentsMargins(0, 0, 0, 0)
 
         self.p_pos = pg.PlotWidget(title="POSITION (m, FLU)")
-        self.p_pos.showGrid(x=True, y=True, alpha=0.3)
-        self.p_pos.addLegend()
+        self.p_pos.showGrid(x=True, y=True, alpha=0.3); self.p_pos.addLegend()
         self.p_quat = pg.PlotWidget(title="QUATERNION (wxyz)")
-        self.p_quat.showGrid(x=True, y=True, alpha=0.3)
-        self.p_quat.addLegend()
+        self.p_quat.showGrid(x=True, y=True, alpha=0.3); self.p_quat.addLegend()
         self.p_quat.setXLink(self.p_pos)
 
-        def add_pos(src: dict, label: str, style: int) -> None:
-            if not len(src["ts_s"]):
+        def add_pos(ts, pos, label: str, style) -> None:
+            if not len(ts):
                 return
-            t = src["ts_s"] - src["ts_s"][0]
             for i, (axis, color) in enumerate(
                 (("x", theme.AXIS_N), ("y", theme.AXIS_E), ("z", theme.AXIS_U))
             ):
                 self.p_pos.plot(
-                    t, src["pos"][:, i],
+                    ts, pos[:, i],
                     pen=pg.mkPen(color, width=1, style=style),
                     name=f"{label}.{axis}",
                 )
 
-        def add_quat(src: dict, label: str, style: int) -> None:
-            if not len(src["ts_s"]):
+        def add_quat(ts, quat, label: str, style) -> None:
+            if not len(ts):
                 return
-            t = src["ts_s"] - src["ts_s"][0]
             for i, (axis, color) in enumerate((
                 ("w", theme.TEXT_DIM), ("x", theme.AXIS_N),
                 ("y", theme.AXIS_E), ("z", theme.AXIS_U),
             )):
                 self.p_quat.plot(
-                    t, src["quat"][:, i],
+                    ts, quat[:, i],
                     pen=pg.mkPen(color, width=1, style=style),
                     name=f"{label}.{axis}",
                 )
 
-        add_pos(vio, "vio", Qt.PenStyle.SolidLine)
-        add_pos(slam, "slam", Qt.PenStyle.DashLine)
-        add_quat(vio, "vio", Qt.PenStyle.SolidLine)
-        add_quat(slam, "slam", Qt.PenStyle.DashLine)
+        add_pos(self._vio_ts, vio["pos"], "vio", Qt.PenStyle.SolidLine)
+        add_pos(self._slam_ts, slam["pos"], "slam", Qt.PenStyle.DashLine)
+        add_quat(self._vio_ts, vio["quat"], "vio", Qt.PenStyle.SolidLine)
+        add_quat(self._slam_ts, slam["quat"], "slam", Qt.PenStyle.DashLine)
+
+        cursor_pen = pg.mkPen(theme.ACCENT, width=1, style=Qt.PenStyle.DashLine)
+        self._cursors = []
+        for p in (self.p_pos, self.p_quat):
+            ln = pg.InfiniteLine(pos=0.0, angle=90, pen=cursor_pen, movable=False)
+            p.addItem(ln, ignoreBounds=True)
+            self._cursors.append(ln)
 
         ts_split = QSplitter(Qt.Orientation.Vertical)
-        ts_split.addWidget(self.p_pos)
-        ts_split.addWidget(self.p_quat)
+        ts_split.addWidget(self.p_pos); ts_split.addWidget(self.p_quat)
         tsv.addWidget(ts_split, 1)
         split.addWidget(ts_panel)
-
-        split.setStretchFactor(0, 1)
-        split.setStretchFactor(1, 1)
+        split.setStretchFactor(0, 1); split.setStretchFactor(1, 1)
         lay.addWidget(split, 1)
+
+    @staticmethod
+    def _interp_pos(ts: np.ndarray, pos: np.ndarray, t: float) -> np.ndarray:
+        if len(ts) == 0:
+            return np.zeros(3, dtype=np.float32)
+        if t <= ts[0]:
+            return pos[0].astype(np.float32)
+        if t >= ts[-1]:
+            return pos[-1].astype(np.float32)
+        i = int(np.searchsorted(ts, t))
+        t0, t1 = ts[i - 1], ts[i]
+        a = (t - t0) / max(t1 - t0, 1e-9)
+        return ((1 - a) * pos[i - 1] + a * pos[i]).astype(np.float32)
+
+    def on_time(self, t_s: float) -> None:
+        for ln in self._cursors:
+            ln.setPos(t_s)
+        self._mark_vio.setData(
+            pos=self._interp_pos(self._vio_ts, self._vio_pos, t_s)[None, :]
+        )
+        self._mark_slam.setData(
+            pos=self._interp_pos(self._slam_ts, self._slam_pos, t_s)[None, :]
+        )
+
+
+# ============================================================================
+# Playback bar
+# ============================================================================
+
+class PlaybackBar(QFrame):
+    """Bottom transport: ⏮ |◀ ▶/⏸ ▶| + scrub slider + speed + time label."""
+
+    def __init__(self, playhead: Playhead, parent=None) -> None:
+        super().__init__(parent)
+        self.setObjectName("Panel")
+        self.ph = playhead
+        self._scrubbing = False
+
+        self.setStyleSheet(
+            f"#Panel {{ background:{theme.PANEL}; "
+            f"border-top:1px solid {theme.PANEL_EDGE}; }}"
+        )
+
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(10, 6, 10, 6)
+        lay.setSpacing(8)
+
+        self.btn_home = QPushButton("⏮")
+        self.btn_back = QPushButton("|◀")
+        self.btn_play = QPushButton("▶")
+        self.btn_fwd = QPushButton("▶|")
+        for b in (self.btn_home, self.btn_back, self.btn_play, self.btn_fwd):
+            b.setFixedWidth(36)
+        self.btn_play.setStyleSheet(
+            f"QPushButton {{ background:{theme.BTN_PRIMARY}; "
+            f"color:{theme.TEXT}; font-weight:bold; }}"
+        )
+        lay.addWidget(self.btn_home)
+        lay.addWidget(self.btn_back)
+        lay.addWidget(self.btn_play)
+        lay.addWidget(self.btn_fwd)
+
+        self.slider = QSlider(Qt.Orientation.Horizontal)
+        self.slider.setMinimum(0)
+        self.slider.setMaximum(10000)
+        lay.addWidget(self.slider, 1)
+
+        self.lbl_time = QLabel("0.00 / 0.00 s")
+        self.lbl_time.setStyleSheet(f"color:{theme.TEXT}; min-width:120px;")
+        lay.addWidget(self.lbl_time)
+
+        self.cmb_speed = QComboBox()
+        for s in ("0.25×", "0.5×", "1×", "2×", "4×", "8×"):
+            self.cmb_speed.addItem(s)
+        self.cmb_speed.setCurrentText("1×")
+        self.cmb_speed.setFixedWidth(70)
+        lay.addWidget(self.cmb_speed)
+
+        self.btn_home.clicked.connect(lambda: self.ph.seek(self.ph.t_start))
+        self.btn_back.clicked.connect(lambda: self.ph.step(-0.1))
+        self.btn_fwd.clicked.connect(lambda: self.ph.step(+0.1))
+        self.btn_play.clicked.connect(self._toggle_play)
+        self.slider.sliderPressed.connect(self._start_scrub)
+        self.slider.sliderReleased.connect(self._end_scrub)
+        self.slider.valueChanged.connect(self._on_slider_value)
+        self.cmb_speed.currentTextChanged.connect(self._on_speed)
+        self.ph.timeChanged.connect(self._on_playhead_time)
+
+        self._on_playhead_time(self.ph.t)
+
+    def _toggle_play(self) -> None:
+        self.ph.toggle()
+        self.btn_play.setText("⏸" if self.ph.is_playing() else "▶")
+
+    def _start_scrub(self) -> None:
+        self._scrubbing = True
+
+    def _end_scrub(self) -> None:
+        self._scrubbing = False
+
+    def _on_slider_value(self, v: int) -> None:
+        if not self._scrubbing:
+            return
+        frac = v / float(self.slider.maximum())
+        t = self.ph.t_start + frac * (self.ph.t_end - self.ph.t_start)
+        self.ph.seek(t)
+
+    def _on_speed(self, label: str) -> None:
+        self.ph.set_speed(float(label.rstrip("×")))
+
+    def _on_playhead_time(self, t: float) -> None:
+        dur = self.ph.t_end - self.ph.t_start
+        rel = t - self.ph.t_start
+        frac = (rel / dur) if dur > 0 else 0.0
+        if not self._scrubbing:
+            self.slider.blockSignals(True)
+            self.slider.setValue(int(round(frac * self.slider.maximum())))
+            self.slider.blockSignals(False)
+        self.lbl_time.setText(f"{rel:6.2f} / {dur:6.2f} s")
+        if not self.ph.is_playing():
+            self.btn_play.setText("▶")
 
 
 # ============================================================================
@@ -429,30 +634,68 @@ class SessionViewer(QMainWindow):
         self.setStyleSheet(theme.QSS)
 
         meta = {}
-        meta_p = session_dir / "meta.json"
-        if meta_p.exists():
-            meta = json.loads(meta_p.read_text())
-
+        if (session_dir / "meta.json").exists():
+            meta = json.loads((session_dir / "meta.json").read_text())
         calib = {}
-        calib_p = session_dir / "calib.json"
-        if calib_p.exists():
-            calib = json.loads(calib_p.read_text())
+        if (session_dir / "calib.json").exists():
+            calib = json.loads((session_dir / "calib.json").read_text())
 
         frames = _load_jsonl(session_dir / "input" / "frames.jsonl")
         imu = _stack_imu(_load_jsonl(session_dir / "input" / "imu.jsonl"))
         vio = _stack_poses(_load_jsonl(session_dir / "basalt" / "vio_pose.jsonl"))
         slam = _stack_poses(_load_jsonl(session_dir / "basalt" / "slam_pose.jsonl"))
 
-        tabs = QTabWidget()
-        tabs.addTab(OverviewTab(
+        # Shared timeline rebased to 0
+        starts, ends = [], []
+        frame_ts = _frame_ts_array(frames)
+        for arr in (frame_ts, imu["ts_s"], vio["ts_s"], slam["ts_s"]):
+            if len(arr):
+                starts.append(float(arr[0])); ends.append(float(arr[-1]))
+        if starts:
+            t_offset = min(starts)
+            t_end = max(ends) - t_offset
+        else:
+            t_offset, t_end = 0.0, 1.0
+        self.playhead = Playhead(0.0, t_end)
+
+        self.tab_overview = OverviewTab(
             session_dir, meta, calib,
             imu_n=len(imu["ts_s"]), frame_n=len(frames),
             vio_n=len(vio["ts_s"]), slam_n=len(slam["ts_s"]),
-        ), "Overview")
-        tabs.addTab(FrameTab(session_dir, frames), "C0 · Frame")
-        tabs.addTab(IMUTab(imu), "C1 · IMU")
-        tabs.addTab(PoseTab(vio, slam), "C2/C3 · Pose")
-        self.setCentralWidget(tabs)
+        )
+        self.tab_frame = FrameTab(session_dir, frames, t_offset)
+        self.tab_imu = IMUTab(imu, t_offset)
+        self.tab_pose = PoseTab(vio, slam, t_offset)
+
+        tabs = QTabWidget()
+        tabs.addTab(self.tab_overview, "Overview")
+        tabs.addTab(self.tab_frame, "C0 · Frame")
+        tabs.addTab(self.tab_imu, "C1 · IMU")
+        tabs.addTab(self.tab_pose, "C2/C3 · Pose")
+
+        bar = PlaybackBar(self.playhead)
+
+        self.playhead.timeChanged.connect(self.tab_frame.on_time)
+        self.playhead.timeChanged.connect(self.tab_imu.on_time)
+        self.playhead.timeChanged.connect(self.tab_pose.on_time)
+
+        root = QWidget()
+        v = QVBoxLayout(root)
+        v.setContentsMargins(0, 0, 0, 0); v.setSpacing(0)
+        v.addWidget(tabs, 1)
+        v.addWidget(bar)
+        self.setCentralWidget(root)
+
+        QShortcut(QKeySequence(Qt.Key.Key_Space), self,
+                  activated=bar._toggle_play)
+        QShortcut(QKeySequence(Qt.Key.Key_Left), self,
+                  activated=lambda: self.playhead.step(-0.1))
+        QShortcut(QKeySequence(Qt.Key.Key_Right), self,
+                  activated=lambda: self.playhead.step(+0.1))
+        QShortcut(QKeySequence(Qt.Key.Key_Home), self,
+                  activated=lambda: self.playhead.seek(self.playhead.t_start))
+
+        self.playhead.seek(0.0)
 
 
 def main() -> int:
