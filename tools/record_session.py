@@ -147,6 +147,12 @@ def main() -> int:
         slam.setPublishObstacleCloud(not args.no_pcl)
         slam.setPublishGroundCloud(not args.no_pcl)
 
+        # Persist RTABMap database so we can extract keyframes (C4) and
+        # rich loop-closure metadata (C5 with BoW score + inliers) offline.
+        (out / "basalt").mkdir(parents=True, exist_ok=True)
+        slam.setDatabasePath(str(out / "basalt" / "rtabmap.db"))
+        slam.setSaveDatabaseOnClose(True)
+
         left.requestOutput((args.width, args.height)).link(stereo.left)
         right.requestOutput((args.width, args.height)).link(stereo.right)
         stereo.syncedLeft.link(vio.left)
@@ -314,6 +320,16 @@ def main() -> int:
     print(f"  slam:   {rec._slam_seq}")
     print(f"  corr:   {rec._corr_seq}")
     print(f"  pcl:    {rec._pcl_seq}")
+
+    # C4: auto-extract keyframes + loop closures from rtabmap.db
+    db_path = out / "basalt" / "rtabmap.db"
+    if db_path.exists():
+        try:
+            from tools.extract_kf_from_db import extract as _extract_kf
+            n_kf, n_lp = _extract_kf(out)
+            print(f"  kf:     {n_kf} keyframes, {n_lp} loop links")
+        except Exception as e:
+            print(f"  [warn] kf extract failed: {e}")
     return 0
 
 

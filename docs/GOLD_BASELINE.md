@@ -1,6 +1,6 @@
 # Gold Baseline Report
 
-**Generated**: 2026-05-29 12:39:46
+**Generated**: 2026-05-29 13:02:37
 **Source**: `/Users/bao/skydev/oak-d/sessions/gold`
 **Pipeline**: BasaltVIO + RTABMapSLAM (depthai 3.6.1)
 **RPE window**: 1.0s
@@ -13,6 +13,7 @@ ATE/RPE compare **SLAM (ref) vs VIO (test)** — they measure how much loop clos
 | `lab_loop_30s` |  30.1s |  599 |  598 |  598 |  1 |  0 |  60.22 |  77.85 | 27.57 | 33.38 |
 | `lab_static_10s` |  11.6s |  199 |  198 |  198 |  0 |  0 |   3.14 |  16.64 |  3.51 | 63.06 |
 | `lab_straight_20s` |  22.1s |  399 |  398 |  398 |  1 |  0 |  12.32 |  40.38 | 10.97 | 42.05 |
+| `loop_closure_45s` |  47.1s |  899 |  898 |  898 |  1 |  0 |  16.82 |  23.83 |  5.99 | 28.36 |
 | `quick_motion_15s` |  15.1s |  299 |  298 |  298 |  0 |  0 |  20.92 | 114.17 | 104.87 | 38.83 |
 
 ---

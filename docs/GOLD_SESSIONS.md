@@ -16,7 +16,7 @@ ngày kia) đều phải vượt qua. Đây là **single source of truth** cho r
 
 ## Scenarios
 
-5 scenario được chọn để cover các "axis" thử thách khác nhau của VIO/SLAM.
+6 scenario được chọn để cover các "axis" thử thách khác nhau của VIO/SLAM.
 
 | ID | Tên | Thời lượng | Mục đích test |
 |---|---|---|---|
@@ -25,6 +25,7 @@ ngày kia) đều phải vượt qua. Đây là **single source of truth** cho r
 | 3 | `lab_loop_30s` | 30s | loop closure (vòng kín nhỏ, ~3m radius) |
 | 4 | `corridor_60s` | 60s | long-range drift, loop closure xa (~15m loop) |
 | 5 | `quick_motion_15s` | 15s | tracking robustness (lắc + quay đầu nhanh) |
+| 6 | `loop_closure_45s` | 45s | C4 keyframes + loop closure DB persistence |
 
 ### Cách thực hiện từng scenario
 
@@ -84,9 +85,23 @@ Mục đích: test feature tracker khi motion blur + IMU saturation.
 
 Expected: không tracking_lost (nếu có = pipeline yếu, document số gap).
 
+#### 6. `loop_closure_45s` — vòng kín có loop closure (C4 test)
+Đứng yên 5s ngắm 1 mốc rõ (góc bàn, poster), đi vòng nhỏ ~2-3m radius
+trong 30s, về **đúng** vị trí + **đúng** hướng ban đầu, đứng yên 5-10s
+cho RTABMap chốt loop. Mục đích: verify `rtabmap.db` persist được +
+`extract_kf_from_db.py` tạo ≥1 loop link.
+
+```bash
+.venv/bin/python tools/record_session.py sessions/gold/loop_closure_45s \
+    --duration 45 -f
+```
+
+Expected: ≥1 `kf_loops` (Link type 1/2/3 trong rtabmap.db). Nếu = 0 →
+record lại (góc về sai, BoW không match).
+
 ---
 
-## Sau khi record xong cả 5
+## Sau khi record xong cả 6
 
 1. Backup folder `sessions/gold/` sang ổ ngoài (USB/cloud). Không có
    git tracking, mất là mất.

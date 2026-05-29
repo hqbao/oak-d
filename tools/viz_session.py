@@ -410,12 +410,24 @@ class PoseTab(QWidget):
                  pcl_ts: np.ndarray | None = None,
                  pcl_kinds: list[str] | None = None,
                  pcl_clouds: list[np.ndarray] | None = None,
+                 kf_events: list[dict] | None = None,
+                 kf_loops: list[dict] | None = None,
                  parent=None) -> None:
         super().__init__(parent)
         self._vio_ts = vio["ts_s"] - t_offset
         self._vio_pos = vio["pos"]
         self._slam_ts = slam["ts_s"] - t_offset
         self._slam_pos = slam["pos"]
+        kf_events = kf_events or []
+        kf_loops = kf_loops or []
+        self._kf_pos_by_id: dict[int, np.ndarray] = {
+            int(e["kf_id"]): np.asarray(e["pos"], dtype=np.float32)
+            for e in kf_events
+        }
+        self._kf_pts = (
+            np.stack([self._kf_pos_by_id[int(e["kf_id"])] for e in kf_events])
+            if kf_events else np.zeros((0, 3), dtype=np.float32)
+        )
 
         # Point cloud stream rebased to shared timeline. We keep ALL emissions
         # in memory and pick the latest <= t per kind in on_time().
@@ -488,9 +500,30 @@ class PoseTab(QWidget):
         gl_widget.addItem(self._mark_vio)
         gl_widget.addItem(self._mark_slam)
 
+        # Keyframes (C4): yellow dots at each KF pose.
+        kf_color = (1.0, 0.85, 0.1, 0.9)
+        if len(self._kf_pts):
+            gl_widget.addItem(gl.GLScatterPlotItem(
+                pos=self._kf_pts, color=kf_color, size=7.0, pxMode=True,
+            ))
+        # Loop closures (C4 / C5): yellow segments between linked KFs.
+        n_loops = 0
+        for lp in kf_loops:
+            a = self._kf_pos_by_id.get(int(lp["from_kf"]))
+            b = self._kf_pos_by_id.get(int(lp["to_kf"]))
+            if a is None or b is None:
+                continue
+            gl_widget.addItem(gl.GLLinePlotItem(
+                pos=np.stack([a, b]).astype(np.float32),
+                color=(1.0, 0.85, 0.1, 0.6), width=1.5, antialias=True,
+            ))
+            n_loops += 1
+
         legend = QLabel(
             f'<span style="color:{theme.WARN}">●</span> VIO (Basalt)   '
             f'<span style="color:{theme.GOOD}">●</span> SLAM (RTABMap)   '
+            f'<span style="color:#ffd91a">●</span> keyframe ({len(self._kf_pts)})   '
+            f'<span style="color:#ffd91a">─</span> loop ({n_loops})   '
             f'<span style="color:#9999ff">·</span> point cloud ('
             f'{len(self._pcl_ts)} emissions, peak {total_pts:,} pts)'
         )
@@ -758,6 +791,8 @@ class SessionViewer(QMainWindow):
         slam = _stack_poses(_load_jsonl(session_dir / "basalt" / "slam_pose.jsonl"))
         loop_events = _load_jsonl(session_dir / "basalt" / "loop_events.jsonl")
         track_events = _load_jsonl(session_dir / "basalt" / "track_events.jsonl")
+        kf_events = _load_jsonl(session_dir / "basalt" / "kf_events.jsonl")
+        kf_loops = _load_jsonl(session_dir / "basalt" / "kf_loops.jsonl")
         pcl_ts, pcl_kinds, pcl_clouds = _load_pointcloud_stream(session_dir)
 
         # Shared timeline rebased to 0
@@ -782,7 +817,8 @@ class SessionViewer(QMainWindow):
         self.tab_imu = IMUTab(imu, t_offset)
         self.tab_pose = PoseTab(vio, slam, t_offset,
                                 pcl_ts=pcl_ts, pcl_kinds=pcl_kinds,
-                                pcl_clouds=pcl_clouds)
+                                pcl_clouds=pcl_clouds,
+                                kf_events=kf_events, kf_loops=kf_loops)
         self.tab_events = EventsTab(loop_events, track_events, t_offset, t_end)
 
         tabs = QTabWidget()
