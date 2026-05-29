@@ -260,14 +260,22 @@ class FrameTab(QWidget):
         self.info.setObjectName("HeaderSub")
         lay.addWidget(self.info)
 
+        # Big hero view: LEFT with feature overlay.
+        self.lbl_main = self._make_img_label("LEFT + FEATURES")
+        self.lbl_main["img"].setMinimumSize(640, 400)
+        lay.addWidget(self.lbl_main["frame"], 1)
+
+        # Small thumbnails: L / R / D for context.
         img_row = QHBoxLayout()
         img_row.setSpacing(6)
         self.lbl_left = self._make_img_label("LEFT")
         self.lbl_right = self._make_img_label("RIGHT")
         self.lbl_depth = self._make_img_label("DEPTH")
         for grp in (self.lbl_left, self.lbl_right, self.lbl_depth):
+            grp["img"].setMinimumSize(220, 140)
+            grp["img"].setMaximumHeight(180)
             img_row.addWidget(grp["frame"], 1)
-        lay.addLayout(img_row, 1)
+        lay.addLayout(img_row, 0)
 
         if frames:
             self.on_time(0.0)
@@ -313,10 +321,9 @@ class FrameTab(QWidget):
         right = cv2.imread(str(base / rec["right_path"]), cv2.IMREAD_GRAYSCALE)
         depth = np.fromfile(base / rec["depth_path"], dtype="<u2").reshape(h, w)
 
-        # Overlay tracked features on LEFT image (C7).
-        # Color = depth, single-hue cyan ramp (dark=near, light=far,
-        # gray=no depth). Thin black border for contrast with bg.
-        left_disp = left
+        # Overlay tracked features on the BIG view (lbl_main); the small
+        # LEFT thumbnail stays raw for reference.
+        left_disp = cv2.cvtColor(left, cv2.COLOR_GRAY2BGR)
         n_feat = 0
         if len(self.feat_ts):
             fi = int(np.searchsorted(self.feat_ts, t_query))
@@ -327,7 +334,6 @@ class FrameTab(QWidget):
             pts = self.feat_pts[fi]
             n_feat = len(pts)
             if n_feat:
-                left_disp = cv2.cvtColor(left, cv2.COLOR_GRAY2BGR)
                 xs = np.clip(pts[:, 0].astype(np.int32), 1, w - 2)
                 ys = np.clip(pts[:, 1].astype(np.int32), 1, h - 2)
                 depths_mm = np.zeros(n_feat, dtype=np.uint16)
@@ -352,10 +358,8 @@ class FrameTab(QWidget):
                         fill = (b, g, r)
                     cv2.circle(left_disp, (cx, cy), 3, fill, -1, cv2.LINE_AA)
 
-        if left_disp.ndim == 2:
-            self._set_gray(self.lbl_left["img"], left_disp)
-        else:
-            self._set_bgr(self.lbl_left["img"], left_disp)
+        self._set_bgr(self.lbl_main["img"], left_disp)
+        self._set_gray(self.lbl_left["img"], left)
         self._set_gray(self.lbl_right["img"], right)
         self._set_depth(self.lbl_depth["img"], depth)
 
