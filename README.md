@@ -77,11 +77,11 @@ This gives camera-frame axes (right-handed, OpenCV convention):
 ## Long-term
 
 - **Software plan (current, research-backed)**: [docs/SKYSLAM_RESEARCH.md](docs/SKYSLAM_RESEARCH.md)
-  — plan v3 với 9 phases, `numpy + opencv + gtsam + pyDBoW3`, acceptance gates,
-  viết sau khi đọc thorough source code depthai-core / basalt / rtabmap /
-  ORB-SLAM3 / OpenVINS.
+  — plan v3 with 9 phases, `numpy + opencv + gtsam + pyDBoW3`, acceptance gates,
+  written after a thorough read of depthai-core / basalt / rtabmap / ORB-SLAM3 /
+  OpenVINS source code.
 - **Pipeline checkpoints (debug contract)**: [docs/PIPELINE_CHECKPOINTS.md](docs/PIPELINE_CHECKPOINTS.md)
-  — schema C0–C9 để compare skyslam vs baseline khi build.
+  — schema C0–C9 used to compare skyslam against the baseline while building.
 - **Hardware vision (long-term)**: [docs/SKYSLAM_ROADMAP.md](docs/SKYSLAM_ROADMAP.md)
-  — chỉ đọc phần HW V1 / V2 / FC link (Section 3 software architecture đã
-  superseded by SKYSLAM_RESEARCH.md).
+  — read only the HW V1 / V2 / FC link parts (Section 3 software architecture
+  has been superseded by SKYSLAM_RESEARCH.md).

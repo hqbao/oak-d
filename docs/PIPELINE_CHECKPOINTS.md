@@ -1,34 +1,36 @@
 # SkySLAM — Pipeline Checkpoints for Future Comparison
 
-**Mục đích**: Định nghĩa các điểm chốt (checkpoint) trong pipeline hiện tại
-(BasaltVIO + RTABMapSLAM) để khi tự viết `skyslam`, mình có thể so sánh
-output từng giai đoạn với baseline để debug và đo accuracy.
+**Purpose**: Define the checkpoints in the current pipeline
+(BasaltVIO + RTABMapSLAM) so that, when writing `skyslam` from scratch, we can
+compare each stage's output against the baseline for debugging and accuracy
+measurement.
 
-**Ngày soạn**: 2026-05-29 (rewrite: nguyên tắc "chỉ show dữ liệu thật")
-**Pipeline tham chiếu**: `oakd/sources/depthai_slam.py` (live) + `depthai_vo.py` (VIO-only)
-**Target so sánh**: `skyslam/` (chưa viết — kế hoạch chi tiết tại `docs/SKYSLAM_RESEARCH.md`)
+**Created**: 2026-05-29 (rewrite, principle: "only show real data")
+**Reference pipeline**: `oakd/sources/depthai_slam.py` (live) + `depthai_vo.py` (VIO-only)
+**Comparison target**: `skyslam/` (not written yet — detailed plan in `docs/SKYSLAM_RESEARCH.md`)
 
 ---
 
-## 0. Nguyên tắc tối thượng: HONEST VISUALIZATION
+## 0. Top principle: HONEST VISUALIZATION
 
-> **Recorder + viewer CHỈ được show dữ liệu thật từ pipeline đang chạy.**
-> Tuyệt đối KHÔNG tạo dữ liệu phụ (FeatureTracker song song, depth lookup
-> tự chế, sparse map ước lượng…) rồi gắn nhãn như là output của
-> Basalt/RTABMap.
+> **The recorder + viewer may ONLY show real data coming from the running
+> pipeline.** They must NEVER fabricate auxiliary data (a parallel
+> FeatureTracker, a hand-rolled depth lookup, a guessed sparse map, …) and
+> label it as if it were output of Basalt/RTABMap.
 
-Vì sao quan trọng: chiến lược dài hạn là **thay thế từng module** của
-pipeline depthai bằng code mình viết. Nếu viewer hiện cả dữ liệu fake,
-khi mình thay module sẽ không biết kết quả mới đúng hay sai (đang so
-với chính dữ liệu fake cũ → vô nghĩa).
+Why it matters: the long-term strategy is to **replace one module at a time**
+in the depthai pipeline. If the viewer shows fake data, replacing a module
+later makes it impossible to tell whether the new result is correct (you'd
+be comparing against your own previous fake → meaningless).
 
-**Quy tắc cứng:**
-- Mỗi cái UI hiện ra phải truy ngược được về **một depthai Output**
-  thực tế đã subscribe.
-- Cấm dùng node phụ (`FeatureTracker`, `ImageManip`…) cho mục đích
-  visualize "vờ như" của blob khác.
-- Internals của blob (Basalt features, RTABMap keyframes/BoW…) ⇒ chỉ
-  expose được khi mình tự viết module đó. Trong lúc chưa viết: **để trống**.
+**Hard rules:**
+- Everything the UI shows must trace back to **one real depthai Output**
+  that has been subscribed to.
+- Do NOT use auxiliary nodes (`FeatureTracker`, `ImageManip`, …) to "pretend"
+  to visualize the internals of another blob.
+- Internals of a blob (Basalt features, RTABMap keyframes/BoW, …) can only
+  be exposed once we write that module ourselves. Until then: **leave it
+  blank**.
 
 ---
 
@@ -69,7 +71,7 @@ với chính dữ liệu fake cũ → vô nghĩa).
 └──────────────────────────────────────────────────────┘
 ```
 
-**Cái GHẾ TRỐNG (depthai KHÔNG expose):**
+**The EMPTY SEATS (depthai does NOT expose them):**
 
 | Hidden internal | Why we want it | When we'll get it |
 |---|---|---|
@@ -83,85 +85,90 @@ với chính dữ liệu fake cũ → vô nghĩa).
 
 ---
 
-## 2. Nguyên tắc tổ chức
+## 2. Organisation principles
 
-1. **Black box những gì không sửa được**: Basalt và RTABMap là binary blob.
-   KHÔNG can thiệp internals. Chỉ log được input + output streams.
-2. **JSONL cho metadata, binary cho dense data**: timestamps + pose ra JSONL
-   (dễ diff/grep); ảnh + depth + cloud ra raw binary.
-3. **Timestamp là vàng**: mọi record có `ts_ns` (nanosecond, monotonic từ
-   pipeline start). Đây là khóa join giữa các stream và giữa 2 pipelines.
-4. **Reproducible**: record session đầy đủ → replay được vào cả pipeline cũ
-   (sanity) và pipeline mới (skyslam). Cùng input → mới so sánh được output.
-5. **Observability levels** (chỉ những gì có sẵn từ depthai):
-   - L0: input streams (camera, IMU) — luôn ghi được
-   - L1: final pose output — luôn ghi được
-   - L2: pose-graph correction (odomCorrection) — RTABMap expose
-   - L2: dense reconstruction (obstacle/ground PCL) — RTABMap expose
-   - L3+: internal features/landmarks/keyframes — **KHÔNG expose, để trống**
+1. **Black-box what we can't change**: Basalt and RTABMap are binary blobs.
+   Do NOT touch internals. Only log input + output streams.
+2. **JSONL for metadata, binary for dense data**: timestamps + pose go to
+   JSONL (easy to diff/grep); images + depth + cloud go to raw binary.
+3. **Timestamps are gold**: every record carries `ts_ns` (nanosecond,
+   monotonic from pipeline start). This is the join key between streams and
+   between two pipelines.
+4. **Reproducible**: a fully recorded session can be replayed through both
+   the old pipeline (sanity) and the new pipeline (skyslam). Same input →
+   only then is output comparison meaningful.
+5. **Observability levels** (only what depthai actually exposes):
+   - L0: input streams (camera, IMU) — always recordable
+   - L1: final pose output — always recordable
+   - L2: pose-graph correction (odomCorrection) — RTABMap exposes
+   - L2: dense reconstruction (obstacle/ground PCL) — RTABMap exposes
+   - L3+: internal features/landmarks/keyframes — **NOT exposed, leave blank**
 
 ---
 
-## 3. Checkpoint matrix (status tại 2026-05-29)
+## 3. Checkpoint matrix (status as of 2026-05-29)
 
-| # | Tên checkpoint | Status | Source | Notes |
+| # | Checkpoint | Status | Source | Notes |
 |---|---|---|---|---|
 | C0 | Input: stereo frame (L+R+D) | ✅ live | `StereoDepth.rectifiedLeft/syncedRight/depth` | PNG + raw16 |
 | C1 | Input: IMU sample | ✅ live | `IMU.out` | 200 Hz |
 | C2 | VIO pose (Basalt) | ✅ live | `BasaltVIO.transform` | FLU world |
 | C3 | SLAM pose (RTABMap, loop-corrected) | ✅ live | `RTABMapSLAM.transform` | FLU world |
-| C4 | Keyframe selected | ✅ offline | `rtabmap.db` SQLite (`Node` table) | `tools/extract_kf_from_db.py` — auto-run sau record |
-| C4+ | Loop closure links (rich) | ✅ offline | `rtabmap.db` SQLite (`Link` types 1/2/3) | cùng tool, → `kf_loops.jsonl` |
-| C5 | Loop closure detected (derived) | ⚠️ derived | jump > thr trong `odomCorrection` stream | precision OK, không có BoW score live |
-| C6 | Tracking lost/recovered | ⚠️ derived | gap > thr trong SLAM pose stream | đủ để vẽ timeline |
-| C7 | Frontend features per frame | ❌ blob hidden | **chỉ skyslam mới có** | KHÔNG fake bằng FeatureTracker |
-| C8 | IMU preintegration delta | ❌ blob hidden | chỉ skyslam | |
-| C9 | Optimizer state (Jacobians) | ❌ blob hidden | chỉ skyslam | |
-| — | Odom correction (raw) | ✅ live | `RTABMapSLAM.odomCorrection` | input cho C5 derivation |
-| — | Dense point cloud | ✅ live | `RTABMapSLAM.obstaclePCL + groundPCL` | dense reconstruction, KHÔNG phải sparse map |
+| C4 | Keyframe selected | ✅ offline | `rtabmap.db` SQLite (`Node` table) | `tools/extract_kf_from_db.py` — auto-runs after record |
+| C4+ | Loop closure links (rich) | ✅ offline | `rtabmap.db` SQLite (`Link` types 1/2/3) | same tool → `kf_loops.jsonl` |
+| C5 | Loop closure detected (derived) | ⚠️ derived | jump > thr in `odomCorrection` stream | precision OK, no live BoW score |
+| C6 | Tracking lost/recovered | ⚠️ derived | gap > thr in SLAM pose stream | enough to draw a timeline |
+| C7 | Frontend features per frame | ❌ blob hidden | **only skyslam will provide** | do NOT fake with FeatureTracker |
+| C8 | IMU preintegration delta | ❌ blob hidden | only skyslam | |
+| C9 | Optimizer state (Jacobians) | ❌ blob hidden | only skyslam | |
+| — | Odom correction (raw) | ✅ live | `RTABMapSLAM.odomCorrection` | input for C5 derivation |
+| — | Dense point cloud | ✅ live | `RTABMapSLAM.obstaclePCL + groundPCL` | dense reconstruction, NOT a sparse map |
 
-Ký hiệu: ✅ = stream thật từ pipeline, ⚠️ = derive từ stream thật, ❌ = blob không expose → chưa làm.
+Legend: ✅ = real stream from the pipeline, ⚠️ = derived from a real stream,
+❌ = blob does not expose it → not done yet.
 
 ---
 
-## 4. Migration strategy: thay từng blob
+## 4. Migration strategy: replace one blob at a time
 
-Mục tiêu: thay dần `BasaltVIO` rồi `RTABMapSLAM` bằng module skyslam tự viết.
-Mỗi lần thay 1 cục, sẽ UNLOCK thêm checkpoint mới (vì module mình viết sẽ
-expose internals).
+Goal: progressively replace `BasaltVIO` then `RTABMapSLAM` with our own
+skyslam modules. Each replacement UNLOCKS more checkpoints (because the
+module we wrote will expose its internals).
 
-### Phase A (hiện tại) — record honest baseline
-Record session với BasaltVIO + RTABMapSLAM, có C0, C1, C2, C3, C5, C6, PCL.
-KHÔNG có C4/C7/C8/C9. Đây là **ground truth pipeline** để so sánh.
+### Phase A (current) — record an honest baseline
+Record sessions with BasaltVIO + RTABMapSLAM, capturing C0, C1, C2, C3, C5,
+C6, PCL. C4/C7/C8/C9 are absent. This is the **ground-truth pipeline** to
+compare against.
 
-### Phase B — thay backend RTABMap bằng `skyslam_backend` (pose graph + loop)
-- Input: vẫn dùng `BasaltVIO.transform` (C2) làm odom.
-- Output: pose mới (C3 thay thế), thêm:
-  - C4 (keyframe selection): khi mình tự chọn KF
-  - C5 đầy đủ (kf_query/kf_match/BoW score/inliers): khi mình tự detect loop
-  - Sparse pose graph topology
-- Validation: so sánh `skyslam_backend.transform` vs `RTABMapSLAM.transform`
-  trên cùng input C2 → ATE/RPE phải <= baseline.
+### Phase B — replace the RTABMap backend with `skyslam_backend` (pose graph + loop)
+- Input: still use `BasaltVIO.transform` (C2) as odometry.
+- Output: new pose (replacing C3), plus:
+  - C4 (keyframe selection): when we pick the KFs ourselves
+  - Full C5 (kf_query/kf_match/BoW score/inliers): when we detect loops
+  - Sparse pose-graph topology
+- Validation: compare `skyslam_backend.transform` vs `RTABMapSLAM.transform`
+  on the same C2 input → ATE/RPE must be ≤ baseline.
 
-### Phase C — thay frontend Basalt bằng `skyslam_frontend` (VIO)
+### Phase C — replace the Basalt frontend with `skyslam_frontend` (VIO)
 - Input: C0 + C1 (stereo + IMU).
-- Output: pose (C2 thay thế), thêm:
-  - C7 (tracked features 2D)
+- Output: pose (replacing C2), plus:
+  - C7 (tracked 2D features)
   - C8 (IMU preintegration deltas)
-  - Sparse 3D landmarks ← **đây mới là "feature point cloud" thật**, vài
-    trăm điểm, khác hẳn dense PCL của RTABMap.
-- Validation: chạy song song `skyslam_frontend` + `BasaltVIO`, so sánh
-  pose stream + xem features overlay có tương quan không.
+  - Sparse 3D landmarks ← **this is the real "feature point cloud"**, a few
+    hundred points, completely different from RTABMap's dense PCL.
+- Validation: run `skyslam_frontend` and `BasaltVIO` in parallel, compare
+  pose streams + check whether the feature overlay is correlated.
 
 ### Phase D — full skyslam stack
-- `BasaltVIO` và `RTABMapSLAM` chỉ còn dùng để regression test.
-- Toàn bộ C0…C9 đều là dữ liệu skyslam, viewer overlay được mọi thứ.
+- `BasaltVIO` and `RTABMapSLAM` are kept only for regression tests.
+- All of C0…C9 are skyslam data, the viewer can overlay everything.
 
 ---
 
-## 3. Schemas chi tiết
+## 3. Detailed schemas
 
-Mọi record có 2 field bắt buộc: `ts_ns` (uint64) + `seq` (uint32, monotonic).
+Every record has two mandatory fields: `ts_ns` (uint64) + `seq` (uint32,
+monotonic).
 
 ### C0 — image_pair (stereo frame)
 
@@ -179,7 +186,8 @@ Mọi record có 2 field bắt buộc: `ts_ns` (uint64) + `seq` (uint32, monoton
 
 - Image: PNG 8-bit grayscale (rectified).
 - Depth: raw16 little-endian, mm units, 0 = invalid.
-- Lưu intrinsics 1 lần ở `calib.json`, schema chỉ ref ID nếu muốn gọn.
+- Store intrinsics once in `calib.json`; the schema can reference an ID to
+  stay compact.
 
 ### C1 — imu
 
@@ -190,9 +198,9 @@ Mọi record có 2 field bắt buộc: `ts_ns` (uint64) + `seq` (uint32, monoton
  "temp_c": 32.5}
 ```
 
-200 Hz stream. Field tên fix cứng để diff dễ.
+200 Hz stream. Field names are fixed to make diffs easy.
 
-### C2 — pose6dof (VIO raw, FLU world frame as Basalt outputs)
+### C2 — pose6dof (raw VIO, FLU world frame as Basalt outputs)
 
 ```jsonl
 {"ts_ns": 1716950123456789000, "seq": 42,
@@ -204,14 +212,15 @@ Mọi record có 2 field bắt buộc: `ts_ns` (uint64) + `seq` (uint32, monoton
  "source": "basalt_vio"}
 ```
 
-- `pos` mét, `quat` đơn vị, `vel` m/s.
+- `pos` in metres, `quat` unit, `vel` in m/s.
 - `source` enum: `basalt_vio` | `rtabmap_slam` | `sky_vio` | `sky_slam`.
-- Lưu **FLU world** (frame gốc của Basalt), KHÔNG convert NED — để so sánh
-  apples-to-apples giữa Basalt và skyvio. NED conversion là post-processing.
+- Store **FLU world** (Basalt's native frame), do NOT convert to NED — so
+  Basalt and skyvio can be compared apples-to-apples. NED conversion is
+  post-processing.
 
 ### C3 — pose6dof (SLAM loop-corrected)
 
-Same schema as C2, `source = rtabmap_slam` hoặc `sky_slam`.
+Same schema as C2, with `source = rtabmap_slam` or `sky_slam`.
 
 ### C4 — kf_event ✅ DONE (offline)
 
@@ -221,22 +230,25 @@ Same schema as C2, `source = rtabmap_slam` hoặc `sky_slam`.
  "quat_wxyz": [0.6513, -0.0671, -0.7532, -0.0629]}
 ```
 
-- Source: SQLite `rtabmap.db` table `Node`, pose là BLOB 48-byte (3x4 float32
-  row-major `[R|t]`), stamp giây từ device boot.
-- Extract tool: `tools/extract_kf_from_db.py` — auto-chạy ở cuối
-  `record_session.py` (xem dòng cuối log: `kf: N keyframes, M loop links`).
-- Loop links phụ (C4+) ghi song song vào `kf_loops.jsonl` từ `Link` table
-  với type ∈ {1=global, 2=local_space, 3=local_time}:
+- Source: SQLite `rtabmap.db` table `Node`; the pose is a 48-byte BLOB
+  (3x4 float32 row-major `[R|t]`), with timestamp in seconds from device
+  boot.
+- Extract tool: `tools/extract_kf_from_db.py` — auto-runs at the end of
+  `record_session.py` (see the last log line: `kf: N keyframes, M loop
+  links`).
+- Auxiliary loop links (C4+) are written in parallel to `kf_loops.jsonl`
+  from the `Link` table for types ∈ {1=global, 2=local_space,
+  3=local_time}:
 
 ```jsonl
 {"ts_ns": ..., "from_kf": 12, "to_kf": 3, "type": 1, "type_name": "global",
  "transform_pos": [...], "transform_quat_wxyz": [...]}
 ```
 
-- `weight=-9` là intermediate node của RTABMap (graph reduction); `weight=0`
-  là keyframe bình thường.
-- Viewer (`viz_session.py`) render KF = chấm vàng + loop closure = đường
-  vàng giữa 2 KF trong tab Pose 3D.
+- `weight=-9` denotes a RTABMap intermediate node (graph reduction); `weight=0`
+  is a normal keyframe.
+- The viewer (`viz_session.py`) renders each KF as a yellow dot and each loop
+  closure as a yellow line between two KFs in the Pose 3D tab.
 
 ### C5 — loop_event
 
@@ -246,16 +258,20 @@ Same schema as C2, `source = rtabmap_slam` hoặc `sky_slam`.
  "correction_pos": [...], "correction_quat_wxyz": [...]}
 ```
 
-- Detect bằng cách tap output `RTABMapSLAM.odomCorrection` (map←odom transform)
-  và đo delta giữa hai sample liên tiếp. Jump lớn (default
-  `pos > 10 cm` hoặc `rot > 5°`) = loop closure đã apply correction.
-- Bỏ qua `LOOP_WARMUP_S` (default 3s) đầu tiên vì RTABMap publish correction
-  bất định khi map đang khởi tạo (sẽ gây hàng chục false-positive).
-- Schema BoW (`kf_query`, `score`, `inliers`) chỉ available qua SQLite —
-  `tools/extract_kf_from_db.py` đã extract `Link` table (loop edges với
-  transform + type) ra `kf_loops.jsonl`. Score + inlier count thì cột
-  `information` của `Link` table có nhưng chưa parse (TODO nếu cần).
-- Raw stream được dump song song ở `basalt/odom_correction.jsonl` để debug.
+- Detected by tapping `RTABMapSLAM.odomCorrection` (the map←odom transform)
+  and measuring the delta between consecutive samples. A large jump
+  (default `pos > 10 cm` or `rot > 5°`) = a loop closure correction was
+  applied.
+- Skip the first `LOOP_WARMUP_S` (default 3 s) because RTABMap publishes a
+  noisy correction while the map is still initialising (causes dozens of
+  false positives).
+- The BoW schema (`kf_query`, `score`, `inliers`) is only available via
+  SQLite — `tools/extract_kf_from_db.py` already extracts the `Link` table
+  (loop edges with transform + type) into `kf_loops.jsonl`. The score +
+  inlier count are present in the `Link.information` column but are not
+  parsed yet (TODO if needed).
+- The raw stream is also dumped in parallel to
+  `basalt/odom_correction.jsonl` for debugging.
 
 ### C6 — track_event
 
@@ -264,18 +280,19 @@ Same schema as C2, `source = rtabmap_slam` hoặc `sky_slam`.
 {"ts_ns": ..., "event": "tracking_recovered", "first_pose_seq": 158}
 ```
 
-- Derive bằng cách scan SLAM pose stream tìm gap > `TRACK_GAP_S` (default
-  0.5s). Done trong `SessionRecorder.close()`.
+- Derived by scanning the SLAM pose stream for gaps > `TRACK_GAP_S` (default
+  0.5 s). Computed in `SessionRecorder.close()`.
 
 ### C7 — features (tracked corners) — ❌ NOT IMPLEMENTED
 
-Depthai `BasaltVIO` blob KHÔNG expose internal feature tracks. Đã từng
-thử dùng `dai.node.FeatureTracker` song song để giả vờ — **bỏ vì sai
-nguyên tắc Section 0** (FeatureTracker dùng Harris/Shi-Tomasi khác hẳn
-KLT internal của Basalt, overlay sẽ misrepresent những gì VIO thật sự
-tracking).
+The depthai `BasaltVIO` blob does NOT expose internal feature tracks. We
+previously tried using `dai.node.FeatureTracker` in parallel to pretend —
+**dropped because it violates Section 0** (FeatureTracker uses Harris /
+Shi-Tomasi, which is completely different from Basalt's internal KLT, so the
+overlay would misrepresent what the VIO is actually tracking).
 
-Sẽ implement ở Phase C (xem Section 4) khi viết `skyslam_frontend`.
+To be implemented in Phase C (see Section 4) when writing
+`skyslam_frontend`.
 
 ### Point cloud (RTABMap dense reconstruction)
 
@@ -285,29 +302,30 @@ Index `basalt/pointcloud.jsonl`:
  "path": "pointcloud/000000_obstacle.f32"}
 ```
 - Binary file: raw `Nx3 float32` little-endian, world (FLU map) frame.
-- RTABMap publish lại TOÀN BỘ cloud mỗi keyframe → viewer chỉ load
-  emission gần nhất per kind (tránh trùng).
-- **Đây là DENSE reconstruction từ depth map**, KHÔNG phải sparse map
-  của VIO. Mỗi pixel depth hợp lệ trở thành 1 điểm 3D sau voxel filter
-  (default 5cm). Hàng trăm ngàn điểm cho 1 phòng nhỏ.
-- Disable với `record_session --no-pcl`.
+- RTABMap republishes the FULL cloud at every keyframe → the viewer only
+  loads the most recent emission per kind (to avoid duplication).
+- **This is DENSE reconstruction from the depth map**, NOT the sparse VIO
+  map. Every valid depth pixel becomes one 3D point after a voxel filter
+  (default 5 cm). That yields hundreds of thousands of points for a small
+  room.
+- Disable with `record_session --no-pcl`.
 
-### C8-C9 — chỉ implement khi skyslam tự viết
+### C8-C9 — only implemented once skyslam is written
 
 ---
 
-## 4. Cấu trúc session folder
+## 4. Session folder layout
 
 ```
 sessions/
 └── 2026-05-29_oak_lab_loop1/
-    ├── calib.json              # intrinsics + extrinsics, ghi 1 lần
+    ├── calib.json              # intrinsics + extrinsics, written once
     ├── meta.json               # pipeline version, params, host info
     ├── input/
     │   ├── imu.jsonl           # C1
     │   ├── frames.jsonl        # C0 metadata
-    │   └── img/                # PNG + raw16, ~50 MB / phút
-    ├── basalt/                 # output từ pipeline hiện tại (REAL streams)
+    │   └── img/                # PNG + raw16, ~50 MB / min
+    ├── basalt/                 # output from the current pipeline (REAL streams)
     │   ├── vio_pose.jsonl         # C2 — BasaltVIO.transform
     │   ├── slam_pose.jsonl        # C3 — RTABMapSLAM.transform
     │   ├── odom_correction.jsonl  # raw RTABMapSLAM.odomCorrection
@@ -315,12 +333,12 @@ sessions/
     │   ├── track_events.jsonl    # C6 (derived from slam pose gaps)
     │   ├── pointcloud.jsonl      # index of dense PCL emissions
     │   └── pointcloud/NNNN_*.f32  # RTABMap obstacle/ground PCL, Nx3 f32
-    └── skyslam/                # output từ skyslam tương lai
-        ├── vio_pose.jsonl         # C2 thay thế (Phase C)
-        ├── slam_pose.jsonl        # C3 thay thế (Phase B)
-        ├── kf_events.jsonl       # C4 (UNLOCKED khi skyslam backend)
-        ├── features.jsonl        # C7 (UNLOCKED khi skyslam frontend)
-        ├── landmarks.jsonl       # sparse 3D landmarks (UNLOCKED khi frontend)
+    └── skyslam/                # output from future skyslam
+        ├── vio_pose.jsonl         # C2 replacement (Phase C)
+        ├── slam_pose.jsonl        # C3 replacement (Phase B)
+        ├── kf_events.jsonl       # C4 (UNLOCKED with skyslam backend)
+        ├── features.jsonl        # C7 (UNLOCKED with skyslam frontend)
+        ├── landmarks.jsonl       # sparse 3D landmarks (UNLOCKED with frontend)
         └── ...
 ```
 
@@ -343,9 +361,9 @@ sessions/
 
 ---
 
-## 5. Cách record từ pipeline hiện tại
+## 5. How to record from the current pipeline
 
-Cần thêm 1 module `oakd/recorder.py`:
+Need an additional module `oakd/recorder.py`:
 
 ```python
 class SessionRecorder:
@@ -359,25 +377,26 @@ class SessionRecorder:
     def close(self): ...
 ```
 
-Wire vào `OakBasaltSlamSource`: thêm tap để mọi output queue đều fan-out
-vào recorder. CLI flag mới: `--record sessions/<name>`.
+Wire it into `OakBasaltSlamSource`: add taps so every output queue fans out
+into the recorder. New CLI flag: `--record sessions/<name>`.
 
-Phải nghiên cứu RTABMap nodes API để biết queue nào emit KF/loop events
-(có thể `slam.passthroughRect` + statistics output hoặc query database
-file sau khi chạy).
+Need to study the RTABMap nodes API to know which queue emits KF/loop
+events (possibly `slam.passthroughRect` + statistics output, or query the
+database file after the run).
 
 ---
 
-## 6. Replay protocol cho skyslam tương lai
+## 6. Replay protocol for future skyslam
 
-Khi skyslam có Phase 1 (sensor abstraction):
+Once skyslam reaches Phase 1 (sensor abstraction):
 
-1. `sky_replay --session sessions/2026-05-29_oak_lab_loop1` push input C0+C1
-   vào skyvio/skyslam.
-2. Skyslam emit C2+C3+C4+C5+C6 ra `sessions/.../skyslam/`.
-3. Tool `compare_sessions.py basalt/ skyslam/` tính metrics.
+1. `sky_replay --session sessions/2026-05-29_oak_lab_loop1` pushes input
+   C0+C1 into skyvio/skyslam.
+2. skyslam emits C2+C3+C4+C5+C6 to `sessions/.../skyslam/`.
+3. The tool `compare_sessions.py basalt/ skyslam/` computes metrics.
 
-→ Cùng 1 input, 2 pipeline ra 2 set output, đo difference khách quan.
+→ Same input, two pipelines, two sets of output, objective difference
+measurement.
 
 ---
 
@@ -385,57 +404,60 @@ Khi skyslam có Phase 1 (sensor abstraction):
 
 ### 7.1 Pose accuracy (C2, C3)
 
-- **ATE** (Absolute Trajectory Error): sau khi align trajectory (Umeyama SE3),
-  RMSE position error. Đơn vị mét.
-- **RPE** (Relative Pose Error): error trong cửa sổ trượt 1m / 1s. Tách
-  translation + rotation component.
-- Implementation reference: `evo` toolbox (Python, MIT), hoặc tự viết
+- **ATE** (Absolute Trajectory Error): after aligning the trajectory
+  (Umeyama SE3), RMSE of position error. Unit: metres.
+- **RPE** (Relative Pose Error): error in a 1 m / 1 s sliding window.
+  Split translation and rotation components.
+- Implementation reference: `evo` toolbox (Python, MIT), or write a custom
   `compare_pose.py` ~200 LOC.
 
 ### 7.2 Keyframe agreement (C4)
 
-- **KF count ratio**: `n_kf_skyslam / n_kf_basalt`. Target 0.7-1.5.
-- **KF temporal overlap**: % của Basalt KFs có 1 skyslam KF trong ±0.5s.
+- **KF count ratio**: `n_kf_skyslam / n_kf_basalt`. Target 0.7–1.5.
+- **KF temporal overlap**: % of Basalt KFs that have a skyslam KF within
+  ±0.5 s.
 
 ### 7.3 Loop closure (C5)
 
-- **Recall**: % loop của Basalt mà skyslam cũng detect.
-- **Precision**: % loop của skyslam đúng (so với Basalt làm ground truth).
-- **Drift correction**: ATE trước vs sau loop, đo tại các điểm "passed by
-  previously visited place".
+- **Recall**: % of Basalt loops that skyslam also detects.
+- **Precision**: % of skyslam loops that are correct (Basalt as ground
+  truth).
+- **Drift correction**: ATE before vs after loop, measured at points
+  classified as "passing by a previously visited place".
 
 ### 7.4 Robustness (C6)
 
-- **Tracking uptime**: % thời gian `tracking_ok=true`.
-- **Recovery time**: trung bình giây từ `lost` đến `recovered`.
+- **Tracking uptime**: % of time with `tracking_ok=true`.
+- **Recovery time**: mean seconds from `lost` to `recovered`.
 
-### 7.5 Performance (không phải checkpoint, đo song song)
+### 7.5 Performance (not a checkpoint, measured alongside)
 
-- **FPS** trung bình + p99 latency.
-- **CPU %** trung bình.
+- **FPS** mean + p99 latency.
+- **CPU %** mean.
 - **RAM** peak.
 
-Lưu vào `meta.json` của mỗi run.
+Stored in each run's `meta.json`.
 
 ---
 
 ## 8. Baseline gold standard
 
-Trước khi build skyslam, cần record 3-5 session "gold" làm baseline cố định:
+Before building skyslam, record 3–5 "gold" sessions as a fixed baseline:
 
-| Session | Mô tả | Mục đích |
+| Session | Description | Purpose |
 |---|---|---|
-| `lab_loop1_120s` | Bàn → đi 1 vòng phòng → quay về | Loop closure basic |
-| `lab_figure8_180s` | Số 8 trong phòng, 2 loops | Multi-loop |
-| `hallway_oneway_60s` | Đi thẳng hành lang, không loop | Pure VIO, no SLAM correction |
-| `static_30s` | Đặt im trên bàn 30 giây | Drift baseline, IMU bias |
-| `aggressive_motion_60s` | Lắc nhanh, xoay đột ngột | Robustness stress |
+| `lab_loop1_120s` | Desk → one lap of the room → return | Basic loop closure |
+| `lab_figure8_180s` | Figure-8 in the room, 2 loops | Multi-loop |
+| `hallway_oneway_60s` | Walk straight down a corridor, no loop | Pure VIO, no SLAM correction |
+| `static_30s` | Sit still on a desk for 30 s | Drift baseline, IMU bias |
+| `aggressive_motion_60s` | Fast shaking, sudden rotations | Robustness stress |
 
-Mỗi session record full C0+C1+C2+C3+C4+C5+C6 từ pipeline Basalt+RTABMap.
-Lưu vào `sessions/` (gitignore lớn, dùng external drive hoặc Git LFS).
+Each session records full C0+C1+C2+C3+C4+C5+C6 from the Basalt+RTABMap
+pipeline. Store under `sessions/` (gitignored, use an external drive or
+Git LFS).
 
-Khi skyslam đạt từng phase, replay 5 sessions này → tính metrics →
-plot regression chart "skyslam vs basalt" theo thời gian.
+When skyslam reaches each phase, replay these 5 sessions → compute metrics
+→ plot a "skyslam vs basalt" regression chart over time.
 
 ---
 
@@ -443,16 +465,16 @@ plot regression chart "skyslam vs basalt" theo thời gian.
 
 Pre-skyslam infra ✅ DONE:
 
-- [x] `oakd/recorder.py` — fan-out tap mọi queue
-- [x] `tools/record_session.py` — CLI với `--duration`, `--no-pcl`, `-f`
-- [x] `tools/compare_sessions.py` — ATE/RPE giữa 2 pose streams
-- [x] Record 6 gold sessions (xem `docs/GOLD_SESSIONS.md`)
-- [x] `tools/extract_kf_from_db.py` — extract KF + loop từ rtabmap.db
+- [x] `oakd/recorder.py` — fan-out tap on every queue
+- [x] `tools/record_session.py` — CLI with `--duration`, `--no-pcl`, `-f`
+- [x] `tools/compare_sessions.py` — ATE/RPE between two pose streams
+- [x] Recorded 6 gold sessions (see `docs/GOLD_SESSIONS.md`)
+- [x] `tools/extract_kf_from_db.py` — extract KF + loops from rtabmap.db
 - [x] `tools/baseline_report.py` — emit Markdown baseline
 - [x] Frozen baseline (`docs/GOLD_BASELINE.md`)
 
-Skyslam work — xem **`docs/SKYSLAM_RESEARCH.md`** Part 3 cho plan v3
-(9 phases với acceptance gates).
+Skyslam work — see **`docs/SKYSLAM_RESEARCH.md`** Part 3 for plan v3
+(9 phases with acceptance gates).
 
 ---
 
@@ -467,11 +489,12 @@ Skyslam work — xem **`docs/SKYSLAM_RESEARCH.md`** Part 3 cho plan v3
 
 ---
 
-## 11. Lịch sử
+## 11. History
 
-| Ngày | Thay đổi | Tác giả |
+| Date | Change | Author |
 |---|---|---|
-| 2026-05-29 | Draft đầu | Bảo + Copilot |
-| 2026-05-29 | Honest pipeline rewrite (drop fake FeatureTracker overlay) | Bảo + Copilot |
-| 2026-05-29 | C4 done: KF + loop links từ rtabmap.db SQLite | Bảo + Copilot |
-| 2026-05-29 | Gold suite mở rộng → 6 sessions (thêm loop_closure_45s) | Bảo + Copilot |
+| 2026-05-29 | First draft | Bao + Copilot |
+| 2026-05-29 | Honest pipeline rewrite (drop fake FeatureTracker overlay) | Bao + Copilot |
+| 2026-05-29 | C4 done: KF + loop links from rtabmap.db SQLite | Bao + Copilot |
+| 2026-05-29 | Gold suite expanded → 6 sessions (added loop_closure_45s) | Bao + Copilot |
+| 2026-05-29 | Translate document to English | Bao + Copilot |

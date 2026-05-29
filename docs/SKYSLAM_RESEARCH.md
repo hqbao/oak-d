@@ -462,7 +462,7 @@ Each phase has hard **acceptance gate** before moving on. No upgrades to a modul
 
 **Tasks**:
 1. **Verify gold sessions have raw stereo frames**: open `sessions/gold/lab_static_10s/input/stereo/` — must have L_*.png, R_*.png, D_*.png. If only thumbnails: modify recorder + re-record gold (block ALL skyslam work until done).
-2. **Install gtsam python**: `pip install gtsam`. Verify `import gtsam; gtsam.Pose3()` works. If fails on macOS: fallback to Gauss-Newton thuần python (300 LOC).
+2. **Install gtsam python**: `pip install gtsam`. Verify `import gtsam; gtsam.Pose3()` works. If it fails on macOS: fallback to a pure-python Gauss-Newton (300 LOC).
 3. **Download ORB-SLAM3 vocabulary**: ~150 MB `ORBvoc.txt` from UZ-SLAMLab/ORB_SLAM3/Vocabulary → `assets/ORBvoc.txt`. Gitignore. Verify load with pyDBoW3.
 4. **Install pyDBoW3**: `pip install pyDBoW3` (may need to build from source if no wheel). If fails: use minimal in-house BoW (~500 LOC, slower but works).
 5. **Extend rtabmap extractor for new tables**: `tools/extract_kf_from_db.py` add dumps for `Feature` (per-KF ORB) + `Statistics` (per-frame metrics) + `Link type=0` (neighbor edges).
