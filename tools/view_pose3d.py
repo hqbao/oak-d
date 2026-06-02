@@ -44,7 +44,6 @@ def main() -> int:
 
     history = PoseHistory(capacity=8192)
     source = _build_source(args.source)
-    source.start(history.push)
 
     app = QApplication(sys.argv)
     win = MainWindow(history, source, source_name=args.source)

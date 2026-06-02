@@ -75,6 +75,13 @@ _MOUNT_R0 = np.array(
      [-0.000018, -0.009146, +0.999958]]
 )
 
+# Reject startup if the gravity-leveled attitude is more than this far from the
+# recorded level mount baseline. The user levels the drone before pressing
+# Start, so a large tilt here means the camera is held wrong (e.g. on its side)
+# and the VO world frame would be seeded upside-down -- abort instead of
+# producing a silently-wrong trajectory.
+_MAX_STARTUP_TILT_DEG = 90.0
+
 # Column reorder optical (right, down, fwd) -> body FRD (fwd, right, down).
 # The viewer triad expects the attitude columns to be [forward, right, down],
 # but our VO's rotation columns are the optical axes [right, down, fwd]. The
@@ -237,6 +244,12 @@ class OakOursVioSource(PoseSource):
                 dR = vo.pose[:3, :3] @ _MOUNT_R0.T
                 ang = np.degrees(np.arccos(
                     np.clip((np.trace(dR) - 1.0) * 0.5, -1.0, 1.0)))
+                if ang > _MAX_STARTUP_TILT_DEG:
+                    self._fail(
+                        f"startup attitude {ang:.0f} deg off level "
+                        f"(limit {_MAX_STARTUP_TILT_DEG:.0f} deg) -- "
+                        f"level the drone and press Start again")
+                    return
                 print(f"[ours-vio] gravity-leveled startup; "
                       f"{ang:.1f} deg from recorded mount baseline")
             else:

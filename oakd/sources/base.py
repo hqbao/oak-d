@@ -19,16 +19,23 @@ class PoseSource(ABC):
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
         self.fps: float = 0.0
+        # Set by ``_fail`` when the source aborts (e.g. bad startup attitude).
+        # The UI polls this to surface the reason and reset its Start button.
+        self.error: str | None = None
 
     def start(self, callback: PoseCallback) -> None:
         if self._thread is not None and self._thread.is_alive():
             raise RuntimeError("source already running")
         self._cb = callback
+        self.error = None
         self._stop.clear()
         self._thread = threading.Thread(
             target=self._run_wrapper, name=type(self).__name__, daemon=True
         )
         self._thread.start()
+
+    def is_running(self) -> bool:
+        return self._thread is not None and self._thread.is_alive()
 
     def stop(self, timeout: float = 1.0) -> None:
         self._stop.set()
@@ -46,6 +53,11 @@ class PoseSource(ABC):
 
     @abstractmethod
     def _run(self) -> None: ...
+
+    def _fail(self, msg: str) -> None:
+        """Abort the source with a user-facing reason (polled by the UI)."""
+        self.error = msg
+        print(f"[{type(self).__name__}] {msg}")
 
     def _emit(self, pose: Pose) -> None:
         if self._cb is not None:

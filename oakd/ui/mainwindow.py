@@ -53,6 +53,14 @@ class MainWindow(QMainWindow):
         tb.setMovable(False)
         tb.setIconSize(QtCore.QSize(16, 16))
 
+        # Start/Stop: the user levels the drone, then presses START to seed the
+        # world frame from the current (gravity-leveled) attitude and begin.
+        self.run_act = QAction("START", self)
+        self.run_act.setCheckable(True)
+        self.run_act.toggled.connect(self._toggle_run)
+        tb.addAction(self.run_act)
+        tb.addSeparator()
+
         for name in ("ISO", "TOP", "FRONT", "BACK", "LEFT", "RIGHT"):
             act = QAction(name, self)
             act.triggered.connect(lambda _checked=False, n=name: self._goto_view(n))
@@ -96,6 +104,44 @@ class MainWindow(QMainWindow):
         sb = QStatusBar()
         sb.showMessage("Ready.")
         self.setStatusBar(sb)
+
+        # Poll the source for an abort reason (e.g. bad startup attitude) so we
+        # can surface it and reset the START button when the worker bails out.
+        self._poll = QtCore.QTimer(self)
+        self._poll.setInterval(300)
+        self._poll.timeout.connect(self._poll_source)
+        self._poll.start()
+
+    # ----------------------------------------------------------------------
+
+    def _toggle_run(self, on: bool) -> None:
+        if on:
+            self.run_act.setText("STOP")
+            self.history.clear()
+            self.source.start(self.history.push)
+            self.statusBar().showMessage("Running — level held, world frame seeded.", 3000)
+        else:
+            self.run_act.setText("START")
+            self.source.stop()
+            self.statusBar().showMessage("Stopped.", 2000)
+
+    def _poll_source(self) -> None:
+        # Worker aborted with a reason (bad attitude, device error, ...).
+        if self.source.error and self.run_act.isChecked():
+            msg = self.source.error
+            self.run_act.blockSignals(True)
+            self.run_act.setChecked(False)
+            self.run_act.setText("START")
+            self.run_act.blockSignals(False)
+            self.statusBar().showMessage(f"⚠ {msg}", 0)
+            return
+        # Worker exited on its own (end of stream) — reset the button.
+        if self.run_act.isChecked() and not self.source.is_running():
+            self.run_act.blockSignals(True)
+            self.run_act.setChecked(False)
+            self.run_act.setText("START")
+            self.run_act.blockSignals(False)
+            self.statusBar().showMessage("Source stopped.", 2000)
 
     # ----------------------------------------------------------------------
 
