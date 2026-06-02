@@ -126,15 +126,6 @@ class OakOursVioSource(PoseSource):
                 dtype=np.float64,
             )
 
-            p.start()
-
-            # Pull rectified-left intrinsics for the metric back-projection.
-            ch = p.getDefaultDevice().readCalibration()
-            K = np.array(
-                ch.getCameraIntrinsics(left_socket, self.width, self.height),
-                dtype=np.float64,
-            )
-
             # The displayed pose is ALWAYS produced by the fast frame-to-frame
             # VO, so the read loop never blocks on BA and the UI stays smooth.
             vo = RGBDVisualOdometry(K, OdometryConfig())
