@@ -26,7 +26,12 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from oakd.vio import GyroPreintegrator, RGBDVisualOdometry, SessionReader  # noqa: E402
+from oakd.vio import (  # noqa: E402
+    GyroPreintegrator,
+    RGBDVisualOdometry,
+    SessionReader,
+    WindowedRGBDOdometry,
+)
 
 
 def load_basalt_positions(session_dir: Path) -> dict[int, np.ndarray]:
@@ -84,6 +89,8 @@ def main() -> int:
                     help="0 = all frames")
     ap.add_argument("--all", action="store_true",
                     help="run every gold session and print a summary table")
+    ap.add_argument("--backend", choices=("f2f", "ba"), default="f2f",
+                    help="f2f = frame-to-frame VO; ba = windowed bundle adjustment")
     ap.add_argument("--no-imu", action="store_true",
                     help="disable the gyro rotation prior (pure vision)")
     ap.add_argument("--verbose", action="store_true")
@@ -91,10 +98,10 @@ def main() -> int:
 
     use_imu = not args.no_imu
     if args.all:
-        return run_all(use_imu)
+        return run_all(use_imu, backend=args.backend)
 
     score_session(Path(args.session), args.max_frames, args.verbose,
-                  use_imu=use_imu)
+                  use_imu=use_imu, backend=args.backend)
     return 0
 
 
@@ -113,7 +120,7 @@ def basalt_ref_is_broken(positions: dict[int, np.ndarray]) -> bool:
     return bool(steps.max() > _MAX_VALID_STEP_M)
 
 
-def run_all(use_imu: bool = True) -> int:
+def run_all(use_imu: bool = True, backend: str = "f2f") -> int:
     gold = Path("sessions/gold")
     rows = []
     for d in sorted(gold.iterdir()):
@@ -122,11 +129,12 @@ def run_all(use_imu: bool = True) -> int:
         broken = basalt_ref_is_broken(load_basalt_positions(d))
         note = "broken Basalt ref" if broken else ""
         res = None if broken else score_session(d, 0, False, quiet=True,
-                                                use_imu=use_imu)
+                                                use_imu=use_imu, backend=backend)
         rows.append((d.name, res, note))
         print(f"  {d.name:18s} done")
 
     print()
+    print(f"backend: {backend}")
     print(f"{'session':18s} {'path(m)':>8s} {'ATE RMSE':>10s} {'%path':>7s} {'scale':>6s}")
     print("-" * 54)
     for name, res, note in rows:
@@ -140,10 +148,15 @@ def run_all(use_imu: bool = True) -> int:
 
 
 def score_session(session_dir: Path, max_frames: int, verbose: bool,
-                  quiet: bool = False, use_imu: bool = True):
+                  quiet: bool = False, use_imu: bool = True,
+                  backend: str = "f2f"):
     reader = SessionReader(session_dir)
     n = len(reader) if max_frames <= 0 else min(max_frames, len(reader))
-    vo = RGBDVisualOdometry(reader.K)
+    if backend == "ba":
+        vo = WindowedRGBDOdometry(reader.K)
+        use_imu = False  # BA backend does not use the gyro prior
+    else:
+        vo = RGBDVisualOdometry(reader.K)
 
     # Build a gyro preintegrator when the session has IMU extrinsics, so we can
     # feed a rotation prior to PnP. Sessions recorded before extrinsics were
@@ -166,18 +179,23 @@ def score_session(session_dir: Path, max_frames: int, verbose: bool,
     prev_ts = None
     for i in range(n):
         f = reader.load_frame(i)
-        R_prior = None
-        if pre is not None and prev_ts is not None:
-            R_prior = pre.delta_rotation(prev_ts, f.ts_ns)
-        pose = vo.process(f.gray_left, f.depth_m, R_prior=R_prior)
+        if backend == "ba":
+            pose = vo.process(f.gray_left, f.depth_m)
+        else:
+            R_prior = None
+            if pre is not None and prev_ts is not None:
+                R_prior = pre.delta_rotation(prev_ts, f.ts_ns)
+            pose = vo.process(f.gray_left, f.depth_m, R_prior=R_prior)
         prev_ts = f.ts_ns
         est[f.seq] = pose[:3, 3].copy()
-        if vo.last_info["ok"]:
+        if vo.last_info.get("ok"):
             n_ok += 1
         if verbose and i % 50 == 0:
             inf = vo.last_info
-            print(f"  f{i:4d} tracks={inf['n_tracks']:3d} pnp={inf['n_pnp']:3d} "
-                  f"inliers={inf['n_inliers']:3d} ok={inf['ok']} pos={pose[:3,3]}")
+            print(f"  f{i:4d} tracks={inf.get('n_tracks', 0):3d} "
+                  f"pnp={inf.get('n_pnp', 0):3d} "
+                  f"inliers={inf.get('n_inliers', 0):3d} ok={inf.get('ok')} "
+                  f"pos={pose[:3,3]}")
 
     basalt = load_basalt_positions(reader.dir)
     common = sorted(set(est) & set(basalt))

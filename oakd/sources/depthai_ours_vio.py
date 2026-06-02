@@ -29,7 +29,11 @@ import time
 import numpy as np
 
 from ..pose import Pose
-from ..vio import OdometryConfig, RGBDVisualOdometry
+from ..vio import (
+    OdometryConfig,
+    RGBDVisualOdometry,
+    WindowedRGBDOdometry,
+)
 from .base import PoseSource
 
 
@@ -73,13 +77,20 @@ def _rot_to_quat_wxyz(R: np.ndarray) -> np.ndarray:
 
 
 class OakOursVioSource(PoseSource):
-    """OAK-D + *our* RGB-D PnP odometry -> NED pose stream."""
+    """OAK-D + *our* RGB-D odometry -> NED pose stream.
 
-    def __init__(self, width: int = 640, height: int = 400, fps: int = 20) -> None:
+    ``backend='f2f'`` runs the plain frame-to-frame PnP VO; ``backend='ba'``
+    runs the sliding-window bundle-adjustment VO. Both share the same KLT
+    frontend and depth, so switching backends isolates exactly what BA adds.
+    """
+
+    def __init__(self, width: int = 640, height: int = 400, fps: int = 20,
+                 backend: str = "f2f") -> None:
         super().__init__()
         self.width = int(width)
         self.height = int(height)
         self.cam_fps = int(fps)
+        self.backend = backend
 
     def _run(self) -> None:
         import cv2
@@ -116,7 +127,8 @@ class OakOursVioSource(PoseSource):
                 dtype=np.float64,
             )
 
-            vo = RGBDVisualOdometry(K, OdometryConfig())
+            vo = (WindowedRGBDOdometry(K) if self.backend == "ba"
+                  else RGBDVisualOdometry(K, OdometryConfig()))
 
             t0 = time.monotonic()
             prev_pos_ned = np.zeros(3)
