@@ -163,137 +163,175 @@ def optimize(
         if not fixed[i]:
             free_col[i] = nf
             nf += 1
+    free_col = np.asarray(free_col, np.int64)
+    fc_obs = free_col[obs_cam]            # (N,) free column per obs, -1 if fixed
+    N = obs_cam.shape[0]
+    uv0 = obs_uv[:, 0]
+    uv1 = obs_uv[:, 1]
+    has_depth = use_depth & (obs_depth > 0)
 
-    def eval_cost(poses_):
-        """Robust cost + mean inlier reprojection error over all observations."""
-        cost = 0.0
-        se = 0.0
-        cnt = 0
-        for n in range(obs_cam.shape[0]):
-            T = poses_[obs_cam[n]]
-            Xc = T[:3, :3] @ landmarks[obs_lm[n]] + T[:3, 3]
-            Z = Xc[2]
-            if Z <= cfg.min_view_z:
-                cost += cfg.huber_px ** 2  # penalise but stay finite
-                continue
-            u = fx * Xc[0] / Z + cx
-            v = fy * Xc[1] / Z + cy
-            e = float(np.hypot(u - obs_uv[n, 0], v - obs_uv[n, 1]))
-            if e <= cfg.huber_px:
-                cost += 0.5 * e * e
-            else:
-                cost += cfg.huber_px * (e - 0.5 * cfg.huber_px)
-            se += e
-            cnt += 1
-            # metric depth term
-            zm = obs_depth[n]
-            if use_depth and zm > 0:
-                sig = cfg.depth_sigma_coeff * zm * zm
-                rz = (Z - zm) / sig
-                if abs(rz) <= cfg.depth_huber / sig:
-                    cost += 0.5 * rz * rz
-                else:
-                    d = cfg.depth_huber / sig
-                    cost += d * (abs(rz) - 0.5 * d)
-        return cost, (se / cnt if cnt else 0.0)
+    def _stack(poses_):
+        Rs = np.stack([p[:3, :3] for p in poses_])    # (nC,3,3)
+        ts = np.stack([p[:3, 3] for p in poses_])     # (nC,3)
+        return Rs, ts
 
-    cost0, _ = eval_cost(poses)
+    def eval_cost(poses_, lms_):
+        """Robust cost + mean inlier reprojection error (vectorised)."""
+        Rs, ts = _stack(poses_)
+        Xc = np.einsum('nij,nj->ni', Rs[obs_cam], lms_[obs_lm]) + ts[obs_cam]
+        Z = Xc[:, 2]
+        ok = Z > cfg.min_view_z
+        Zc = np.where(ok, Z, 1.0)
+        u = fx * Xc[:, 0] / Zc + cx
+        v = fy * Xc[:, 1] / Zc + cy
+        e = np.hypot(u - uv0, v - uv1)
+        small = e <= cfg.huber_px
+        rep = np.where(small, 0.5 * e * e,
+                       cfg.huber_px * (e - 0.5 * cfg.huber_px))
+        cost = float(np.where(ok, rep, cfg.huber_px ** 2).sum())
+        mean_e = float(e[ok].mean()) if ok.any() else 0.0
+        if use_depth:
+            dm = has_depth & ok
+            sig = np.where(dm, cfg.depth_sigma_coeff * obs_depth ** 2, 1.0)
+            rz = np.where(dm, (Z - obs_depth) / sig, 0.0)
+            thr = cfg.depth_huber / sig
+            dsmall = np.abs(rz) <= thr
+            dcost = np.where(dsmall, 0.5 * rz * rz,
+                             thr * (np.abs(rz) - 0.5 * thr))
+            cost += float(np.where(dm, dcost, 0.0).sum())
+        return cost, mean_e
+
+    # Pre-group free-camera observations by landmark (for the Schur S block).
+    free_mask = fc_obs >= 0
+    free_idx = np.nonzero(free_mask)[0]
+    order = free_idx[np.argsort(obs_lm[free_idx], kind="stable")]
+    seg_lm = obs_lm[order]
+    bounds = np.searchsorted(seg_lm, np.arange(M + 1))
+
+    cost0, _ = eval_cost(poses, landmarks)
     lam = cfg.init_lambda
     cost_prev = cost0
+    it = 0
 
     for it in range(cfg.max_iters):
-        # Accumulators for the normal equations.
-        Hcc = np.zeros((6 * nf, 6 * nf))
-        bc = np.zeros(6 * nf)
+        Rs, ts = _stack(poses)
+        Rc = Rs[obs_cam]                                  # (N,3,3)
+        Xc = np.einsum('nij,nj->ni', Rc, landmarks[obs_lm]) + ts[obs_cam]
+        Z = Xc[:, 2]
+        ok = Z > cfg.min_view_z
+        Zc = np.where(ok, Z, 1.0)
+        invZ = 1.0 / Zc
+
+        # --- visual reprojection rows (2 per obs) ---------------------------
+        u = fx * Xc[:, 0] * invZ + cx
+        v = fy * Xc[:, 1] * invZ + cy
+        r = np.stack([u - uv0, v - uv1], axis=1)          # (N,2)
+        e = np.linalg.norm(r, axis=1)
+        w = np.where(e <= cfg.huber_px, 1.0,
+                     np.sqrt(cfg.huber_px / np.maximum(e, 1e-12)))
+        w = np.where(ok, w, 0.0)                          # drop behind-cam obs
+
+        # d(proj)/d(Xc): (N,2,3)
+        Jp = np.zeros((N, 2, 3))
+        Jp[:, 0, 0] = fx * invZ
+        Jp[:, 0, 2] = -fx * Xc[:, 0] * invZ * invZ
+        Jp[:, 1, 1] = fy * invZ
+        Jp[:, 1, 2] = -fy * Xc[:, 1] * invZ * invZ
+
+        Jl = np.einsum('nij,njk->nik', Jp, Rc)            # (N,2,3) landmark
+        # [I | -skew(Xc)] : (N,3,6)
+        A = np.zeros((N, 3, 6))
+        A[:, 0, 0] = 1.0
+        A[:, 1, 1] = 1.0
+        A[:, 2, 2] = 1.0
+        A[:, 0, 4] = Xc[:, 2]
+        A[:, 0, 5] = -Xc[:, 1]
+        A[:, 1, 3] = -Xc[:, 2]
+        A[:, 1, 5] = Xc[:, 0]
+        A[:, 2, 3] = Xc[:, 1]
+        A[:, 2, 4] = -Xc[:, 0]
+        Jc = np.einsum('nij,njk->nik', Jp, A)             # (N,2,6) pose
+
+        Jl_sw = w[:, None, None] * Jl
+        Jc_sw = w[:, None, None] * Jc
+        r_sw = w[:, None] * r
+
         Hpp = np.zeros((M, 3, 3))
         bp = np.zeros((M, 3))
-        # E[l] = list of (free_col, 6x3 block) coupling landmark l to cameras.
-        E: list[list[tuple[int, np.ndarray]]] = [[] for _ in range(M)]
+        np.add.at(Hpp, obs_lm, np.einsum('nai,naj->nij', Jl_sw, Jl_sw))
+        np.add.at(bp, obs_lm, np.einsum('nai,na->ni', Jl_sw, r_sw))
 
-        for n in range(obs_cam.shape[0]):
-            c = int(obs_cam[n])
-            l = int(obs_lm[n])
-            T = poses[c]
-            R = T[:3, :3]
-            Xc = R @ landmarks[l] + T[:3, 3]
-            Z = Xc[2]
-            if Z <= cfg.min_view_z:
-                continue
-            invZ = 1.0 / Z
-            u = fx * Xc[0] * invZ + cx
-            v = fy * Xc[1] * invZ + cy
-            r = np.array([u - obs_uv[n, 0], v - obs_uv[n, 1]])
-            e = float(np.linalg.norm(r))
-            w = _huber_weight(e, cfg.huber_px)
+        Hcc_blk = np.zeros((max(nf, 1), 6, 6))
+        bc_blk = np.zeros((max(nf, 1), 6))
+        Eob = np.einsum('nai,naj->nij', Jc_sw, Jl_sw)     # (N,6,3) coupling
+        if nf > 0 and free_mask.any():
+            fm = free_mask
+            np.add.at(Hcc_blk, fc_obs[fm],
+                      np.einsum('nai,naj->nij', Jc_sw[fm], Jc_sw[fm]))
+            np.add.at(bc_blk, fc_obs[fm],
+                      np.einsum('nai,na->ni', Jc_sw[fm], r_sw[fm]))
 
-            # d(proj)/d(Xc): 2x3
-            Jp = np.array([
-                [fx * invZ, 0.0, -fx * Xc[0] * invZ * invZ],
-                [0.0, fy * invZ, -fy * Xc[1] * invZ * invZ],
-            ])
-            # Landmark Jacobian: 2x3
-            Jl = Jp @ R
-            # Pose Jacobian: 2x6 (only if camera is free)
-            Jl_sw = w * Jl
-            r_sw = w * r
+        # --- metric depth rows (1 per obs with valid depth) ----------------
+        if use_depth:
+            dm = has_depth & ok
+            sig = np.where(dm, cfg.depth_sigma_coeff * obs_depth ** 2, 1.0)
+            rz = np.where(dm, (Z - obs_depth) / sig, 0.0)
+            thr = cfg.depth_huber / sig
+            wz = np.where(np.abs(rz) <= thr, 1.0,
+                          np.sqrt(thr / np.maximum(np.abs(rz), 1e-12)))
+            wz = np.where(dm, wz, 0.0)
+            Jlz = Rc[:, 2, :] / sig[:, None]              # (N,3)
+            Jlz_sw = wz[:, None] * Jlz
+            np.add.at(Hpp, obs_lm, np.einsum('ni,nj->nij', Jlz_sw, Jlz_sw))
+            np.add.at(bp, obs_lm, Jlz_sw * (wz * rz)[:, None])
+            Jcz = np.zeros((N, 6))
+            Jcz[:, 2] = 1.0 / sig
+            Jcz[:, 3] = Xc[:, 1] / sig
+            Jcz[:, 4] = -Xc[:, 0] / sig
+            Jcz_sw = wz[:, None] * Jcz
+            Eob = Eob + np.einsum('ni,nj->nij', Jcz_sw, Jlz_sw)
+            if nf > 0 and free_mask.any():
+                fm = free_mask
+                np.add.at(Hcc_blk, fc_obs[fm],
+                          np.einsum('ni,nj->nij', Jcz_sw[fm], Jcz_sw[fm]))
+                np.add.at(bc_blk, fc_obs[fm], Jcz_sw[fm] * (wz * rz)[fm, None])
 
-            Hpp[l] += Jl_sw.T @ Jl_sw
-            bp[l] += Jl_sw.T @ r_sw
+        # --- LM damping ----------------------------------------------------
+        di = np.arange(3)
+        Hpp_d = Hpp.copy()
+        Hpp_d[:, di, di] += lam * np.clip(Hpp[:, di, di], 1e-9, None) + 1e-12
+        Hpp_inv = np.linalg.inv(Hpp_d)                    # (M,3,3)
 
-            fc = free_col[c]
-            Jc = None
-            if fc >= 0:
-                Jc = Jp @ np.hstack([np.eye(3), -skew(Xc)])  # 2x6
-                Jc_sw = w * Jc
-                s = slice(6 * fc, 6 * fc + 6)
-                Hcc[s, s] += Jc_sw.T @ Jc_sw
-                bc[s] += Jc_sw.T @ r_sw
-                E[l].append((fc, Jc_sw.T @ Jl_sw))  # 6x3
-
-            # --- metric depth residual: (Z - z_meas) anchors global scale ----
-            zm = obs_depth[n]
-            if use_depth and zm > 0:
-                sig = cfg.depth_sigma_coeff * zm * zm
-                rz = (Z - zm) / sig
-                wz = _huber_weight(abs(rz), cfg.depth_huber / sig)
-                # dZ/dXw = R[2,:] ; dZ/dxi = [0,0,1, Y, -X, 0]
-                Jlz = (R[2, :] / sig)              # (3,)
-                Jlz_sw = wz * Jlz
-                Hpp[l] += np.outer(Jlz_sw, Jlz_sw)
-                bp[l] += Jlz_sw * (wz * rz)
-                if fc >= 0:
-                    Jcz = np.array([0.0, 0.0, 1.0, Xc[1], -Xc[0], 0.0]) / sig
-                    Jcz_sw = wz * Jcz
-                    s = slice(6 * fc, 6 * fc + 6)
-                    Hcc[s, s] += np.outer(Jcz_sw, Jcz_sw)
-                    bc[s] += Jcz_sw * (wz * rz)
-                    E[l].append((fc, np.outer(Jcz_sw, Jlz_sw)))  # 6x3
-
-        # LM damping on camera block.
+        # Assemble big camera Hessian (block-diagonal) + rhs.
+        Hcc = np.zeros((6 * nf, 6 * nf))
+        bc = np.zeros(6 * nf)
+        for fcc in range(nf):
+            s = slice(6 * fcc, 6 * fcc + 6)
+            Hcc[s, s] = Hcc_blk[fcc]
+            bc[s] = bc_blk[fcc]
         if nf > 0:
-            Hcc[np.diag_indices_from(Hcc)] += lam * np.diag(Hcc).clip(min=1e-9)
+            dd = np.diag(Hcc)
+            Hcc[np.diag_indices_from(Hcc)] += lam * np.clip(dd, 1e-9, None)
 
-        # Schur complement: eliminate landmarks.
+        # Schur complement: rhs = -bc + sum E Hpp^-1 bp ; S = Hcc - E Hpp^-1 E^T
         S = Hcc.copy()
         rhs = -bc.copy()
-        Hpp_inv = np.zeros_like(Hpp)
-        for l in range(M):
-            H = Hpp[l].copy()
-            H[np.diag_indices_from(H)] += lam * np.clip(np.diag(H), 1e-9, None)
-            try:
-                Hi = np.linalg.inv(H)
-            except np.linalg.LinAlgError:
-                Hi = np.linalg.pinv(H)
-            Hpp_inv[l] = Hi
-            if not E[l]:
-                continue
-            Hi_bp = Hi @ bp[l]
-            for (fc, Ecl) in E[l]:
-                s = slice(6 * fc, 6 * fc + 6)
-                rhs[s] += Ecl @ Hi_bp                       # +E Hpp^-1 bp
-                for (fc2, Ec2l) in E[l]:
-                    s2 = slice(6 * fc2, 6 * fc2 + 6)
-                    S[s, s2] -= Ecl @ Hi @ Ec2l.T           # -E Hpp^-1 E^T
+        if nf > 0:
+            Y = np.einsum('nij,njk->nik', Eob, Hpp_inv[obs_lm])   # (N,6,3)
+            t1 = np.einsum('nij,nj->ni', Y, bp[obs_lm])           # (N,6)
+            np.add.at(rhs.reshape(nf, 6), fc_obs[free_mask], t1[free_mask])
+            # Pairwise S blocks, grouped by landmark (few obs per landmark).
+            for l in range(M):
+                seg = order[bounds[l]:bounds[l + 1]]
+                if seg.size == 0:
+                    continue
+                fcs = fc_obs[seg]
+                blocks = np.einsum('aij,bkj->abik', Y[seg], Eob[seg])  # (k,k,6,6)
+                for ai in range(seg.size):
+                    ra = slice(6 * fcs[ai], 6 * fcs[ai] + 6)
+                    for bi in range(seg.size):
+                        cb = slice(6 * fcs[bi], 6 * fcs[bi] + 6)
+                        S[ra, cb] -= blocks[ai, bi]
 
         # Solve reduced camera system.
         if nf > 0:
@@ -304,40 +342,38 @@ def optimize(
         else:
             dc = np.zeros(0)
 
-        # Back-substitute landmarks: dp_l = Hpp^-1 (-bp - sum_c E^T dc_c)
-        dp = np.zeros((M, 3))
-        for l in range(M):
-            rhs_l = -bp[l].copy()
-            for (fc, Ecl) in E[l]:
-                rhs_l -= Ecl.T @ dc[6 * fc:6 * fc + 6]
-            dp[l] = Hpp_inv[l] @ rhs_l
+        # Back-substitute landmarks (vectorised).
+        dc_obs = np.zeros((N, 6))
+        if nf > 0:
+            dc_blocks = dc.reshape(nf, 6)
+            dc_obs[free_mask] = dc_blocks[fc_obs[free_mask]]
+        sum_term = np.zeros((M, 3))
+        np.add.at(sum_term, obs_lm, np.einsum('nij,ni->nj', Eob, dc_obs))
+        dp = np.einsum('mij,mj->mi', Hpp_inv, -bp - sum_term)
 
         # Trial update.
         trial_poses = []
         for i in range(nC):
-            fc = free_col[i]
-            if fc >= 0:
-                trial_poses.append(se3_exp(dc[6 * fc:6 * fc + 6]) @ poses[i])
+            fcc = free_col[i]
+            if fcc >= 0:
+                trial_poses.append(se3_exp(dc[6 * fcc:6 * fcc + 6]) @ poses[i])
             else:
                 trial_poses.append(poses[i])
         trial_lms = landmarks + dp
 
-        # Evaluate; accept/reject (LM).
-        lm_bak = landmarks
-        landmarks = trial_lms
-        cost_new, mean_px = eval_cost(trial_poses)
+        cost_new, mean_px = eval_cost(trial_poses, trial_lms)
         if cost_new < cost_prev:
             poses = trial_poses
+            landmarks = trial_lms
             lam = max(cfg.min_lambda, lam * 0.5)
             improved = (cost_prev - cost_new) / max(cost_prev, 1e-12)
             cost_prev = cost_new
             if improved < cfg.rel_tol:
                 break
         else:
-            landmarks = lm_bak  # reject
             lam = min(cfg.max_lambda, lam * 4.0)
 
-    final_cost, mean_px = eval_cost(poses)
+    final_cost, mean_px = eval_cost(poses, landmarks)
     return BAResult(
         poses=poses,
         landmarks=landmarks,

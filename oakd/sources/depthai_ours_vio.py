@@ -41,6 +41,33 @@ _M_OPT_TO_NED = np.array(
 )
 
 
+def _ease_se3(C_cur: np.ndarray, C_tgt: np.ndarray, alpha: float) -> np.ndarray:
+    """Move ``C_cur`` a fraction ``alpha`` toward ``C_tgt`` (smooth correction).
+
+    Rotation eases along the geodesic (scaled axis-angle); translation eases
+    linearly. Keeps the applied correction continuous so BA updates never snap
+    the displayed trajectory.
+    """
+    R_cur, R_tgt = C_cur[:3, :3], C_tgt[:3, :3]
+    dR = R_tgt @ R_cur.T
+    ang = np.arccos(np.clip((np.trace(dR) - 1.0) * 0.5, -1.0, 1.0))
+    out = np.eye(4)
+    if ang < 1e-8:
+        out[:3, :3] = R_tgt
+    else:
+        axis = np.array([dR[2, 1] - dR[1, 2],
+                         dR[0, 2] - dR[2, 0],
+                         dR[1, 0] - dR[0, 1]]) / (2.0 * np.sin(ang))
+        a = alpha * ang
+        K_ = np.array([[0, -axis[2], axis[1]],
+                       [axis[2], 0, -axis[0]],
+                       [-axis[1], axis[0], 0]])
+        R_step = np.eye(3) + np.sin(a) * K_ + (1.0 - np.cos(a)) * (K_ @ K_)
+        out[:3, :3] = R_step @ R_cur
+    out[:3, 3] = (1.0 - alpha) * C_cur[:3, 3] + alpha * C_tgt[:3, 3]
+    return out
+
+
 def _rot_to_quat_wxyz(R: np.ndarray) -> np.ndarray:
     """Convert a 3x3 rotation matrix to a (w, x, y, z) unit quaternion."""
     trace = R[0, 0] + R[1, 1] + R[2, 2]
@@ -130,12 +157,13 @@ class OakOursVioSource(PoseSource):
             # VO, so the read loop never blocks on BA and the UI stays smooth.
             vo = RGBDVisualOdometry(K, OdometryConfig())
 
-            # In BA mode, a background thread refines a sliding window of
-            # keyframes and publishes a world-frame correction ``C`` that we
-            # left-multiply onto the f2f pose: P_disp = C @ P_f2f. ``C`` updates
-            # only at keyframe cadence with small steps, so the trajectory stays
-            # smooth while still getting BA's drift/scale correction.
+            # In BA mode, a background *process* refines a sliding window of
+            # keyframes and publishes a world-frame correction ``C``. We ease
+            # the applied correction toward the latest ``C`` so updates never
+            # snap the trajectory, and apply it as P_disp = C @ P_f2f.
             ba_state = None
+            C_applied = np.eye(4)
+            C_target = np.eye(4)
             if self.backend == "ba":
                 ba_state = self._start_ba_worker(K)
 
@@ -175,8 +203,8 @@ class OakOursVioSource(PoseSource):
                 pose = vo.process(gray, depth_m).copy()  # camera-optical world
 
                 if ba_state is not None:
-                    # Hand a keyframe snapshot to the BA worker every kf_every
-                    # frames (non-blocking: overwrite any pending one).
+                    # Submit a keyframe snapshot every kf_every frames. Drop if
+                    # the worker is busy (non-blocking) — never stall the loop.
                     kf_count += 1
                     if kf_count >= ba_state["kf_every"]:
                         kf_count = 0
@@ -186,10 +214,13 @@ class OakOursVioSource(PoseSource):
                             st.ids.copy(), st.points.copy(),
                             depth_m.copy(),
                         )
-                    # Apply the latest BA correction to the displayed pose.
-                    with ba_state["lock"]:
-                        C = ba_state["corr"]
-                    pose = C @ pose
+                    # Pull the latest correction from the worker (drain to last).
+                    newC = ba_state["poll"]()
+                    if newC is not None:
+                        C_target = newC
+                    # Ease toward the target so the correction never snaps.
+                    C_applied = _ease_se3(C_applied, C_target, 0.15)
+                    pose = C_applied @ pose
 
                 pos_opt = pose[:3, 3]
                 R_opt = pose[:3, :3]
@@ -232,11 +263,13 @@ class OakOursVioSource(PoseSource):
     def _start_ba_worker(self, K: np.ndarray) -> dict:
         """Spawn the background sliding-window BA thread.
 
-        Returns a small state dict the read loop uses to submit keyframe
-        snapshots and read the current correction. The worker keeps the entire
-        BA map in the *raw f2f* world frame (it is always fed raw f2f poses), so
-        the published correction ``C = inv(T_ba) @ T_cw`` maps that frame onto
-        the BA-refined one and is small (the window anchor is a raw f2f pose).
+        Returns a state dict with ``submit(T_cw, ids, pts, depth)`` and
+        ``poll() -> C | None``. The worker keeps the BA map in the *raw f2f*
+        world frame (it is always fed raw f2f poses), so the published
+        correction ``C = inv(T_ba) @ T_cw`` maps that frame onto the BA-refined
+        one. Because the BA core is vectorised NumPy (which releases the GIL on
+        its heavy linear-algebra), a thread is enough to keep the device read
+        loop responsive — no separate process needed.
         """
         import threading
 
@@ -247,23 +280,28 @@ class OakOursVioSource(PoseSource):
                              ba=BAConfig(max_iters=5, huber_px=2.0))
         ba_map = WindowedBAMap(K, cfg)
 
-        lock = threading.Lock()
         snap_lock = threading.Lock()
+        out_lock = threading.Lock()
         event = threading.Event()
         stop = threading.Event()
         state = {
-            "corr": np.eye(4),
-            "lock": lock,
             "event": event,
             "stop": stop,
             "kf_every": cfg.kf_every,
             "_pending": None,
+            "_corr": None,
         }
 
         def submit(T_cw, ids, pts, depth_m):
             with snap_lock:
                 state["_pending"] = (T_cw, ids, pts, depth_m)
             event.set()
+
+        def poll():
+            with out_lock:
+                C = state["_corr"]
+                state["_corr"] = None
+            return C
 
         def worker():
             while not stop.is_set():
@@ -280,12 +318,12 @@ class OakOursVioSource(PoseSource):
                 ba_map.add_keyframe(T_cw, ids, pts, depth_m)
                 post = ba_map.run_ba()
                 if post is not None:
-                    C = np.linalg.inv(post) @ T_cw
-                    with lock:
-                        state["corr"] = C
+                    with out_lock:
+                        state["_corr"] = np.linalg.inv(post) @ T_cw
 
         th = threading.Thread(target=worker, name="OursBAWorker", daemon=True)
         th.start()
         state["thread"] = th
         state["submit"] = submit
+        state["poll"] = poll
         return state
