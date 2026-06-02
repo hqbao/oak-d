@@ -430,7 +430,15 @@ class OakOursVioSource(PoseSource):
                             U[:, -1] *= -1.0
                             grav_corr = U @ Vt
                         R_disp = grav_corr @ R_pre
+                # ``grav_corr`` is a world-frame rotation, so it MUST be applied
+                # to BOTH the attitude and the position trajectory -- otherwise
+                # the triad rotates by the leveling angle but the path does not,
+                # and camera motion stops lining up with the body axes (moving
+                # "forward" no longer tracks the red arrow; the symptom of
+                # only-rotate-attitude). Rotating position by the same grav_corr
+                # keeps displacement and triad consistent.
                 pose[:3, :3] = R_disp
+                pose[:3, 3] = grav_corr @ pose[:3, 3]
 
                 # Accelerometer-ONLY attitude (gravity-leveled, yaw=0) for live
                 # side-by-side comparison in the UI -- computed every frame
