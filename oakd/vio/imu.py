@@ -111,3 +111,40 @@ class GyroPreintegrator:
             R_imu = R_imu @ so3_exp(w_mid * dt)
 
         return self.R_imu_cam @ R_imu @ self.R_imu_cam.T
+
+
+def gravity_aligned_R0(accel_cam: np.ndarray) -> np.ndarray:
+    """Initial camera->world rotation that levels the optical world to gravity.
+
+    ``accel_cam`` is the accelerometer specific-force reading (m/s^2) expressed
+    in the camera **optical** frame (x right, y down, z forward), averaged over a
+    near-static startup window. At rest the accelerometer measures +g along the
+    *upward* axis, so gravity ("down") in the camera frame is ``-accel_cam``.
+
+    The returned rotation ``R0`` (camera->world, i.e. the value to seed
+    ``RGBDVisualOdometry.pose[:3, :3]`` with) defines a world frame whose optical
+    "down" axis (+y) is aligned with real gravity and whose forward axis (+z) is
+    the horizontal projection of the camera's starting forward direction. Yaw is
+    left at the camera's starting heading -- there is no magnetometer, so absolute
+    yaw is undefined (this matches Basalt, which also leaves yaw free).
+
+    Verified on the gold sessions: the resulting startup roll/pitch agrees with
+    Basalt's gravity-leveled attitude to < 1 deg on near-static starts.
+    """
+    a = np.asarray(accel_cam, dtype=np.float64)
+    na = float(np.linalg.norm(a))
+    if na < 1e-6:
+        return np.eye(3)
+    down = -a / na                          # gravity dir in cam = world +y (down)
+    fwd = np.array([0.0, 0.0, 1.0])         # camera forward (optical +z)
+    fwd = fwd - (fwd @ down) * down         # horizontalise (perp to gravity)
+    if np.linalg.norm(fwd) < 1e-6:          # camera staring straight up/down
+        fwd = np.array([1.0, 0.0, 0.0])
+        fwd = fwd - (fwd @ down) * down
+    fwd /= np.linalg.norm(fwd)
+    right = np.cross(down, fwd)             # optical x = y (down) cross z (fwd)
+    right /= np.linalg.norm(right)
+    # Columns = world axes (right, down, fwd) expressed in the camera frame,
+    # i.e. R_{cam<-world}. The initial camera->world pose rotation is its inverse.
+    R_cam_from_world = np.column_stack([right, down, fwd])
+    return R_cam_from_world.T

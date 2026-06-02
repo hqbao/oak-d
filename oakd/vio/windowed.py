@@ -188,6 +188,15 @@ class WindowedRGBDOdometry:
         self.pose = np.eye(4)         # T_world_cur (camera->world)
         self.last_info: dict = {}
 
+    def align_to_gravity(self, accel_cam: np.ndarray) -> None:
+        """Seed the initial attitude from gravity (call before the first frame).
+
+        Delegates to the inner frame-to-frame tracker and mirrors its pose so
+        the keyframe map is built in the same gravity-leveled world frame.
+        """
+        self.vo.align_to_gravity(accel_cam)
+        self.pose = self.vo.pose.copy()
+
     # convenience pass-throughs (some tools inspect these)
     @property
     def landmarks(self) -> dict[int, np.ndarray]:

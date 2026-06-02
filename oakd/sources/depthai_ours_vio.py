@@ -30,6 +30,13 @@ Note: absolute North/Down here are *not* gravity-aligned (no IMU leveling); the
 frame is anchored to the first camera pose. Trajectory accuracy (ATE) is
 Umeyama-aligned so it is unaffected by this convention choice.
 
+Startup attitude: at launch we average the accelerometer over a short static
+window and gravity-level the initial pose (``RGBDVisualOdometry.align_to_gravity``)
+so the world "down" is real gravity and the reported roll/pitch reflect the
+camera's actual tilt -- not an assumed-level identity start. Yaw stays at the
+starting heading (no magnetometer). If the device reports no IMU, we fall back to
+an identity start.
+
 Note: the gyro rotation prior is a measured no-op on well-synced data (see
 ``oakd/vio/imu.py``), so this live source runs pure vision for simplicity.
 """
@@ -154,6 +161,7 @@ class OakOursVioSource(PoseSource):
             left = p.create(dai.node.Camera).build(left_socket, sensorFps=self.cam_fps)
             right = p.create(dai.node.Camera).build(right_socket, sensorFps=self.cam_fps)
             stereo = p.create(dai.node.StereoDepth)
+            imu = p.create(dai.node.IMU)
 
             stereo.setExtendedDisparity(False)
             stereo.setLeftRightCheck(True)
@@ -163,6 +171,13 @@ class OakOursVioSource(PoseSource):
             stereo.initialConfig.setLeftRightCheckThreshold(10)
             stereo.setDepthAlign(left_socket)
 
+            # Accelerometer only: used once at startup to gravity-level the
+            # initial attitude (so "down" is real gravity, not the arbitrary
+            # camera tilt at launch). We do not fuse it per-frame.
+            imu.enableIMUSensor([dai.IMUSensor.ACCELEROMETER_RAW], 100)
+            imu.setBatchReportThreshold(1)
+            imu.setMaxBatchReports(10)
+
             left.requestOutput((self.width, self.height)).link(stereo.left)
             right.requestOutput((self.width, self.height)).link(stereo.right)
 
@@ -171,6 +186,7 @@ class OakOursVioSource(PoseSource):
             # small buffer and always consume the *latest* frame below.
             q_left = stereo.rectifiedLeft.createOutputQueue(maxSize=4, blocking=False)
             q_depth = stereo.depth.createOutputQueue(maxSize=4, blocking=False)
+            q_imu = imu.out.createOutputQueue(maxSize=50, blocking=False)
 
             p.start()
 
@@ -180,20 +196,40 @@ class OakOursVioSource(PoseSource):
                 ch.getCameraIntrinsics(left_socket, self.width, self.height),
                 dtype=np.float64,
             )
+            # IMU->left-camera rotation (for bringing accel into the optical
+            # frame). depthai returns the extrinsic with translation in cm; we
+            # only need the 3x3 rotation here.
+            try:
+                R_imu_cam = np.array(
+                    ch.getImuToCameraExtrinsics(left_socket), dtype=np.float64
+                )[:3, :3]
+            except Exception:
+                R_imu_cam = np.eye(3)
 
             # The displayed pose is ALWAYS produced by the fast frame-to-frame
             # VO, so the read loop never blocks on BA and the UI stays smooth.
             vo = RGBDVisualOdometry(K, OdometryConfig())
 
+            # Gravity-level the initial attitude: average the accelerometer over
+            # a short static startup window, rotate it into the camera optical
+            # frame, and seed the VO world frame so its "down" is real gravity.
+            accel_cam = self._collect_startup_accel(q_imu, R_imu_cam)
+            if accel_cam is not None:
+                vo.align_to_gravity(accel_cam)
+
             # In BA mode, a background *process* refines a sliding window of
             # keyframes and publishes a world-frame correction ``C``. We ease
             # the applied correction toward the latest ``C`` so updates never
-            # snap the trajectory, and apply it as P_disp = C @ P_f2f.
+            # snap the trajectory, and apply it as P_disp = C @ P_f2f. The BA
+            # map is fed the (already gravity-aligned) f2f poses, so its
+            # correction is frame-consistent without extra bookkeeping.
             ba_state = None
             C_applied = np.eye(4)
             C_target = np.eye(4)
             if self.backend == "ba":
                 ba_state = self._start_ba_worker(K)
+
+
 
             t0 = time.monotonic()
             prev_pos_ned = np.zeros(3)
@@ -287,6 +323,37 @@ class OakOursVioSource(PoseSource):
                 ba_state["stop"].set()
                 ba_state["event"].set()
                 ba_state["thread"].join(timeout=1.0)
+
+    # ----------------------------------------------------------------------- #
+    def _collect_startup_accel(self, q_imu, R_imu_cam: np.ndarray,
+                               window_s: float = 0.4,
+                               timeout_s: float = 2.0) -> np.ndarray | None:
+        """Average the accelerometer over a short static startup window.
+
+        Returns the mean specific-force vector rotated into the camera optical
+        frame (ready for :meth:`RGBDVisualOdometry.align_to_gravity`), or ``None``
+        if no IMU samples arrived within ``timeout_s`` (older device / no IMU) —
+        in which case the caller falls back to an identity (unleveled) start.
+        """
+        samples: list[np.ndarray] = []
+        t_start = time.monotonic()
+        t_first: float | None = None
+        while time.monotonic() - t_start < timeout_s:
+            msg = q_imu.tryGet()
+            if msg is None:
+                time.sleep(0.005)
+                continue
+            for pkt in msg.packets:
+                a = pkt.acceleroMeter
+                samples.append(np.array([a.x, a.y, a.z], dtype=np.float64))
+            if t_first is None:
+                t_first = time.monotonic()
+            elif time.monotonic() - t_first >= window_s:
+                break
+        if not samples:
+            return None
+        accel_imu = np.mean(samples, axis=0)
+        return R_imu_cam @ accel_imu
 
     # ----------------------------------------------------------------------- #
     def _start_ba_worker(self, K: np.ndarray) -> dict:

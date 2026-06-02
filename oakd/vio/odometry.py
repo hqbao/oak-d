@@ -48,6 +48,19 @@ class RGBDVisualOdometry:
         self._prev_depth: np.ndarray | None = None
         self.last_info: dict = {}
 
+    def align_to_gravity(self, accel_cam: np.ndarray) -> None:
+        """Seed the initial attitude from gravity (call before the first frame).
+
+        ``accel_cam`` is the static-startup accelerometer reading rotated into
+        the camera optical frame. This sets the world frame so its "down" axis
+        is aligned with real gravity instead of the (arbitrary) starting camera
+        tilt -- the trajectory is otherwise unchanged (ATE is Umeyama-aligned, so
+        a global rotation of the world frame does not affect it).
+        """
+        from .imu import gravity_aligned_R0
+        self.pose = np.eye(4)
+        self.pose[:3, :3] = gravity_aligned_R0(accel_cam)
+
     def _backproject_px(self, u: float, v: float, z: float) -> np.ndarray:
         fx, fy = self.K[0, 0], self.K[1, 1]
         cx, cy = self.K[0, 2], self.K[1, 2]

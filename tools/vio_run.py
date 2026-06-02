@@ -167,6 +167,16 @@ def score_session(session_dir: Path, max_frames: int, verbose: bool,
         if imu["ts_ns"].size > 1:
             pre = GyroPreintegrator(imu["ts_ns"], imu["gyro"],
                                     reader.calib.T_imu_left)
+            # Gravity-align the initial attitude from the static-startup accel,
+            # so the world frame's "down" is real gravity (not the arbitrary
+            # starting camera tilt). ATE is Umeyama-aligned, so this global
+            # world rotation does not change the score -- it only makes the
+            # reported/displayed attitude physically meaningful.
+            R_imu_cam = reader.calib.T_imu_left[:3, :3]
+            t0 = imu["ts_ns"][0]
+            win = imu["ts_ns"] <= t0 + int(0.3 * 1e9)   # first ~0.3 s
+            accel_imu = imu["accel"][win].mean(axis=0)
+            vo.align_to_gravity(R_imu_cam @ accel_imu)
 
     if not quiet:
         print(f"session : {reader.dir}")
