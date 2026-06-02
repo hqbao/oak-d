@@ -25,6 +25,63 @@ import numpy as np
 from .frontend import FrontendConfig, KLTFrontend
 
 
+def level_attitude(R: np.ndarray, accel_cam: np.ndarray,
+                   g_ref: float | None = None,
+                   alpha: float = 0.03, alpha_max: float = 0.5,
+                   g_tol: float = 0.25) -> tuple[np.ndarray, bool, float]:
+    """Gravity-level a camera->world rotation's roll/pitch from accelerometer.
+
+    Complementary-filter step: returns a rotation that has been nudged so the
+    gravity direction *implied* by ``R`` lines up with the measured
+    accelerometer ``accel_cam`` (camera optical frame, x right, y down, z fwd).
+    The correction axis is horizontal (perpendicular to gravity) so only
+    roll/pitch move -- yaw is untouched (no magnetometer => absolute yaw is
+    unobservable, same as Basalt).
+
+    The gain is **adaptive**: a small base ``alpha`` for steady-state (smooth,
+    trusts vision) ramped toward ``alpha_max`` as the tilt error grows, so a big
+    discrepancy (e.g. after the camera was flipped and vision drifted) snaps back
+    within a few frames instead of crawling. It corrects only the *error*, so a
+    genuinely pitched camera keeps its true pitch (measured gravity already
+    matches ``R`` => ~zero correction).
+
+    Samples taken during strong linear acceleration (``|accel|`` more than
+    ``g_tol`` away from ``g_ref``) are rejected so thrust/translation does not
+    corrupt tilt. ``g_ref`` defaults to ``|accel_cam|`` when not given.
+
+    Returns ``(R_corrected, used, tilt_err_deg)``. ``used`` is ``False`` when the
+    sample was rejected (out of the gravity band); ``R_corrected`` is then ``R``
+    unchanged. ``tilt_err_deg`` is the angle between implied and true gravity
+    *before* correction (useful for diagnostics).
+    """
+    a = np.asarray(accel_cam, dtype=np.float64)
+    na = float(np.linalg.norm(a))
+    if na < 1e-6:
+        return R, False, 0.0
+    gr = g_ref or na
+    down_cam = -a / na                      # gravity dir in camera frame
+    g_est = R @ down_cam                    # world-down implied by attitude
+    target = np.array([0.0, 1.0, 0.0])      # true world-down (optical +y)
+    s_full = float(np.linalg.norm(np.cross(g_est, target)))
+    tilt_deg = float(np.degrees(np.arctan2(
+        s_full, float(np.dot(g_est, target)))))
+    if abs(na - gr) > g_tol * gr:           # not ~1g: linear acceleration
+        return R, False, tilt_deg
+    v = np.cross(g_est, target)
+    s = float(np.linalg.norm(v))
+    if s < 1e-9:                            # already aligned (or anti-aligned)
+        return R, True, tilt_deg
+    ang = float(np.arctan2(s, float(np.dot(g_est, target))))
+    axis = v / s
+    gain = alpha + (alpha_max - alpha) * min(ang / np.deg2rad(30.0), 1.0)
+    th = gain * ang
+    Kx = np.array([[0.0, -axis[2], axis[1]],
+                   [axis[2], 0.0, -axis[0]],
+                   [-axis[1], axis[0], 0.0]])
+    R_corr = np.eye(3) + np.sin(th) * Kx + (1.0 - np.cos(th)) * (Kx @ Kx)
+    return R_corr @ R, True, tilt_deg
+
+
 @dataclass
 class OdometryConfig:
     min_depth_m: float = 0.2
@@ -65,54 +122,19 @@ class RGBDVisualOdometry:
 
     def correct_tilt(self, accel_cam: np.ndarray,
                      alpha: float = 0.03, alpha_max: float = 0.5,
-                     g_tol: float = 0.12) -> bool:
+                     g_tol: float = 0.25) -> bool:
         """Continuously level the attitude roll/pitch from gravity (per frame).
 
-        Complementary filter: rotate the world attitude estimate by a fraction
-        of the way so the gravity direction *implied* by the current attitude
-        lines up with the measured accelerometer ``accel_cam`` (in the camera
-        optical frame). The correction axis is horizontal (perpendicular to
-        gravity) so it only nudges roll/pitch -- yaw is left to vision (there is
-        no magnetometer, so absolute yaw is unobservable).
-
-        The gain is **adaptive**: a small base ``alpha`` for steady-state (trusts
-        vision, stays smooth), ramped up toward ``alpha_max`` as the tilt error
-        grows so a large discrepancy -- e.g. after the camera was flipped through
-        a big rotation and vision drifted -- snaps back to gravity within a few
-        frames instead of crawling. It still corrects only the *error*, so a
-        genuinely pitched drone keeps its true pitch (measured gravity already
-        matches the attitude => ~zero correction). Samples taken during strong
-        linear acceleration (``|accel|`` outside the gravity band) are skipped so
-        thrust/translation does not corrupt tilt.
-
-        Returns ``True`` if the sample was usable (in the gravity band).
+        Thin wrapper around :func:`level_attitude` that mutates ``self.pose`` in
+        place and remembers the reference gravity magnitude. See that function
+        for the full description. Returns ``True`` if the sample was usable.
         """
-        a = np.asarray(accel_cam, dtype=np.float64)
-        na = float(np.linalg.norm(a))
-        if na < 1e-6:
-            return False
-        g_ref = self._g_ref or na
-        if abs(na - g_ref) > g_tol * g_ref:    # not ~1g: linear acceleration
-            return False
-        down_cam = -a / na                     # gravity dir in camera frame
-        g_est = self.pose[:3, :3] @ down_cam   # world-down implied by attitude
-        target = np.array([0.0, 1.0, 0.0])     # true world-down (optical +y)
-        v = np.cross(g_est, target)
-        s = float(np.linalg.norm(v))
-        if s < 1e-9:                           # already aligned (or anti-aligned)
-            return True
-        ang = float(np.arctan2(s, float(np.dot(g_est, target))))
-        axis = v / s
-        # Adaptive gain: base alpha for small errors, ramping to alpha_max as the
-        # error approaches ~30 deg so large discrepancies recover in a few frames.
-        gain = alpha + (alpha_max - alpha) * min(ang / np.deg2rad(30.0), 1.0)
-        th = gain * ang
-        Kx = np.array([[0.0, -axis[2], axis[1]],
-                       [axis[2], 0.0, -axis[0]],
-                       [-axis[1], axis[0], 0.0]])
-        R_corr = np.eye(3) + np.sin(th) * Kx + (1.0 - np.cos(th)) * (Kx @ Kx)
-        self.pose[:3, :3] = R_corr @ self.pose[:3, :3]
-        return True
+        R_new, used, _ = level_attitude(
+            self.pose[:3, :3], accel_cam, g_ref=self._g_ref,
+            alpha=alpha, alpha_max=alpha_max, g_tol=g_tol)
+        if used:
+            self.pose[:3, :3] = R_new
+        return used
 
 
     def _backproject_px(self, u: float, v: float, z: float) -> np.ndarray:

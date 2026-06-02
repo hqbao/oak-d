@@ -47,7 +47,7 @@ import time
 import numpy as np
 
 from ..pose import Pose
-from ..vio import OdometryConfig, RGBDVisualOdometry
+from ..vio import OdometryConfig, RGBDVisualOdometry, level_attitude
 from .base import PoseSource
 
 
@@ -267,6 +267,9 @@ class OakOursVioSource(PoseSource):
             frames = 0
             kf_count = 0
             last_fps_t = t0
+            accel_n = 0
+            accel_used = 0
+            last_tilt_log = t0
 
             while not self._stop.is_set() and p.isRunning():
                 # Drain each queue to its most recent frame; drop the backlog so
@@ -296,10 +299,8 @@ class OakOursVioSource(PoseSource):
 
                 vo.process(gray, depth_m)  # advance camera-optical world pose
 
-                # Continuously level the attitude roll/pitch from gravity: drain
-                # the IMU queue to the newest accel sample and nudge the world
-                # attitude toward it (yaw is left to vision -- no magnetometer).
-                # This kills slow tilt drift and makes the startup offset moot.
+                # Drain the IMU queue to the newest accelerometer sample (camera
+                # optical frame). We level the *displayed* attitude with it below.
                 latest_a = None
                 imsg = q_imu.tryGet()
                 while imsg is not None:
@@ -307,10 +308,14 @@ class OakOursVioSource(PoseSource):
                         a = pkt.acceleroMeter
                         latest_a = np.array([a.x, a.y, a.z], dtype=np.float64)
                     imsg = q_imu.tryGet()
-                if latest_a is not None:
-                    vo.correct_tilt(R_imu_cam @ latest_a)
+                accel_cam = None if latest_a is None else R_imu_cam @ latest_a
 
-                pose = vo.pose.copy()  # camera-optical world (gravity-leveled)
+                # Level the f2f world frame too, so the BA map is fed gravity-
+                # consistent poses (keeps the tracker frame sane long term).
+                if accel_cam is not None:
+                    vo.correct_tilt(accel_cam)
+
+                pose = vo.pose.copy()  # camera-optical world
 
                 if ba_state is not None:
                     # Submit a keyframe snapshot every kf_every frames. Drop if
@@ -331,6 +336,31 @@ class OakOursVioSource(PoseSource):
                     # Ease toward the target so the correction never snaps.
                     C_applied = _ease_se3(C_applied, C_target, 0.15)
                     pose = C_applied @ pose
+
+                # Gravity-level the FINAL displayed attitude from accel. Doing it
+                # here (after any BA correction) guarantees the body frame the
+                # user sees always tracks gravity -- the BA correction carries the
+                # drifted map attitude and would otherwise re-tilt it. roll/pitch
+                # follow the IMU; yaw is left to vision (no magnetometer).
+                if accel_cam is not None:
+                    R_lvl, used, tilt_deg = level_attitude(
+                        pose[:3, :3], accel_cam, g_ref=vo._g_ref)
+                    if used:
+                        pose[:3, :3] = R_lvl
+                    # Rate-limited diagnostics so we can see, on the device,
+                    # whether samples are being accepted and the tilt is closing.
+                    accel_n += 1
+                    if used:
+                        accel_used += 1
+                    if time.monotonic() - last_tilt_log >= 1.0:
+                        rate = accel_used / max(accel_n, 1)
+                        print(f"[ours-vio] tilt={tilt_deg:5.1f}deg "
+                              f"accel_used={100*rate:3.0f}% "
+                              f"|a|={np.linalg.norm(accel_cam):.2f} "
+                              f"g_ref={vo._g_ref or 0:.2f}")
+                        accel_n = 0
+                        accel_used = 0
+                        last_tilt_log = time.monotonic()
 
                 pos_opt = pose[:3, 3]
                 R_opt = pose[:3, :3]
