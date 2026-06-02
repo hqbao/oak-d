@@ -49,7 +49,7 @@ import numpy as np
 from ..pose import Pose
 from ..frames import quat_to_rpy
 from ..vio import (
-    OdometryConfig, RGBDVisualOdometry, gravity_aligned_R0,
+    OdometryConfig, RGBDVisualOdometry, gravity_aligned_R0, level_attitude,
 )
 from .base import PoseSource
 
@@ -283,6 +283,7 @@ class OakOursVioSource(PoseSource):
             accel_used = 0
             last_tilt_log = t0
             accel_ema: np.ndarray | None = None
+            grav_corr = np.eye(3)   # stateful display-frame gravity correction
 
             while not self._stop.is_set() and p.isRunning():
                 # Drain each queue to its most recent frame; drop the backlog so
@@ -398,21 +399,38 @@ class OakOursVioSource(PoseSource):
                     C_applied = _ease_se3(C_applied, C_target, 0.15)
                     pose = C_applied @ pose
 
-                # Gravity leveling is now owned by (a) the f2f tracker's
-                # ``correct_tilt`` (which levels ``vo.pose`` at rest, between
-                # keyframes) and (b) the in-BA gravity prior (which levels the
-                # keyframe map so the BA correction ``C`` keeps the displayed
-                # pose level). No display-side correction is applied here -- the
-                # old stateful ``grav_corr`` hack (which re-leveled the final
-                # pose and drifted out of SO(3) into NaN) is gone. We only
-                # measure the residual tilt for diagnostics.
+                # FINAL display leveling -- accel is the "trum cuoi" (last word)
+                # on the shown roll/pitch. The Phase-4 in-BA gravity prior keeps
+                # the keyframe MAP from tilt-drifting, but the BA correction
+                # ``C_applied`` can still leave a residual tilt on the displayed
+                # ``C_applied @ vo.pose`` (reprojection in a low-parallax view is
+                # blind to absolute tilt, so the latest keyframe attitude need not
+                # be perfectly level). So we keep a STATEFUL world-frame correction
+                # ``grav_corr`` and apply ``pose = grav_corr @ pose`` as the last
+                # step. At rest we nudge ``grav_corr`` by a small adaptive gain
+                # toward cancelling the residual tilt (stateful => a partial gain
+                # converges, unlike a partial gain on the freshly-rebuilt pose);
+                # when moving we freeze it so nothing jumps at the rest-gate
+                # boundary. Because BA now also levels the map, grav_corr stays
+                # small. Re-orthonormalise (SVD project onto SO(3)) each update so
+                # the repeated matrix products never drift out of SO(3) into NaN.
+                # yaw is untouched (level_attitude only rotates about horizontal).
+                R_pre = pose[:3, :3]
+                R_disp = grav_corr @ R_pre
                 tilt_deg = 0.0
-                if accel_cam is not None:
-                    na = float(np.linalg.norm(accel_cam))
-                    if na > 1e-6:
-                        g_est = pose[:3, :3] @ (-accel_cam / na)
-                        tilt_deg = float(np.degrees(np.arccos(
-                            np.clip(float(g_est[1]), -1.0, 1.0))))
+                if accel_cam is not None and at_rest:
+                    R_lvl, used, tilt_deg = level_attitude(
+                        R_disp, accel_cam, g_ref=vo._g_ref,
+                        alpha=0.05, alpha_max=0.25)
+                    if used:
+                        grav_corr = (R_lvl @ R_disp.T) @ grav_corr
+                        U, _, Vt = np.linalg.svd(grav_corr)
+                        grav_corr = U @ Vt
+                        if np.linalg.det(grav_corr) < 0:
+                            U[:, -1] *= -1.0
+                            grav_corr = U @ Vt
+                        R_disp = grav_corr @ R_pre
+                pose[:3, :3] = R_disp
 
                 # Accelerometer-ONLY attitude (gravity-leveled, yaw=0) for live
                 # side-by-side comparison in the UI -- computed every frame
