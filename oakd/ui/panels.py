@@ -69,6 +69,8 @@ class TelemetryPanel(QWidget):
         self.att_r = _row(ag, 0, "roll")
         self.att_p = _row(ag, 1, "pitch")
         self.att_y = _row(ag, 2, "yaw")
+        self.att_ar = _row(ag, 3, "accel roll")
+        self.att_ap = _row(ag, 4, "accel pitch")
         al.addLayout(ag)
 
         # ---- status ------------------------------------------------------
@@ -114,6 +116,14 @@ class TelemetryPanel(QWidget):
             self.att_r.setText(f"{r:+7.2f}")
             self.att_p.setText(f"{pi:+7.2f}")
             self.att_y.setText(f"{y:+7.2f}")
+
+            arp = latest.accel_rpy_deg
+            if arp is not None:
+                self.att_ar.setText(f"{arp[0]:+7.2f}")
+                self.att_ap.setText(f"{arp[1]:+7.2f}")
+            else:
+                self.att_ar.setText("--")
+                self.att_ap.setText("--")
 
             ok = latest.tracking_ok
             self.st_state.setText("OK" if ok else "LOST")

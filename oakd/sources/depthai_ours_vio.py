@@ -47,7 +47,10 @@ import time
 import numpy as np
 
 from ..pose import Pose
-from ..vio import OdometryConfig, RGBDVisualOdometry, level_attitude
+from ..frames import quat_to_rpy
+from ..vio import (
+    OdometryConfig, RGBDVisualOdometry, gravity_aligned_R0, level_attitude,
+)
 from .base import PoseSource
 
 
@@ -309,33 +312,34 @@ class OakOursVioSource(PoseSource):
 
                 vo.process(gray, depth_m)  # advance camera-optical world pose
 
-                # Drain the IMU queue to the newest accelerometer sample and
-                # bring it into the camera optical frame.
-                latest_a = None
+                # Drain the IMU queue and AVERAGE every accelerometer packet in
+                # the batch this frame (not just the last sample). Averaging the
+                # ~5-6 samples per frame rejects per-sample noise and gives a
+                # stable gravity magnitude; taking a single last sample made the
+                # motion residual jump and the |g| estimate bounce.
+                acc_sum = np.zeros(3)
+                acc_cnt = 0
                 imsg = q_imu.tryGet()
                 while imsg is not None:
                     for pkt in imsg.packets:
                         a = pkt.acceleroMeter
-                        latest_a = np.array([a.x, a.y, a.z], dtype=np.float64)
+                        acc_sum += (a.x, a.y, a.z)
+                        acc_cnt += 1
                     imsg = q_imu.tryGet()
-                accel_raw = None if latest_a is None else R_imu_cam @ latest_a
+                accel_raw = None if acc_cnt == 0 else R_imu_cam @ (acc_sum / acc_cnt)
 
                 # --- accelerometer leveling, gated on the camera being at rest --
-                # A magnitude gate alone CANNOT reject lateral linear
-                # acceleration: a sideways push barely changes |accel| (it adds in
-                # quadrature with the ~9.8 gravity term) yet tilts the measured
-                # gravity DIRECTION by several degrees. Locking the attitude onto
-                # that biased direction is what left the body frame slightly tilted
-                # while moving, only settling level when fully still.
-                #
-                # So we only trust accel for leveling when the camera is actually
-                # at rest. The motion signal is the residual of the raw sample
-                # against its EMA (recent motion energy): tiny at rest (sensor
-                # noise), large during any translation/rotation. When moving we
-                # skip leveling and let vision hold the attitude (fine short-term);
-                # when still, accel pulls roll/pitch back to true gravity.
+                # We only trust accel for leveling when the camera is actually at
+                # rest, because a magnitude gate cannot reject lateral linear
+                # acceleration (a sideways push barely changes |accel| yet tilts
+                # the gravity direction). The motion signal is the residual of the
+                # batch-averaged sample against its EMA: tiny at rest, large during
+                # any translation/rotation. When moving we skip leveling and let
+                # vision hold the attitude; when still, accel pulls roll/pitch back
+                # to true gravity.
                 accel_cam = None
                 at_rest = False
+                motion = 0.0
                 if accel_raw is not None:
                     if accel_ema is None:
                         accel_ema = accel_raw.copy()
@@ -383,17 +387,31 @@ class OakOursVioSource(PoseSource):
                 else:
                     used = False
                     tilt_deg = 0.0
+
+                # Accelerometer-ONLY attitude (gravity-leveled, yaw=0) for live
+                # side-by-side comparison in the UI -- computed every frame
+                # regardless of the rest gate, so we can see what accel "wants"
+                # even when leveling is being withheld.
+                accel_q_ned = None
+                if accel_cam is not None:
+                    R0_opt = gravity_aligned_R0(accel_cam)        # cam->world, yaw=0
+                    R_acc_ned = _M_OPT_TO_NED @ R0_opt @ _P_OPT_TO_FRD
+                    accel_q_ned = _rot_to_quat_wxyz(R_acc_ned)
+
                 # Rate-limited diagnostics so we can see, on the device, whether
-                # the rest gate is firing and the tilt is closing.
+                # the rest gate is firing and what accel is reporting.
                 if accel_cam is not None:
                     accel_n += 1
                     if at_rest:
                         accel_used += 1
                     if time.monotonic() - last_tilt_log >= 1.0:
                         rate = accel_used / max(accel_n, 1)
-                        mtn = float(np.linalg.norm(accel_raw - accel_ema))
-                        print(f"[ours-vio] tilt={tilt_deg:5.1f}deg "
-                              f"at_rest={100*rate:3.0f}% motion={mtn:.2f} "
+                        ar, ap, _ = (np.degrees(
+                            quat_to_rpy(accel_q_ned)) if accel_q_ned is not None
+                            else (0.0, 0.0, 0.0))
+                        print(f"[ours-vio] accel r/p={ar:+5.1f}/{ap:+5.1f} "
+                              f"tilt={tilt_deg:4.1f} at_rest={100*rate:3.0f}% "
+                              f"motion={motion:.2f} n={acc_cnt} "
                               f"|a|={np.linalg.norm(accel_cam):.2f} "
                               f"g_ref={vo._g_ref or 0:.2f}")
                         accel_n = 0
@@ -425,6 +443,7 @@ class OakOursVioSource(PoseSource):
                     vel_ned=vel_ned,
                     quat_wxyz=q_ned,
                     tracking_ok=ok,
+                    accel_quat_wxyz=accel_q_ned,
                 ))
 
                 frames += 1

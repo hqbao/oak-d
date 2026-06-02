@@ -18,6 +18,10 @@ class Pose:
     vel_ned: np.ndarray = field(default_factory=lambda: np.zeros(3))   # m/s
     quat_wxyz: np.ndarray = field(default_factory=lambda: np.array([1.0, 0, 0, 0]))
     tracking_ok: bool = True
+    # Optional accelerometer-only attitude (gravity-leveled, yaw=0) in the same
+    # NED body frame, for live comparison against the fused ``quat_wxyz``. ``None``
+    # when the source has no IMU.
+    accel_quat_wxyz: np.ndarray | None = None
 
     @property
     def R(self) -> np.ndarray:
@@ -30,6 +34,13 @@ class Pose:
     @property
     def rpy_deg(self) -> tuple[float, float, float]:
         r, p, y = self.rpy_rad
+        return float(np.degrees(r)), float(np.degrees(p)), float(np.degrees(y))
+
+    @property
+    def accel_rpy_deg(self) -> tuple[float, float, float] | None:
+        if self.accel_quat_wxyz is None:
+            return None
+        r, p, y = quat_to_rpy(self.accel_quat_wxyz)
         return float(np.degrees(r)), float(np.degrees(p)), float(np.degrees(y))
 
 
