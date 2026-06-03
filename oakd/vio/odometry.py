@@ -323,6 +323,25 @@ class RGBDVisualOdometry:
                             t_use = _translation_given_rotation(
                                 obj[idx], img[idx], R_fused, self.K)
                         R = R_fused
+                        # Translation trust: the SAME slipped tracks that made
+                        # the vision ROTATION untrustworthy also corrupt the
+                        # vision TRANSLATION. During a fast in-place yaw the true
+                        # translation is ~0, but depth + track slip makes the
+                        # solver explain the rotational image flow as a
+                        # translation -> a phantom linear drift on every spin
+                        # (the symptom: yaw in place and the position walks off).
+                        # Basalt avoids this by constraining translation with the
+                        # accelerometer; we have no such term, so we instead trust
+                        # the gyro's "this is rotation" and damp the translation
+                        # by the same disagreement factor. Unchanged below the
+                        # gate, so gold / well-tracked motion keeps full vision
+                        # translation (gold disagreement stays < 0.75 deg).
+                        if disagree_deg > self.cfg.gyro_disagree_deg:
+                            span = max(self.cfg.gyro_disagree_span_deg, 1e-6)
+                            t_trust = max(0.0, 1.0 - (disagree_deg
+                                          - self.cfg.gyro_disagree_deg) / span)
+                            t_use = t_use * t_trust
+                            info["t_trust"] = t_trust
                     T_pc = np.eye(4)
                     T_pc[:3, :3] = R
                     T_pc[:3, 3] = t_use

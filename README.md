@@ -116,7 +116,21 @@ Offline scoring of the same backends against the Basalt reference:
 .venv/bin/python tools/vio_run.py --all --backend ba     # + windowed BA
 .venv/bin/python tools/vio_run.py --all --backend slam   # + loop closure
 .venv/bin/python tools/vio_run.py --all --backend slam --slam-kf-every 8
+.venv/bin/python tools/vio_run.py --all --backend vio    # tight-coupled VIO (experimental)
 ```
+
+`--backend vio` is the **experimental tight-coupled** path: it folds the IMU
+preintegration factors (rotation + velocity + position increments) and the
+visual reprojection + depth into ONE joint optimisation per window, solving for
+each keyframe's pose, velocity and gyro/accel bias together with the landmarks
+(true Basalt style, vs the loosely-coupled gyro fusion above). The math is
+validated by self-tests (`imu_preint_selftest.py`, `vio_ba_selftest.py`); on
+real gold it currently **regresses vs `ba`** on healthy motion (the dense
+finite-difference solver is rougher than the analytic Schur BA, and long
+sessions show slow accel/gravity drift -- corridor scale ~1.15). It is opt-in
+and touches no production path; `tools/vio_diag.py` A/Bs the IMU factor on/off to
+attribute the gap. Closing it needs online gravity-direction estimation, which
+is the next step.
 
 Self-tests (run before/after touching the from-scratch VIO):
 
@@ -124,6 +138,8 @@ Self-tests (run before/after touching the from-scratch VIO):
 .venv/bin/python tools/klt_selftest.py        # our optical flow + corners vs OpenCV
 .venv/bin/python tools/ba_selftest.py         # sliding-window BA core
 .venv/bin/python tools/posegraph_selftest.py  # SE(3) pose-graph + loop closure
+.venv/bin/python tools/imu_preint_selftest.py # IMU preintegration vs closed form
+.venv/bin/python tools/vio_ba_selftest.py     # tight-coupled VIO joint solve
 ```
 
 `klt_selftest.py` is the regression guard for the library-free frontend: it
@@ -146,6 +162,12 @@ in the numbers instead of as lag on the device.
       vision correction gated on inliers AND vision/gyro disagreement; gyro
       propagates rotation when vision fails, so fast yaw no longer freezes the
       pose. No-op on well-tracked frames (gold ATE unchanged)
+- [~] Tight-coupled VIO core (`oakd/vio/vio_window.py`): Forster on-manifold
+      IMU preintegration + joint visual-inertial window solve (pose + velocity
+      + gyro/accel bias + landmarks), self-test validated, wired offline as the
+      opt-in `--backend vio`. Experimental: still regresses vs `ba` on healthy
+      gold (rough dense FD solver + long-horizon accel/gravity drift); needs
+      online gravity estimation before it replaces the loosely-coupled path
 - [x] Own pure-NumPy optical flow (pyramidal Lucas-Kanade, `oakd/vio/klt.py`)
       and corner detection (Shi-Tomasi, `oakd/vio/corners.py`) replacing cv2;
       KLT inner loop JIT-accelerated with Numba (`oakd/vio/klt_numba.py`,

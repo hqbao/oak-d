@@ -46,6 +46,155 @@ def so3_exp(omega: np.ndarray) -> np.ndarray:
     return np.eye(3) + np.sin(theta) * K + (1.0 - np.cos(theta)) * (K @ K)
 
 
+def _skew(w: np.ndarray) -> np.ndarray:
+    return np.array([[0.0, -w[2], w[1]],
+                     [w[2], 0.0, -w[0]],
+                     [-w[1], w[0], 0.0]])
+
+
+def so3_log(R: np.ndarray) -> np.ndarray:
+    """Inverse of :func:`so3_exp`: rotation matrix -> rotation vector (rad)."""
+    c = (np.trace(R) - 1.0) * 0.5
+    c = max(-1.0, min(1.0, c))
+    theta = float(np.arccos(c))
+    if theta < 1e-12:
+        # near identity: vee of the skew part (first-order)
+        return np.array([R[2, 1] - R[1, 2],
+                         R[0, 2] - R[2, 0],
+                         R[1, 0] - R[0, 1]]) * 0.5
+    w = np.array([R[2, 1] - R[1, 2],
+                  R[0, 2] - R[2, 0],
+                  R[1, 0] - R[0, 1]])
+    return w * (theta / (2.0 * np.sin(theta)))
+
+
+def so3_right_jacobian(phi: np.ndarray) -> np.ndarray:
+    """Right Jacobian of SO(3): ``Exp(phi + dphi) ~= Exp(phi) Exp(Jr(phi) dphi)``.
+
+    Used by IMU preintegration to propagate the bias Jacobian of the
+    preintegrated rotation. Falls back to the small-angle form near zero.
+    """
+    theta = float(np.linalg.norm(phi))
+    K = _skew(phi)
+    if theta < 1e-8:
+        return np.eye(3) - 0.5 * K
+    t2 = theta * theta
+    return (np.eye(3)
+            - (1.0 - np.cos(theta)) / t2 * K
+            + (theta - np.sin(theta)) / (t2 * theta) * (K @ K))
+
+
+class ImuPreintegration:
+    """Result of preintegrating IMU between two times (body/IMU frame).
+
+    Holds the preintegrated rotation/velocity/position increments ``dR, dv, dp``
+    over the interval ``dt`` seconds, plus the first-order Jacobians w.r.t. the
+    gyro/accel biases used at integration time, so a slightly changed bias
+    estimate can correct the deltas WITHOUT re-integrating the raw samples
+    (Forster et al., "On-Manifold Preintegration", TRO 2017).
+
+    All quantities are in the IMU/body frame; the extrinsic to the camera is
+    applied by the optimizer, not here.
+    """
+
+    __slots__ = ("dR", "dv", "dp", "dt", "bg", "ba",
+                 "dR_dbg", "dv_dbg", "dv_dba", "dp_dbg", "dp_dba")
+
+    def __init__(self, dR, dv, dp, dt, bg, ba,
+                 dR_dbg, dv_dbg, dv_dba, dp_dbg, dp_dba):
+        self.dR = dR
+        self.dv = dv
+        self.dp = dp
+        self.dt = dt
+        self.bg = bg          # gyro bias used at integration (linearisation pt)
+        self.ba = ba          # accel bias used at integration
+        self.dR_dbg = dR_dbg
+        self.dv_dbg = dv_dbg
+        self.dv_dba = dv_dba
+        self.dp_dbg = dp_dbg
+        self.dp_dba = dp_dba
+
+    def corrected(self, bg_new: np.ndarray, ba_new: np.ndarray):
+        """First-order bias-corrected ``(dR, dv, dp)`` for a new bias estimate."""
+        dbg = np.asarray(bg_new, np.float64) - self.bg
+        dba = np.asarray(ba_new, np.float64) - self.ba
+        dR = self.dR @ so3_exp(self.dR_dbg @ dbg)
+        dv = self.dv + self.dv_dbg @ dbg + self.dv_dba @ dba
+        dp = self.dp + self.dp_dbg @ dbg + self.dp_dba @ dba
+        return dR, dv, dp
+
+
+def preintegrate_imu(ts_ns: np.ndarray, gyro: np.ndarray, accel: np.ndarray,
+                     bg: np.ndarray, ba: np.ndarray) -> ImuPreintegration:
+    """Preintegrate a contiguous block of IMU samples (body frame).
+
+    Parameters
+    ----------
+    ts_ns : (K,) int64 device-clock nanoseconds, strictly increasing.
+    gyro  : (K,3) rad/s in the IMU frame.
+    accel : (K,3) m/s^2 specific force in the IMU frame.
+    bg, ba: (3,) gyro / accel bias to subtract (linearisation point).
+
+    Returns an :class:`ImuPreintegration`. The increments satisfy, for body
+    poses ``(R_i,p_i,v_i)`` at the first sample and ``(R_j,p_j,v_j)`` at the
+    last, with world gravity ``g``::
+
+        R_j  ~= R_i @ dR
+        v_j  ~= v_i + g*dt + R_i @ dv
+        p_j  ~= p_i + v_i*dt + 0.5*g*dt^2 + R_i @ dp
+
+    (forward-Euler segment integration; error -> 0 as the sample rate rises).
+    """
+    ts = np.asarray(ts_ns, np.int64)
+    g = np.asarray(gyro, np.float64)
+    a = np.asarray(accel, np.float64)
+    bg = np.asarray(bg, np.float64)
+    ba = np.asarray(ba, np.float64)
+
+    dR = np.eye(3)
+    dv = np.zeros(3)
+    dp = np.zeros(3)
+    dR_dbg = np.zeros((3, 3))
+    dv_dbg = np.zeros((3, 3))
+    dv_dba = np.zeros((3, 3))
+    dp_dbg = np.zeros((3, 3))
+    dp_dba = np.zeros((3, 3))
+    t_acc = 0.0
+
+    for k in range(len(ts) - 1):
+        dt = (int(ts[k + 1]) - int(ts[k])) * 1e-9
+        if dt <= 0:
+            continue
+        # Midpoint sample over the segment (trapezoidal in the raw signal).
+        w = 0.5 * (g[k] + g[k + 1]) - bg
+        acc = 0.5 * (a[k] + a[k + 1]) - ba
+
+        # Position + velocity increments use the CURRENT dR (= dR_{i,k}); update
+        # position before velocity (it uses the pre-update dv). Same ordering for
+        # the bias Jacobians.
+        aR = dR @ acc
+        dp = dp + dv * dt + 0.5 * aR * dt * dt
+        dv = dv + aR * dt
+
+        Rk_sk = dR @ _skew(acc)
+        dp_dba = dp_dba + dv_dba * dt - 0.5 * dR * dt * dt
+        dp_dbg = dp_dbg + dv_dbg * dt - 0.5 * (Rk_sk @ dR_dbg) * dt * dt
+        dv_dba = dv_dba - dR * dt
+        dv_dbg = dv_dbg - (Rk_sk @ dR_dbg) * dt
+
+        # Rotation increment + its gyro-bias Jacobian recursion.
+        phi = w * dt
+        dR_inc = so3_exp(phi)
+        Jr = so3_right_jacobian(phi)
+        dR_dbg = dR_inc.T @ dR_dbg - Jr * dt
+        dR = dR @ dR_inc
+        t_acc += dt
+
+    return ImuPreintegration(dR, dv, dp, t_acc, bg.copy(), ba.copy(),
+                             dR_dbg, dv_dbg, dv_dba, dp_dbg, dp_dba)
+
+
+
 class GyroPreintegrator:
     """Integrates gyro samples into inter-frame rotation, in the camera frame.
 

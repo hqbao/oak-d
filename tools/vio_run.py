@@ -33,6 +33,7 @@ from oakd.vio import (  # noqa: E402
     SessionReader,
     SlamMap,
     WindowedRGBDOdometry,
+    WindowedVIORGBDOdometry,
 )
 from oakd.vio.slam import SlamConfig       # noqa: E402
 from oakd.vio.posegraph import se3_inv  # noqa: E402
@@ -93,9 +94,11 @@ def main() -> int:
                     help="0 = all frames")
     ap.add_argument("--all", action="store_true",
                     help="run every gold session and print a summary table")
-    ap.add_argument("--backend", choices=("f2f", "ba", "slam"), default="f2f",
+    ap.add_argument("--backend", choices=("f2f", "ba", "slam", "vio"),
+                    default="f2f",
                     help="f2f = frame-to-frame VO; ba = windowed bundle "
-                         "adjustment; slam = ba + loop closure + pose graph")
+                         "adjustment; slam = ba + loop closure + pose graph; "
+                         "vio = tight-coupled visual-inertial window")
     ap.add_argument("--no-imu", action="store_true",
                     help="disable the gyro rotation prior (pure vision)")
     ap.add_argument("--slam-kf-every", type=int, default=5, dest="slam_kf_every",
@@ -225,6 +228,17 @@ def score_session(session_dir: Path, max_frames: int, verbose: bool,
     # even when KLT briefly loses tracks. It is a no-op where vision is healthy
     # (see gold ATE parity), so it is safe to leave on for every backend.
     odom_cfg = OdometryConfig(gyro_fuse=use_gyro)
+
+    # Load the IMU stream once up front (the tight-coupled VIO backend needs it
+    # at construction, and the gyro rotation prior reuses the same arrays).
+    imu = None
+    R_imu_cam = None
+    if reader.calib.has_imu_extrinsics:
+        imu_raw = reader.load_imu()
+        if imu_raw["ts_ns"].size > 1:
+            imu = imu_raw
+            R_imu_cam = reader.calib.T_imu_left[:3, :3]
+
     slam = None
     if backend in ("ba", "slam"):
         vo = WindowedRGBDOdometry(reader.K, odom_cfg=odom_cfg)
@@ -235,6 +249,22 @@ def score_session(session_dir: Path, max_frames: int, verbose: bool,
                 kf_min_trans_m=slam_kf_min_trans,
                 kf_min_rot_deg=slam_kf_min_rot,
                 max_keyframes=slam_max_kf))
+    elif backend == "vio":
+        if imu is None:
+            raise SystemExit(
+                "backend 'vio' requires a session with IMU extrinsics "
+                f"(none in {session_dir})")
+        # Rotate the raw IMU into the camera optical frame; the VIO core works
+        # in body == camera. Startup gyro bias from the near-static first window;
+        # accel bias linearisation point is 0 (gravity is modelled separately).
+        gyro_cam = (R_imu_cam @ imu["gyro"].T).T
+        accel_cam = (R_imu_cam @ imu["accel"].T).T
+        t0 = imu["ts_ns"][0]
+        win = imu["ts_ns"] <= t0 + int(0.3 * 1e9)
+        bg0 = gyro_cam[win].mean(axis=0) if win.any() else np.zeros(3)
+        vo = WindowedVIORGBDOdometry(
+            reader.K, imu["ts_ns"], gyro_cam, accel_cam,
+            bg0=bg0, ba0=np.zeros(3), odom_cfg=odom_cfg)
     else:
         vo = RGBDVisualOdometry(reader.K, odom_cfg)
 
@@ -242,21 +272,18 @@ def score_session(session_dir: Path, max_frames: int, verbose: bool,
     # feed a rotation prior to PnP. Sessions recorded before extrinsics were
     # captured (T_imu_left is None) silently fall back to pure vision.
     pre = None
-    if use_gyro and reader.calib.has_imu_extrinsics:
-        imu = reader.load_imu()
-        if imu["ts_ns"].size > 1:
-            pre = GyroPreintegrator(imu["ts_ns"], imu["gyro"],
-                                    reader.calib.T_imu_left)
-            # Gravity-align the initial attitude from the static-startup accel,
-            # so the world frame's "down" is real gravity (not the arbitrary
-            # starting camera tilt). ATE is Umeyama-aligned, so this global
-            # world rotation does not change the score -- it only makes the
-            # reported/displayed attitude physically meaningful.
-            R_imu_cam = reader.calib.T_imu_left[:3, :3]
-            t0 = imu["ts_ns"][0]
-            win = imu["ts_ns"] <= t0 + int(0.3 * 1e9)   # first ~0.3 s
-            accel_imu = imu["accel"][win].mean(axis=0)
-            vo.align_to_gravity(R_imu_cam @ accel_imu)
+    if use_gyro and imu is not None:
+        pre = GyroPreintegrator(imu["ts_ns"], imu["gyro"],
+                                reader.calib.T_imu_left)
+        # Gravity-align the initial attitude from the static-startup accel,
+        # so the world frame's "down" is real gravity (not the arbitrary
+        # starting camera tilt). ATE is Umeyama-aligned, so this global
+        # world rotation does not change the score -- it only makes the
+        # reported/displayed attitude physically meaningful.
+        t0 = imu["ts_ns"][0]
+        win = imu["ts_ns"] <= t0 + int(0.3 * 1e9)   # first ~0.3 s
+        accel_imu = imu["accel"][win].mean(axis=0)
+        vo.align_to_gravity(R_imu_cam @ accel_imu)
 
     if not quiet:
         print(f"session : {reader.dir}")
@@ -278,7 +305,10 @@ def score_session(session_dir: Path, max_frames: int, verbose: bool,
         R_prior = None
         if pre is not None and prev_ts is not None:
             R_prior = pre.delta_rotation(prev_ts, f.ts_ns)
-        pose = vo.process(f.gray_left, f.depth_m, R_prior=R_prior)
+        if backend == "vio":
+            pose = vo.process(f.gray_left, f.depth_m, f.ts_ns, R_prior=R_prior)
+        else:
+            pose = vo.process(f.gray_left, f.depth_m, R_prior=R_prior)
         prev_ts = f.ts_ns
         est[f.seq] = pose[:3, 3].copy()
         if vo.last_info.get("ok"):

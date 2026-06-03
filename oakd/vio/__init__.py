@@ -16,6 +16,11 @@ from .odometry import OdometryConfig, RGBDVisualOdometry, level_attitude
 from .posegraph import PoseGraph, se3_adjoint, se3_inv, se3_log
 from .reader import CameraCalib, Frame, SessionReader, StereoCalib
 from .slam import SlamConfig, SlamMap
+from .vio_window import (
+    WindowedVIOConfig,
+    WindowedVIOMap,
+    WindowedVIORGBDOdometry,
+)
 from .windowed import WindowedBAMap, WindowedConfig, WindowedRGBDOdometry
 
 __all__ = [
@@ -37,6 +42,9 @@ __all__ = [
     "WindowedConfig",
     "WindowedRGBDOdometry",
     "WindowedBAMap",
+    "WindowedVIOConfig",
+    "WindowedVIOMap",
+    "WindowedVIORGBDOdometry",
     "KeyframeAppearance",
     "LoopConfig",
     "LoopDetector",
