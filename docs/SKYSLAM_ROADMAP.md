@@ -245,17 +245,18 @@ typedef struct {
 
 **Success**: on EuRoC MH_01, median tracking length ≥ 30 frames, outlier rate < 10%.
 
-**PROTOTYPED in the from-scratch VIO (2026-06-03, commit `7312e50`)** — the
-pyramidal Lucas-Kanade tracker is already implemented library-free in pure NumPy
-(`oakd/vio/klt.py`, Bouguet formulation, separable Gaussian pyramid, central-diff
-gradients, forward-additive Gauss-Newton with a min-eigenvalue gate and
-active-set masking). It is a drop-in for `cv2.calcOpticalFlowPyrLK`, agrees with
-it to sub-pixel (lab_loop adjacent-frame mean 0.025 px) and keeps ATE parity
-(corridor 0.66→0.70%). It is the default frontend tracker now; `--cv2-klt` falls
-back to OpenCV for a faster live display (the pure-NumPy version is ~25× slower).
-This is the reference to port to NEON-optimised `klt_tracker.c`. Corner detection
-(`goodFeaturesToTrack`/Shi-Tomasi) is still the one remaining cv2 call to replace
-(→ `fast_detector.c`).
+**PROTOTYPED in the from-scratch VIO (2026-06-03, commits `7312e50` + `7e74b7a`)** —
+both the pyramidal Lucas-Kanade tracker AND the Shi-Tomasi corner detector are
+already implemented library-free in pure NumPy (`oakd/vio/klt.py` Bouguet KLT with
+active-set masking; `oakd/vio/corners.py` Sobel gradients + integral-image box
+sum + smaller-eigenvalue response + NMS + occupancy-grid min-distance). They are
+drop-ins for `cv2.calcOpticalFlowPyrLK` / `cv2.goodFeaturesToTrack`, agree with
+them closely (lab_loop: KLT adjacent-frame mean 0.025 px; corners same 173 points,
+nn mean 0.03 px) and keep ATE parity (lab_loop f2f 1.18→1.27%). They are the
+default frontend now; `--cv2-klt` falls back to OpenCV for a faster live display
+(the pure-NumPy versions are ~25× slower). These are the reference to port to
+NEON-optimised `fast_detector.c` / `klt_tracker.c`. The only remaining cv2 call in
+the default path is image decode (`cv2.imread`), not frontend math.
 
 --- (3–5 days code | 2–3 weeks debug)
 

@@ -82,10 +82,11 @@ with their defaults):
 ./run.sh --source ours-ba --ba-window 6 --ba-kf-every 5 --ba-iters 5
 ./run.sh --source ours --fps 20                    # camera frame rate (any ours-* source)
 
-# Optical flow tracking is our own pure-NumPy pyramidal Lucas-Kanade by default
-# (no library). It is ~25x slower than cv2, so for a smoother live display you
-# can opt back into cv2's flow (offline ATE is unaffected either way):
-./run.sh --source ours --cv2-klt                   # use cv2 optical flow (faster live)
+# Optical flow tracking AND corner detection are our own pure-NumPy
+# implementations by default (pyramidal Lucas-Kanade + Shi-Tomasi, no library).
+# They are ~25x slower than cv2, so for a smoother live display you can opt back
+# into cv2 (offline ATE is unaffected either way):
+./run.sh --source ours --cv2-klt                   # use cv2 flow + corners (faster live)
 ```
 
 Offline scoring of the same backends against the Basalt reference:
@@ -108,7 +109,8 @@ Offline scoring of the same backends against the Basalt reference:
       ORB loop closure + SE(3) pose graph); gravity-leveled, scored vs Basalt in
       `tools/vio_run.py` (corridor ATE 0.61%, see `docs/SKYSLAM_ROADMAP.md`)
 - [x] Own pure-NumPy optical flow (pyramidal Lucas-Kanade, `oakd/vio/klt.py`)
-      replacing cv2; default on, `--cv2-klt` falls back for faster live display
+      and corner detection (Shi-Tomasi, `oakd/vio/corners.py`) replacing cv2;
+      default on, `--cv2-klt` falls back for faster live display
 - [x] Logging + offline replay (`tools/record_session.py` + `tools/viz_session.py`)
 - [x] Persistent SLAM database (auto save `rtabmap.db` + extract KF/loop via `tools/extract_kf_from_db.py`)
 - [x] Gold regression suite (6 sessions, see `docs/GOLD_SESSIONS.md`)
