@@ -78,6 +78,14 @@ with their defaults):
 ./run.sh --source ours-slam --slam-kf-every 5      # insert+loop-detect every N frames
 ./run.sh --source ours-slam --slam-radius 0        # spatial loop gate (m), 0 = check all
 
+# Keyframe budget for long runs (default off = grows with run time). The motion
+# gate bounds the map by TRAJECTORY length instead — a hovering/stationary drone
+# stops adding keyframes (cuts ~36% KF on lab_loop, ATE unchanged). Prefer this.
+./run.sh --source ours-slam --slam-kf-min-trans 0.10 --slam-kf-min-rot 8
+# Absolute safety cap (drops oldest). WARNING: forgets old places, so set it well
+# above your largest excursion or loops there can no longer close.
+./run.sh --source ours-slam --slam-max-kf 500
+
 # Bundle-adjustment tuning (ours-ba)
 ./run.sh --source ours-ba --ba-window 6 --ba-kf-every 5 --ba-iters 5
 ./run.sh --source ours --fps 20                    # camera frame rate (any ours-* source)

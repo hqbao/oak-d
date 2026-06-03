@@ -44,6 +44,26 @@ class SlamConfig:
     # update rate can be raised without the worker falling behind. It can only
     # *miss* a loop if drift already exceeds the radius by revisit time.
     loop_search_radius_m: float = 0.0
+    # --- keyframe budget (long-run memory / compute bound) ------------------
+    # Motion-gated insertion: skip a new keyframe unless the camera has moved at
+    # least ``kf_min_trans_m`` metres OR rotated ``kf_min_rot_deg`` degrees since
+    # the last *inserted* keyframe. This makes the map grow with TRAJECTORY
+    # length instead of run TIME -- a stationary or slowly-panning camera stops
+    # piling up redundant keyframes, which is the main cause of unbounded memory
+    # and the O(N^3) PGO cost on long sessions. 0/0 = disabled (insert on every
+    # call, the original behaviour). The odometry edge is always taken between
+    # consecutive *inserted* keyframes, so skipping frames keeps the chain exact.
+    kf_min_trans_m: float = 0.0
+    kf_min_rot_deg: float = 0.0
+    # Hard ceiling on stored keyframes (0 = unlimited). When the count would
+    # exceed it the OLDEST keyframe is dropped (its node + incident edges
+    # removed, remaining ids renumbered). This bounds memory absolutely, but note
+    # it *forgets* old places: a loop can only close against keyframes still in
+    # the map, so set this well above the largest excursion you need to relocalise
+    # against. Prefer the motion gate above as the primary bound; use this only as
+    # a safety cap for runs that would otherwise grow without limit.
+    max_keyframes: int = 0
+
 
 
 class SlamMap:
@@ -62,10 +82,60 @@ class SlamMap:
         self.loop_events: list[dict] = []        # {"cur","old","inliers","matches"}
 
     # ------------------------------------------------------------------ #
+    def _needs_keyframe(self, T_wc: np.ndarray) -> bool:
+        """Motion gate: True if the camera moved/rotated enough since the last
+        inserted keyframe (or if gating is disabled / this is the first KF)."""
+        tmin = self.cfg.kf_min_trans_m
+        rmin = self.cfg.kf_min_rot_deg
+        if (tmin <= 0.0 and rmin <= 0.0) or not self.kf_orig:
+            return True
+        dT = se3_inv(self.kf_orig[-1]) @ T_wc
+        need = False
+        if tmin > 0.0:
+            need |= float(np.linalg.norm(dT[:3, 3])) >= tmin
+        if rmin > 0.0:
+            c = (np.trace(dT[:3, :3]) - 1.0) * 0.5
+            ang = float(np.degrees(np.arccos(np.clip(c, -1.0, 1.0))))
+            need |= ang >= rmin
+        return need
+
+    def _drop_oldest(self) -> None:
+        """Remove the oldest keyframe (id 0): renumber remaining ids down by one,
+        drop its node + incident edges, and shift loop-event references."""
+        self.kf_orig.pop(0)
+        self.kf_pose.pop(0)
+        self.kf_app.pop(0)
+        self.kf_seq.pop(0)
+        new = PoseGraph()
+        for i, p in enumerate(self.kf_pose):
+            new.add_node(i, p)                 # current corrected pose as init
+        for e in self.graph.edges:
+            if e.i == 0 or e.j == 0:
+                continue                        # touched the removed node -> drop
+            new.add_edge(e.i - 1, e.j - 1, e.Z, e.Omega, e.loop)
+        self.graph = new
+        shifted = []
+        for ev in self.loop_events:
+            if ev["cur"] == 0 or ev["old"] == 0:
+                continue
+            ev = dict(ev)
+            ev["cur"] -= 1
+            ev["old"] -= 1
+            shifted.append(ev)
+        self.loop_events = shifted
+
+    # ------------------------------------------------------------------ #
     def add_keyframe(self, T_wc: np.ndarray, gray: np.ndarray,
                      depth_m: np.ndarray, seq: int = -1) -> list[dict]:
-        """Insert a keyframe; returns the loop events confirmed at this KF."""
+        """Insert a keyframe; returns the loop events confirmed at this KF.
+
+        Skips insertion (returns ``[]``) when the motion gate
+        (:meth:`_needs_keyframe`) says the camera has not moved enough, so the
+        ORB appearance is never even computed for a redundant keyframe.
+        """
         T_wc = np.asarray(T_wc, float).copy()
+        if not self._needs_keyframe(T_wc):
+            return []
         idx = len(self.kf_orig)
         app = self.detector.make_appearance(gray, depth_m)
         self.kf_orig.append(T_wc)
@@ -73,6 +143,7 @@ class SlamMap:
         self.kf_app.append(app)
         self.kf_seq.append(int(seq))
         self.graph.add_node(idx, T_wc)
+
 
         # Odometry edge from the previous keyframe (relative motion from the
         # odometry poses): Z = T_ci_cj = inv(X_i) X_j.
@@ -108,6 +179,14 @@ class SlamMap:
                       "cur_seq": self.kf_seq[idx], "old_seq": self.kf_seq[old]}
                 events.append(ev)
                 self.loop_events.append(ev)
+
+        # Hard ceiling: drop the oldest keyframe(s) once over budget. Done last
+        # so the new keyframe and any loop edges it just formed are kept; the
+        # cost is forgetting the very oldest place.
+        cap = self.cfg.max_keyframes
+        if cap > 0:
+            while len(self.kf_orig) > cap:
+                self._drop_oldest()
         return events
 
     # ------------------------------------------------------------------ #

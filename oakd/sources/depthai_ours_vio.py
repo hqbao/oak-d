@@ -185,7 +185,8 @@ class OakOursVioSource(PoseSource):
                  backend: str = "f2f", slam_kf_every: int = 5,
                  slam_radius_m: float = 0.0, ba_window: int = 6,
                  ba_kf_every: int = 5, ba_iters: int = 5,
-                 use_own_klt: bool = False) -> None:
+                 use_own_klt: bool = False, slam_kf_min_trans: float = 0.0,
+                 slam_kf_min_rot: float = 0.0, slam_max_kf: int = 0) -> None:
         super().__init__()
         self.width = int(width)
         self.height = int(height)
@@ -200,6 +201,17 @@ class OakOursVioSource(PoseSource):
         # distant keyframes cheaply, but it bounds cost on very long runs.
         self.slam_kf_every = int(slam_kf_every)
         self.slam_radius_m = float(slam_radius_m)
+        # Keyframe budget for long runs. The motion gate (min translation /
+        # rotation since the last keyframe) makes the map grow with TRAJECTORY
+        # length instead of run TIME -- a hovering/stationary drone stops piling
+        # up redundant keyframes, the main cause of unbounded memory + PGO cost.
+        # ``slam_max_kf`` is an absolute safety cap (drops the oldest keyframe
+        # when exceeded; 0 = unlimited). Both default to off so behaviour is
+        # unchanged unless requested.
+        self.slam_kf_min_trans = float(slam_kf_min_trans)
+        self.slam_kf_min_rot = float(slam_kf_min_rot)
+        self.slam_max_kf = int(slam_max_kf)
+
         # Sliding-window BA tuning (backend='ba'): window size, keyframe cadence,
         # and BA iterations per solve. Smaller = cheaper/faster, larger = more
         # accurate but heavier on the background thread.
@@ -729,7 +741,11 @@ class OakOursVioSource(PoseSource):
 
         # Spatial gating keeps loop detection bounded as the map grows so the
         # configured keyframe cadence stays sustainable on the background thread.
-        slam = SlamMap(K, SlamConfig(loop_search_radius_m=self.slam_radius_m))
+        slam = SlamMap(K, SlamConfig(
+            loop_search_radius_m=self.slam_radius_m,
+            kf_min_trans_m=self.slam_kf_min_trans,
+            kf_min_rot_deg=self.slam_kf_min_rot,
+            max_keyframes=self.slam_max_kf))
 
         snap_lock = threading.Lock()
         out_lock = threading.Lock()

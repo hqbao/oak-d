@@ -40,7 +40,10 @@ def _build_source(name: str, args):
         from oakd.sources.depthai_ours_vio import OakOursVioSource
         return OakOursVioSource(
             fps=args.fps, backend="slam", use_own_klt=args.own_klt,
-            slam_kf_every=args.slam_kf_every, slam_radius_m=args.slam_radius)
+            slam_kf_every=args.slam_kf_every, slam_radius_m=args.slam_radius,
+            slam_kf_min_trans=args.slam_kf_min_trans,
+            slam_kf_min_rot=args.slam_kf_min_rot,
+            slam_max_kf=args.slam_max_kf)
     raise SystemExit(f"unknown --source '{name}' "
                      f"(expected: fake|oak|slam|ours|ours-ba|ours-slam)")
 
@@ -70,6 +73,20 @@ def main() -> int:
                          "radius; bounds cost on very long runs. 0 = check all "
                          "(default; the appearance gate already rejects distant "
                          "keyframes cheaply) [0]")
+    ap.add_argument("--slam-kf-min-trans", type=float, default=0.0,
+                    dest="slam_kf_min_trans",
+                    help="motion gate: skip a keyframe unless the camera moved "
+                         ">= this many metres since the last one. Bounds the map "
+                         "by trajectory length, not run time (a hovering drone "
+                         "stops adding keyframes). 0 = disabled [0]")
+    ap.add_argument("--slam-kf-min-rot", type=float, default=0.0,
+                    dest="slam_kf_min_rot",
+                    help="motion gate: skip a keyframe unless the camera rotated "
+                         ">= this many degrees since the last one. 0 = disabled [0]")
+    ap.add_argument("--slam-max-kf", type=int, default=0, dest="slam_max_kf",
+                    help="hard cap on stored keyframes (drops the oldest when "
+                         "exceeded; forgets old places so loops there can no "
+                         "longer close). 0 = unlimited [0]")
     # BA tuning (ours-ba)
     ap.add_argument("--ba-window", type=int, default=6, dest="ba_window",
                     help="BA sliding-window size in keyframes [6]")

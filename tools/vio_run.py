@@ -103,6 +103,19 @@ def main() -> int:
     ap.add_argument("--slam-radius", type=float, default=0.0,
                     help="SLAM spatial gate (m): only loop-check keyframes "
                          "within this radius. 0 = check all (offline default) [0]")
+    ap.add_argument("--slam-kf-min-trans", type=float, default=0.0,
+                    dest="slam_kf_min_trans",
+                    help="SLAM motion gate: skip a keyframe unless the camera "
+                         "moved >= this many metres since the last one. "
+                         "0 = disabled [0]")
+    ap.add_argument("--slam-kf-min-rot", type=float, default=0.0,
+                    dest="slam_kf_min_rot",
+                    help="SLAM motion gate: skip a keyframe unless the camera "
+                         "rotated >= this many degrees since the last one. "
+                         "0 = disabled [0]")
+    ap.add_argument("--slam-max-kf", type=int, default=0, dest="slam_max_kf",
+                    help="SLAM hard cap on stored keyframes (drops oldest when "
+                         "exceeded). 0 = unlimited [0]")
     ap.add_argument("--verbose", action="store_true")
     args = ap.parse_args()
 
@@ -110,12 +123,18 @@ def main() -> int:
     if args.all:
         return run_all(use_imu, backend=args.backend,
                        slam_kf_every=args.slam_kf_every,
-                       slam_radius_m=args.slam_radius)
+                       slam_radius_m=args.slam_radius,
+                       slam_kf_min_trans=args.slam_kf_min_trans,
+                       slam_kf_min_rot=args.slam_kf_min_rot,
+                       slam_max_kf=args.slam_max_kf)
 
     score_session(Path(args.session), args.max_frames, args.verbose,
                   use_imu=use_imu, backend=args.backend,
                   slam_kf_every=args.slam_kf_every,
-                  slam_radius_m=args.slam_radius)
+                  slam_radius_m=args.slam_radius,
+                  slam_kf_min_trans=args.slam_kf_min_trans,
+                  slam_kf_min_rot=args.slam_kf_min_rot,
+                  slam_max_kf=args.slam_max_kf)
     return 0
 
 
@@ -135,7 +154,9 @@ def basalt_ref_is_broken(positions: dict[int, np.ndarray]) -> bool:
 
 
 def run_all(use_imu: bool = True, backend: str = "f2f",
-            slam_kf_every: int = 5, slam_radius_m: float = 0.0) -> int:
+            slam_kf_every: int = 5, slam_radius_m: float = 0.0,
+            slam_kf_min_trans: float = 0.0, slam_kf_min_rot: float = 0.0,
+            slam_max_kf: int = 0) -> int:
     gold = Path("sessions/gold")
     rows = []
     for d in sorted(gold.iterdir()):
@@ -146,7 +167,10 @@ def run_all(use_imu: bool = True, backend: str = "f2f",
         res = None if broken else score_session(d, 0, False, quiet=True,
                                                 use_imu=use_imu, backend=backend,
                                                 slam_kf_every=slam_kf_every,
-                                                slam_radius_m=slam_radius_m)
+                                                slam_radius_m=slam_radius_m,
+                                                slam_kf_min_trans=slam_kf_min_trans,
+                                                slam_kf_min_rot=slam_kf_min_rot,
+                                                slam_max_kf=slam_max_kf)
         rows.append((d.name, res, note))
         print(f"  {d.name:18s} done")
 
@@ -185,7 +209,8 @@ def run_all(use_imu: bool = True, backend: str = "f2f",
 def score_session(session_dir: Path, max_frames: int, verbose: bool,
                   quiet: bool = False, use_imu: bool = True,
                   backend: str = "f2f", slam_kf_every: int = 5,
-                  slam_radius_m: float = 0.0):
+                  slam_radius_m: float = 0.0, slam_kf_min_trans: float = 0.0,
+                  slam_kf_min_rot: float = 0.0, slam_max_kf: int = 0):
     reader = SessionReader(session_dir)
     n = len(reader) if max_frames <= 0 else min(max_frames, len(reader))
     slam = None
@@ -194,7 +219,10 @@ def score_session(session_dir: Path, max_frames: int, verbose: bool,
         use_imu = False  # BA/SLAM backends do not use the gyro prior
         if backend == "slam":
             slam = SlamMap(reader.K, SlamConfig(
-                loop_search_radius_m=slam_radius_m))
+                loop_search_radius_m=slam_radius_m,
+                kf_min_trans_m=slam_kf_min_trans,
+                kf_min_rot_deg=slam_kf_min_rot,
+                max_keyframes=slam_max_kf))
     else:
         vo = RGBDVisualOdometry(reader.K)
 
