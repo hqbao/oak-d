@@ -63,6 +63,13 @@ class SlamConfig:
     # against. Prefer the motion gate above as the primary bound; use this only as
     # a safety cap for runs that would otherwise grow without limit.
     max_keyframes: int = 0
+    # Weak prior (added to every node's Hessian diagonal in PGO) pulling each
+    # node toward its current pose. It keeps the optimisation well-conditioned
+    # when the graph is DISCONNECTED -- e.g. a keyframe segment whose odometry
+    # chain was broken at a tracking loss floats with no path to the anchor, so
+    # without this its gauge block is singular. Tiny vs the 1e12 anchor and the
+    # edge information (omega 1..5), so a normally-connected graph is unaffected.
+    gauge_ridge: float = 1e-3
 
 
 
@@ -80,6 +87,10 @@ class SlamMap:
         self.kf_app: list = []                   # KeyframeAppearance
         self.kf_seq: list[int] = []
         self.loop_events: list[dict] = []        # {"cur","old","inliers","matches"}
+        self.segment_breaks: list[int] = []      # kf ids where the chain is broken
+        # Tracking loss seen since the last *inserted* keyframe -- carried across
+        # motion-gated skips so the break lands on the next real keyframe.
+        self._carry_lost: bool = False
 
     # ------------------------------------------------------------------ #
     def _needs_keyframe(self, T_wc: np.ndarray) -> bool:
@@ -123,19 +134,34 @@ class SlamMap:
             ev["old"] -= 1
             shifted.append(ev)
         self.loop_events = shifted
+        self.segment_breaks = [b - 1 for b in self.segment_breaks if b > 0]
 
     # ------------------------------------------------------------------ #
     def add_keyframe(self, T_wc: np.ndarray, gray: np.ndarray,
-                     depth_m: np.ndarray, seq: int = -1) -> list[dict]:
+                     depth_m: np.ndarray, seq: int = -1,
+                     tracking_lost: bool = False) -> list[dict]:
         """Insert a keyframe; returns the loop events confirmed at this KF.
 
         Skips insertion (returns ``[]``) when the motion gate
         (:meth:`_needs_keyframe`) says the camera has not moved enough, so the
         ORB appearance is never even computed for a redundant keyframe.
+
+        ``tracking_lost`` means the odometry between the previous keyframe and
+        this one is untrustworthy (e.g. PnP failed and the f2f pose froze while
+        the camera actually moved). In that case the odometry edge is NOT added:
+        the pose-graph chain is BROKEN here, so the rubbish relative motion never
+        pollutes the optimisation. The segment from here on floats freely until a
+        loop closure (relocalisation) re-anchors it to the known map -- much
+        safer than trusting a corrupt edge or deleting the keyframes outright.
+        The flag is carried across motion-gated skips so it still applies to the
+        next keyframe that is actually inserted.
         """
         T_wc = np.asarray(T_wc, float).copy()
+        self._carry_lost |= bool(tracking_lost)
         if not self._needs_keyframe(T_wc):
             return []
+        lost = self._carry_lost
+        self._carry_lost = False
         idx = len(self.kf_orig)
         app = self.detector.make_appearance(gray, depth_m)
         self.kf_orig.append(T_wc)
@@ -144,12 +170,15 @@ class SlamMap:
         self.kf_seq.append(int(seq))
         self.graph.add_node(idx, T_wc)
 
-
         # Odometry edge from the previous keyframe (relative motion from the
-        # odometry poses): Z = T_ci_cj = inv(X_i) X_j.
-        if idx > 0:
+        # odometry poses): Z = T_ci_cj = inv(X_i) X_j. Skipped when tracking was
+        # lost in between -> the chain breaks and this keyframe starts a new
+        # floating segment (recorded for diagnostics).
+        if idx > 0 and not lost:
             Z = se3_inv(self.kf_orig[idx - 1]) @ self.kf_orig[idx]
             self.graph.add_edge(idx - 1, idx, Z, omega=self.cfg.odom_omega)
+        elif idx > 0 and lost:
+            self.segment_breaks.append(idx)
 
         # Loop detection against older keyframes (skip the recent ones).
         events: list[dict] = []
@@ -197,7 +226,13 @@ class SlamMap:
         """Run pose-graph optimisation and rewrite all keyframe poses."""
         if not self.has_loops():
             return {"skipped": "no loop edges"}
-        info = self.graph.optimize(iters=self.cfg.pgo_iters, verbose=verbose)
+        # The gauge ridge is only needed to stabilise a DISCONNECTED graph (a
+        # segment whose chain was broken at a tracking loss). When the chain is
+        # intact (no breaks) pass 0 so a normal graph optimises exactly as before
+        # -- byte-identical to the pre-feature behaviour.
+        ridge = self.cfg.gauge_ridge if self.segment_breaks else 0.0
+        info = self.graph.optimize(iters=self.cfg.pgo_iters, verbose=verbose,
+                                   gauge_ridge=ridge)
         for idx in range(len(self.kf_pose)):
             self.kf_pose[idx] = self.graph.nodes[idx].copy()
         return info

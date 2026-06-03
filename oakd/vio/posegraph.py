@@ -289,13 +289,19 @@ class PoseGraph:
 
     def optimize(self, iters: int = 30, anchor: int | None = None,
                  rel_tol: float = 1e-6, huber_delta: float = 0.5,
-                 verbose: bool = False) -> dict:
+                 verbose: bool = False, gauge_ridge: float = 0.0) -> dict:
         """Gauss-Newton (with LM damping). Mutates node poses in place.
 
         ``huber_delta`` applies a Huber robust kernel to **loop** edges only
         (odometry edges are trusted): a loop whose residual exceeds the threshold
         is down-weighted, so a few surviving false loop closures (perceptual
         aliasing) cannot drag the whole graph. Set to 0 to disable.
+
+        ``gauge_ridge`` (default 0 = off) adds a tiny constant to every Hessian
+        diagonal entry, a weak prior pulling each node toward its current pose.
+        It keeps the solve well-conditioned when the graph is DISCONNECTED (a
+        component with no path to the anchor has a singular gauge block); such
+        components arise when a keyframe chain is broken at a tracking loss.
 
         The whole assembly is vectorised over edges (batched NumPy + scatter),
         so when this runs on the SLAM background thread it releases the GIL and
@@ -365,6 +371,14 @@ class PoseGraph:
             # Pin the anchor node with a strong prior (gauge freedom removal).
             sa = slice(6 * a, 6 * a + 6)
             H[sa, sa] += np.eye(6) * 1e12
+
+            # Weak gauge prior on every node (toward its current pose) so any
+            # component disconnected from the anchor -- e.g. a keyframe segment
+            # whose odometry chain was broken at a tracking loss -- stays put
+            # instead of floating on a singular Hessian, until a loop edge
+            # re-anchors it. Tiny vs the 1e12 anchor + edge information.
+            if gauge_ridge > 0.0:
+                H[np.diag_indices_from(H)] += gauge_ridge
 
             # LM damping.
             H[np.diag_indices_from(H)] += lam * np.clip(np.diag(H), 1e-9, None)
