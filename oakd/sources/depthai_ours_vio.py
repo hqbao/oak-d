@@ -166,6 +166,18 @@ class OakOursVioSource(PoseSource):
     ``backend='f2f'`` runs the plain frame-to-frame PnP VO; ``backend='ba'``
     runs the sliding-window bundle-adjustment VO. Both share the same KLT
     frontend and depth, so switching backends isolates exactly what BA adds.
+
+    ``backend='slam'`` runs the f2f VO for display and a **background loop-closure
+    SLAM** thread (:class:`oakd.vio.SlamMap`): every few frames a keyframe (the
+    raw f2f pose + its image + depth) is handed to the SLAM map, which recognises
+    revisited places (ORB + fundamental-matrix + PnP geometric verification) and
+    runs SE(3) pose-graph optimisation. The resulting world-frame correction is
+    eased onto the displayed trajectory exactly like the BA correction, so loop
+    closures snap out the accumulated drift smoothly. The SLAM map is fed the
+    *raw* f2f poses (a fixed world frame), so its odometry edges stay
+    self-consistent over the whole trajectory; gravity leveling is still applied
+    as the final display step (the ordering rule: loop closure owns position+yaw,
+    accel re-levels tilt last).
     """
 
     def __init__(self, width: int = 640, height: int = 400, fps: int = 20,
@@ -270,6 +282,14 @@ class OakOursVioSource(PoseSource):
             C_target = np.eye(4)
             if self.backend == "ba":
                 ba_state = self._start_ba_worker(K)
+
+            # In SLAM mode, a background thread keeps a persistent keyframe map,
+            # recognises revisited places and runs pose-graph optimisation; it
+            # publishes a world-frame loop-closure correction that we ease onto
+            # the displayed f2f trajectory the same way as the BA correction.
+            slam_state = None
+            if self.backend == "slam":
+                slam_state = self._start_slam_worker(K)
 
 
 
@@ -399,6 +419,23 @@ class OakOursVioSource(PoseSource):
                     C_applied = _ease_se3(C_applied, C_target, 0.15)
                     pose = C_applied @ pose
 
+                if slam_state is not None:
+                    # Hand a keyframe (raw f2f pose + image + depth) to the SLAM
+                    # map every kf_every frames; drop if the worker is still busy
+                    # on the previous one (non-blocking) — never stall the loop.
+                    kf_count += 1
+                    if kf_count >= slam_state["kf_every"]:
+                        kf_count = 0
+                        slam_state["submit"](pose.copy(), gray.copy(),
+                                             depth_m.copy())
+                    # Pull the latest loop-closure correction (drain to last) and
+                    # ease it on, exactly like the BA correction.
+                    newC = slam_state["poll"]()
+                    if newC is not None:
+                        C_target = newC
+                    C_applied = _ease_se3(C_applied, C_target, 0.15)
+                    pose = C_applied @ pose
+
                 # FINAL display leveling -- accel is the "trum cuoi" (last word)
                 # on the shown roll/pitch. The Phase-4 in-BA gravity prior keeps
                 # the keyframe MAP from tilt-drifting, but the BA correction
@@ -509,6 +546,11 @@ class OakOursVioSource(PoseSource):
                 ba_state["event"].set()
                 ba_state["thread"].join(timeout=1.0)
 
+            if slam_state is not None:
+                slam_state["stop"].set()
+                slam_state["event"].set()
+                slam_state["thread"].join(timeout=1.0)
+
     # ----------------------------------------------------------------------- #
     def _collect_startup_accel(self, q_imu, R_imu_cam: np.ndarray,
                                window_s: float = 0.4,
@@ -614,3 +656,87 @@ class OakOursVioSource(PoseSource):
         state["submit"] = submit
         state["poll"] = poll
         return state
+
+    # ----------------------------------------------------------------------- #
+    def _start_slam_worker(self, K: np.ndarray) -> dict:
+        """Spawn the background loop-closure SLAM thread.
+
+        Returns a state dict with ``submit(T_wc, gray, depth_m)`` and
+        ``poll() -> C | None``. The worker keeps a persistent
+        :class:`oakd.vio.SlamMap` of every keyframe (in the *raw f2f* world
+        frame, so its odometry edges stay self-consistent), recognises revisited
+        places and runs pose-graph optimisation when a loop is confirmed. After
+        each keyframe it publishes the world-frame correction for the **latest**
+        keyframe, ``C = kf_pose[last] · inv(kf_orig[last])``; the read loop eases
+        that onto the current f2f pose (the current frame hangs off the latest
+        keyframe, so this maps it into the loop-corrected world). Until the first
+        loop closes the correction is identity, so the display is plain f2f.
+
+        ORB detection + matching against the growing keyframe set is the slow
+        part, which is exactly why it lives on this background thread; the device
+        read loop keeps running fast f2f for the display.
+        """
+        import threading
+
+        from ..vio import SlamMap
+
+        slam = SlamMap(K)
+
+        snap_lock = threading.Lock()
+        out_lock = threading.Lock()
+        event = threading.Event()
+        stop = threading.Event()
+        state = {
+            "event": event,
+            "stop": stop,
+            "kf_every": 5,
+            "_pending": None,
+            "_corr": None,
+        }
+
+        def submit(T_wc, gray, depth_m):
+            with snap_lock:
+                state["_pending"] = (T_wc, gray, depth_m)
+            event.set()
+
+        def poll():
+            with out_lock:
+                C = state["_corr"]
+                state["_corr"] = None
+            return C
+
+        def worker():
+            from ..vio.posegraph import se3_inv
+
+            while not stop.is_set():
+                event.wait()
+                event.clear()
+                if stop.is_set():
+                    break
+                with snap_lock:
+                    snap = state["_pending"]
+                    state["_pending"] = None
+                if snap is None:
+                    continue
+                T_wc, gray, depth_m = snap
+                events = slam.add_keyframe(T_wc, gray, depth_m)
+                if events:
+                    slam.optimize()
+                    for ev in events:
+                        print(f"[ours-slam] loop closed: kf {ev['cur']} <-> "
+                              f"{ev['old']} ({ev['inliers']} inliers)")
+                # Publish the correction for the latest keyframe (identity until
+                # a loop has closed). The current display pose hangs off it.
+                last = len(slam.kf_orig) - 1
+                if last >= 0:
+                    C = slam.kf_pose[last] @ se3_inv(slam.kf_orig[last])
+                    with out_lock:
+                        state["_corr"] = C
+
+        th = threading.Thread(target=worker, name="OursSlamWorker", daemon=True)
+        th.start()
+        state["thread"] = th
+        state["submit"] = submit
+        state["poll"] = poll
+        return state
+
