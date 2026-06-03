@@ -101,6 +101,20 @@ Offline scoring of the same backends against the Basalt reference:
 .venv/bin/python tools/vio_run.py --all --backend slam --slam-kf-every 8
 ```
 
+Self-tests (run before/after touching the from-scratch VIO):
+
+```bash
+.venv/bin/python tools/klt_selftest.py        # our optical flow + corners vs OpenCV
+.venv/bin/python tools/ba_selftest.py         # sliding-window BA core
+.venv/bin/python tools/posegraph_selftest.py  # SE(3) pose-graph + loop closure
+```
+
+`klt_selftest.py` is the regression guard for the library-free frontend: it
+proves correctness against a synthetic known-shift ground truth (independent of
+OpenCV), checks our corners + flow agree with OpenCV to sub-pixel, and prints
+per-frame timing vs the 20 fps live budget so a performance regression shows up
+in the numbers instead of as lag on the device.
+
 
 ## Status
 
