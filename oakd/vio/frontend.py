@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 import cv2
 import numpy as np
 
+from .corners import good_features_to_track
 from .klt import calc_optical_flow_pyr_lk
 
 
@@ -32,8 +33,10 @@ class FrontendConfig:
     fb_threshold: float = 1.0
     # re-detect when tracked count drops below this fraction of max_corners
     redetect_ratio: float = 0.6
-    # use our own pure-NumPy pyramidal LK (klt.py) instead of cv2's. Tracks the
-    # same corners to sub-pixel agreement with cv2; slower but library-free.
+    # use our own pure-NumPy implementations (klt.py pyramidal LK + corners.py
+    # Shi-Tomasi) instead of cv2. Tracks/detects the same corners to sub-pixel
+    # agreement with cv2; slower but fully library-free. When False the frontend
+    # falls back to OpenCV for both tracking and detection (faster live display).
     use_own_klt: bool = True
 
 
@@ -95,10 +98,19 @@ class KLTFrontend:
         return nxt, good
 
     def _detect(self, gray: np.ndarray, existing: np.ndarray) -> np.ndarray:
-        """Detect new corners, masking out neighbourhoods of existing points."""
+        """Detect new corners, keeping clear of neighbourhoods of existing points."""
         need = self.cfg.max_corners - existing.shape[0]
         if need <= 0:
             return np.empty((0, 2), np.float32)
+        if self.cfg.use_own_klt:
+            return good_features_to_track(
+                gray,
+                max_corners=need,
+                quality_level=self.cfg.quality_level,
+                min_distance=self.cfg.min_distance,
+                block_size=self.cfg.block_size,
+                exclude=existing,
+            )
         mask = np.full(gray.shape, 255, dtype=np.uint8)
         r = int(self.cfg.min_distance)
         for x, y in existing:
