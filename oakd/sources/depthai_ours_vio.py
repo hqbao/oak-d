@@ -185,7 +185,7 @@ class OakOursVioSource(PoseSource):
                  backend: str = "f2f", slam_kf_every: int = 5,
                  slam_radius_m: float = 0.0, ba_window: int = 6,
                  ba_kf_every: int = 5, ba_iters: int = 5,
-                 use_own_klt: bool = True) -> None:
+                 use_own_klt: bool = False) -> None:
         super().__init__()
         self.width = int(width)
         self.height = int(height)
@@ -206,11 +206,17 @@ class OakOursVioSource(PoseSource):
         self.ba_window = int(ba_window)
         self.ba_kf_every = int(ba_kf_every)
         self.ba_iters = int(ba_iters)
-        # Optical-flow backend for the display front-end: our own pure-NumPy
-        # pyramidal LK (default, library-free) or cv2's. Ours tracks the same
-        # corners to sub-pixel agreement but is ~25x slower, so on a slow host
-        # the live display fps may drop -- pass cv2 (use_own_klt=False) for
-        # smooth live if needed. The recorded-offline scoring always uses ours.
+        # Optical-flow + corner backend for the display front-end. Our own
+        # pure-NumPy pyramidal LK + Shi-Tomasi (library-free) tracks the same
+        # corners to sub-pixel agreement with cv2, BUT costs ~104 ms/frame --
+        # ~2x over the 50 ms budget at 20 fps. Running it in this SYNCHRONOUS
+        # read loop makes the viewer fall behind: the drain-to-latest logic then
+        # skips frames, the inter-frame motion jumps, KLT's forward-backward
+        # check fails and tracking is lost. So LIVE defaults to cv2 (3 ms/frame,
+        # smooth real time); pass use_own_klt=True (viewer --own-klt) only to
+        # watch the library-free path live and accept the lag. Offline scoring
+        # (tools/vio_run.py) always uses our own -- there time does not matter
+        # and ATE is at parity (lab_loop f2f 1.18 vs 1.27%).
         self.use_own_klt = bool(use_own_klt)
 
     def _run(self) -> None:

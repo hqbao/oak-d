@@ -29,17 +29,17 @@ def _build_source(name: str, args):
     if name == "ours":
         from oakd.sources.depthai_ours_vio import OakOursVioSource
         return OakOursVioSource(fps=args.fps, backend="f2f",
-                                use_own_klt=not args.cv2_klt)
+                                use_own_klt=args.own_klt)
     if name == "ours-ba":
         from oakd.sources.depthai_ours_vio import OakOursVioSource
         return OakOursVioSource(
-            fps=args.fps, backend="ba", use_own_klt=not args.cv2_klt,
+            fps=args.fps, backend="ba", use_own_klt=args.own_klt,
             ba_window=args.ba_window, ba_kf_every=args.ba_kf_every,
             ba_iters=args.ba_iters)
     if name == "ours-slam":
         from oakd.sources.depthai_ours_vio import OakOursVioSource
         return OakOursVioSource(
-            fps=args.fps, backend="slam", use_own_klt=not args.cv2_klt,
+            fps=args.fps, backend="slam", use_own_klt=args.own_klt,
             slam_kf_every=args.slam_kf_every, slam_radius_m=args.slam_radius)
     raise SystemExit(f"unknown --source '{name}' "
                      f"(expected: fake|oak|slam|ours|ours-ba|ours-slam)")
@@ -54,9 +54,13 @@ def main() -> int:
                          "BA; ours-slam = f2f + loop-closure SLAM)")
     ap.add_argument("--fps", type=int, default=20,
                     help="camera frame rate (ours/ours-ba/ours-slam) [20]")
-    ap.add_argument("--cv2-klt", action="store_true", dest="cv2_klt",
-                    help="use cv2's optical flow instead of our own pure-NumPy "
-                         "KLT (faster live display; default uses our own)")
+    ap.add_argument("--own-klt", action="store_true", dest="own_klt",
+                    help="use our own pure-NumPy KLT + corner detector for the "
+                         "LIVE display. It is library-free but ~2x over the "
+                         "20fps budget (~104ms/frame), so the viewer drops/skips "
+                         "frames and tracking can be lost. Default OFF: live uses "
+                         "cv2 for a real-time display. Offline scoring "
+                         "(tools/vio_run.py) always uses our own.")
     # SLAM tuning (ours-slam)
     ap.add_argument("--slam-kf-every", type=int, default=5, dest="slam_kf_every",
                     help="SLAM update cadence: insert+loop-detect every N frames "
