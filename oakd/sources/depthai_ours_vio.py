@@ -181,12 +181,29 @@ class OakOursVioSource(PoseSource):
     """
 
     def __init__(self, width: int = 640, height: int = 400, fps: int = 20,
-                 backend: str = "f2f") -> None:
+                 backend: str = "f2f", slam_kf_every: int = 5,
+                 slam_radius_m: float = 0.0, ba_window: int = 6,
+                 ba_kf_every: int = 5, ba_iters: int = 5) -> None:
         super().__init__()
         self.width = int(width)
         self.height = int(height)
         self.cam_fps = int(fps)
         self.backend = backend
+        # SLAM update cadence: insert a keyframe (and run loop detection) every
+        # ``slam_kf_every`` frames. This is the main lever for the SLAM update
+        # rate -- fewer keyframes = more responsive loop closure AND a smaller
+        # pose graph (cheaper PGO). ``slam_radius_m`` optionally spatially gates
+        # loop candidates (0 = check all, the default): measured to help little
+        # at ~200 keyframes because the ORB appearance gate already rejects
+        # distant keyframes cheaply, but it bounds cost on very long runs.
+        self.slam_kf_every = int(slam_kf_every)
+        self.slam_radius_m = float(slam_radius_m)
+        # Sliding-window BA tuning (backend='ba'): window size, keyframe cadence,
+        # and BA iterations per solve. Smaller = cheaper/faster, larger = more
+        # accurate but heavier on the background thread.
+        self.ba_window = int(ba_window)
+        self.ba_kf_every = int(ba_kf_every)
+        self.ba_iters = int(ba_iters)
 
     def _run(self) -> None:
         import cv2
@@ -604,8 +621,8 @@ class OakOursVioSource(PoseSource):
         # real gravity (no display-side correction needed). Only at-rest accel
         # samples are submitted per keyframe (see the read loop), so a moving
         # keyframe simply carries no gravity constraint.
-        cfg = WindowedConfig(window=6, kf_every=5,
-                             ba=BAConfig(max_iters=5, huber_px=2.0,
+        cfg = WindowedConfig(window=self.ba_window, kf_every=self.ba_kf_every,
+                             ba=BAConfig(max_iters=self.ba_iters, huber_px=2.0,
                                          use_gravity=True))
         ba_map = WindowedBAMap(K, cfg)
 
@@ -679,8 +696,11 @@ class OakOursVioSource(PoseSource):
         import threading
 
         from ..vio import SlamMap
+        from ..vio.slam import SlamConfig
 
-        slam = SlamMap(K)
+        # Spatial gating keeps loop detection bounded as the map grows so the
+        # configured keyframe cadence stays sustainable on the background thread.
+        slam = SlamMap(K, SlamConfig(loop_search_radius_m=self.slam_radius_m))
 
         snap_lock = threading.Lock()
         out_lock = threading.Lock()
@@ -689,7 +709,7 @@ class OakOursVioSource(PoseSource):
         state = {
             "event": event,
             "stop": stop,
-            "kf_every": 5,
+            "kf_every": self.slam_kf_every,
             "_pending": None,
             "_corr": None,
         }

@@ -33,6 +33,7 @@ from oakd.vio import (  # noqa: E402
     SlamMap,
     WindowedRGBDOdometry,
 )
+from oakd.vio.slam import SlamConfig       # noqa: E402
 from oakd.vio.posegraph import se3_inv  # noqa: E402
 
 
@@ -96,15 +97,25 @@ def main() -> int:
                          "adjustment; slam = ba + loop closure + pose graph")
     ap.add_argument("--no-imu", action="store_true",
                     help="disable the gyro rotation prior (pure vision)")
+    ap.add_argument("--slam-kf-every", type=int, default=5, dest="slam_kf_every",
+                    help="SLAM keyframe cadence: insert+loop-detect every N "
+                         "frames [5]")
+    ap.add_argument("--slam-radius", type=float, default=0.0,
+                    help="SLAM spatial gate (m): only loop-check keyframes "
+                         "within this radius. 0 = check all (offline default) [0]")
     ap.add_argument("--verbose", action="store_true")
     args = ap.parse_args()
 
     use_imu = not args.no_imu
     if args.all:
-        return run_all(use_imu, backend=args.backend)
+        return run_all(use_imu, backend=args.backend,
+                       slam_kf_every=args.slam_kf_every,
+                       slam_radius_m=args.slam_radius)
 
     score_session(Path(args.session), args.max_frames, args.verbose,
-                  use_imu=use_imu, backend=args.backend)
+                  use_imu=use_imu, backend=args.backend,
+                  slam_kf_every=args.slam_kf_every,
+                  slam_radius_m=args.slam_radius)
     return 0
 
 
@@ -123,7 +134,8 @@ def basalt_ref_is_broken(positions: dict[int, np.ndarray]) -> bool:
     return bool(steps.max() > _MAX_VALID_STEP_M)
 
 
-def run_all(use_imu: bool = True, backend: str = "f2f") -> int:
+def run_all(use_imu: bool = True, backend: str = "f2f",
+            slam_kf_every: int = 5, slam_radius_m: float = 0.0) -> int:
     gold = Path("sessions/gold")
     rows = []
     for d in sorted(gold.iterdir()):
@@ -132,7 +144,9 @@ def run_all(use_imu: bool = True, backend: str = "f2f") -> int:
         broken = basalt_ref_is_broken(load_basalt_positions(d))
         note = "broken Basalt ref" if broken else ""
         res = None if broken else score_session(d, 0, False, quiet=True,
-                                                use_imu=use_imu, backend=backend)
+                                                use_imu=use_imu, backend=backend,
+                                                slam_kf_every=slam_kf_every,
+                                                slam_radius_m=slam_radius_m)
         rows.append((d.name, res, note))
         print(f"  {d.name:18s} done")
 
@@ -170,7 +184,8 @@ def run_all(use_imu: bool = True, backend: str = "f2f") -> int:
 
 def score_session(session_dir: Path, max_frames: int, verbose: bool,
                   quiet: bool = False, use_imu: bool = True,
-                  backend: str = "f2f"):
+                  backend: str = "f2f", slam_kf_every: int = 5,
+                  slam_radius_m: float = 0.0):
     reader = SessionReader(session_dir)
     n = len(reader) if max_frames <= 0 else min(max_frames, len(reader))
     slam = None
@@ -178,7 +193,8 @@ def score_session(session_dir: Path, max_frames: int, verbose: bool,
         vo = WindowedRGBDOdometry(reader.K)
         use_imu = False  # BA/SLAM backends do not use the gyro prior
         if backend == "slam":
-            slam = SlamMap(reader.K)
+            slam = SlamMap(reader.K, SlamConfig(
+                loop_search_radius_m=slam_radius_m))
     else:
         vo = RGBDVisualOdometry(reader.K)
 
@@ -214,7 +230,6 @@ def score_session(session_dir: Path, max_frames: int, verbose: bool,
     # SLAM bookkeeping: keyframe cadence + per-frame anchor (which keyframe a
     # frame hangs off + its relative transform), so that after pose-graph
     # optimisation every frame can be rewritten as kf_corrected @ rel.
-    slam_kf_every = 5
     frames_since_kf = 0
     last_kf_idx = -1
     anchors: dict[int, tuple[int, np.ndarray]] = {}

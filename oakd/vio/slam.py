@@ -36,6 +36,14 @@ class SlamConfig:
     loop_omega: float = 5.0       # base weight on loop edges (scaled by inliers)
     max_loops_per_kf: int = 3     # cap verified loop edges added per query KF
     pgo_iters: int = 40
+    # Spatial gate for loop candidates: only run the (expensive) ORB+PnP
+    # verification against older keyframes whose current pose is within this
+    # radius (metres) of the incoming keyframe. 0 = disabled (check ALL older
+    # keyframes, the exact offline behaviour). A generous radius (> the expected
+    # odometry drift) caps the otherwise-linear per-keyframe cost so the live
+    # update rate can be raised without the worker falling behind. It can only
+    # *miss* a loop if drift already exceeds the radius by revisit time.
+    loop_search_radius_m: float = 0.0
 
 
 class SlamMap:
@@ -76,8 +84,15 @@ class SlamMap:
         events: list[dict] = []
         gap = self.cfg.loop.min_loop_gap
         if idx >= gap:
+            radius = self.cfg.loop_search_radius_m
+            cur_pos = T_wc[:3, 3]
             cands = []
             for old in range(0, idx - gap + 1):
+                # Spatial gate (when enabled): skip far keyframes before paying
+                # for ORB+PnP. Uses the current (corrected) pose of the old KF.
+                if radius > 0.0:
+                    if np.linalg.norm(self.kf_pose[old][:3, 3] - cur_pos) > radius:
+                        continue
                 res = self.detector.verify(app, self.kf_app[old])
                 if res is not None:
                     T_cur_old, ninl, nmatch = res
