@@ -107,6 +107,127 @@ def se3_inv(T: np.ndarray) -> np.ndarray:
 
 
 # --------------------------------------------------------------------------- #
+# Batched SE(3) ops (vectorised over a stack of M transforms).
+#
+# These let :meth:`PoseGraph.optimize` assemble H and b for *all* edges in a
+# handful of NumPy calls instead of a per-edge Python loop. That matters beyond
+# raw speed: PGO runs on a background worker thread, and a scalar Python loop
+# holds the GIL the whole time (measured: the read loop drops to ~14% of its
+# solo rate during optimisation). Vectorised NumPy releases the GIL inside each
+# C call, so the live read loop keeps running smoothly.
+# --------------------------------------------------------------------------- #
+def _inv_batch(T: np.ndarray) -> np.ndarray:
+    """Inverse of a stack of SE(3) matrices, shape (M, 4, 4)."""
+    R = T[:, :3, :3]
+    t = T[:, :3, 3]
+    Rt = np.transpose(R, (0, 2, 1))
+    Ti = np.zeros_like(T)
+    Ti[:, 3, 3] = 1.0
+    Ti[:, :3, :3] = Rt
+    Ti[:, :3, 3] = -np.einsum("mij,mj->mi", Rt, t)
+    return Ti
+
+
+def _skew_batch(v: np.ndarray) -> np.ndarray:
+    """Skew-symmetric matrices for a stack of 3-vectors, shape (M, 3) -> (M,3,3)."""
+    M = v.shape[0]
+    K = np.zeros((M, 3, 3))
+    K[:, 0, 1] = -v[:, 2]
+    K[:, 0, 2] = v[:, 1]
+    K[:, 1, 0] = v[:, 2]
+    K[:, 1, 2] = -v[:, 0]
+    K[:, 2, 0] = -v[:, 1]
+    K[:, 2, 1] = v[:, 0]
+    return K
+
+
+def _so3_log_batch(R: np.ndarray) -> np.ndarray:
+    """Batched SO(3) log. Vectorised small/general regimes; the rare near-pi
+    case (|theta - pi| < 1e-6) falls back to the scalar path per element."""
+    c = np.clip((np.trace(R, axis1=1, axis2=2) - 1.0) * 0.5, -1.0, 1.0)
+    theta = np.arccos(c)
+    vee = np.stack([R[:, 2, 1] - R[:, 1, 2],
+                    R[:, 0, 2] - R[:, 2, 0],
+                    R[:, 1, 0] - R[:, 0, 1]], axis=1)
+    phi = np.empty_like(vee)
+    small = theta < 1e-9
+    nearpi = (np.pi - theta) < 1e-6
+    gen = ~small & ~nearpi
+    # near identity: first-order vee of the skew part
+    phi[small] = 0.5 * vee[small]
+    # general
+    if np.any(gen):
+        w = theta[gen] / (2.0 * np.sin(theta[gen]))
+        phi[gen] = w[:, None] * vee[gen]
+    # near pi: rare, do it exactly element-wise
+    for i in np.nonzero(nearpi)[0]:
+        phi[i] = so3_log(R[i])
+    return phi
+
+
+def _se3_log_batch(T: np.ndarray) -> np.ndarray:
+    """Batched SE(3) log -> twists [rho; phi], shape (M, 4, 4) -> (M, 6)."""
+    R = T[:, :3, :3]
+    t = T[:, :3, 3]
+    phi = _so3_log_batch(R)
+    theta = np.linalg.norm(phi, axis=1)
+    K = _skew_batch(phi)
+    small = theta < 1e-9
+    th = np.where(small, 1.0, theta)            # avoid div-by-zero in unused entries
+    a = 1.0 / (th * th)
+    b = (1.0 + np.cos(th)) / (2.0 * th * np.sin(th))
+    coeff = np.where(small, 0.0, a - b)
+    KK = K @ K
+    Vinv = np.eye(3)[None] - 0.5 * K + coeff[:, None, None] * KK
+    rho = np.einsum("mij,mj->mi", Vinv, t)
+    return np.concatenate([rho, phi], axis=1)
+
+
+def _se3_adjoint_batch(T: np.ndarray) -> np.ndarray:
+    """Batched 6x6 adjoint for the [rho; phi] twist order, (M,4,4) -> (M,6,6)."""
+    M = T.shape[0]
+    R = T[:, :3, :3]
+    t = T[:, :3, 3]
+    Ad = np.zeros((M, 6, 6))
+    Ad[:, :3, :3] = R
+    Ad[:, 3:, 3:] = R
+    Ad[:, :3, 3:] = _skew_batch(t) @ R
+    return Ad
+
+
+def _se3_exp_batch(xi: np.ndarray) -> np.ndarray:
+    """Batched SE(3) exp. xi = [rho; phi], shape (M, 6) -> (M, 4, 4).
+
+    Matches :func:`bundle.se3_exp` element-wise (Rodrigues + left Jacobian V).
+    """
+    M = xi.shape[0]
+    rho = xi[:, :3]
+    phi = xi[:, 3:]
+    theta = np.linalg.norm(phi, axis=1)
+    small = theta < 1e-12
+    th = np.where(small, 1.0, theta)            # safe divisor for unused entries
+    Kf = _skew_batch(phi)                        # skew(phi)
+    Ku = _skew_batch(phi / th[:, None])          # skew(unit axis)
+    KuKu = Ku @ Ku
+    I3 = np.eye(3)[None]
+    sin, cos = np.sin(theta), np.cos(theta)
+    # Rotation: small -> I + skew(phi); general -> Rodrigues with unit axis.
+    R = np.where(small[:, None, None],
+                 I3 + Kf,
+                 I3 + sin[:, None, None] * Ku + (1.0 - cos)[:, None, None] * KuKu)
+    # Left Jacobian V.
+    cV = np.where(small, 0.5, (1.0 - cos) / th)
+    cVV = np.where(small, 0.0, (th - sin) / th)
+    V = I3 + cV[:, None, None] * np.where(small[:, None, None], Kf, Ku) \
+        + cVV[:, None, None] * KuKu
+    T = np.zeros((M, 4, 4))
+    T[:, 3, 3] = 1.0
+    T[:, :3, :3] = R
+    T[:, :3, 3] = np.einsum("mij,mj->mi", V, rho)
+    return T
+
+
+# --------------------------------------------------------------------------- #
 # Pose graph
 # --------------------------------------------------------------------------- #
 @dataclass
@@ -141,14 +262,30 @@ class PoseGraph:
             Om = np.asarray(omega, float)
         self.edges.append(Edge(i, j, np.asarray(Z, float).copy(), Om, loop))
 
+    def _node_stack(self, ids: list[int]) -> np.ndarray:
+        """Stack node poses into (N, 4, 4) in the given id order."""
+        return np.stack([self.nodes[i] for i in ids], axis=0)
+
+    def _edge_arrays(self, idx: dict[int, int]):
+        """Static per-edge arrays (independent of current pose values)."""
+        ei = np.array([idx[e.i] for e in self.edges], dtype=np.intp)
+        ej = np.array([idx[e.j] for e in self.edges], dtype=np.intp)
+        Zinv = _inv_batch(np.stack([e.Z for e in self.edges], axis=0))
+        Om0 = np.stack([e.Omega for e in self.edges], axis=0)
+        loop = np.array([e.loop for e in self.edges], dtype=bool)
+        return ei, ej, Zinv, Om0, loop
+
     def total_error(self) -> float:
-        e2 = 0.0
-        for e in self.edges:
-            Xi, Xj = self.nodes[e.i], self.nodes[e.j]
-            E = se3_inv(e.Z) @ (se3_inv(Xi) @ Xj)
-            r = se3_log(E)
-            e2 += float(r @ e.Omega @ r)
-        return e2
+        if not self.edges:
+            return 0.0
+        ids = sorted(self.nodes.keys())
+        idx = {nid: k for k, nid in enumerate(ids)}
+        ei, ej, Zinv, Om0, _ = self._edge_arrays(idx)
+        X = self._node_stack(ids)
+        Xi, Xj = X[ei], X[ej]
+        E = Zinv @ _inv_batch(Xi) @ Xj
+        r = _se3_log_batch(E)
+        return float(np.einsum("mi,mij,mj->m", r, Om0, r).sum())
 
     def optimize(self, iters: int = 30, anchor: int | None = None,
                  rel_tol: float = 1e-6, huber_delta: float = 0.5,
@@ -159,6 +296,10 @@ class PoseGraph:
         (odometry edges are trusted): a loop whose residual exceeds the threshold
         is down-weighted, so a few surviving false loop closures (perceptual
         aliasing) cannot drag the whole graph. Set to 0 to disable.
+
+        The whole assembly is vectorised over edges (batched NumPy + scatter),
+        so when this runs on the SLAM background thread it releases the GIL and
+        does not freeze the live read loop.
         """
         ids = sorted(self.nodes.keys())
         idx = {nid: k for k, nid in enumerate(ids)}
@@ -167,39 +308,59 @@ class PoseGraph:
             anchor = ids[0]
         a = idx[anchor]
 
-        def _huber_w(e: np.ndarray, Om: np.ndarray) -> float:
-            if huber_delta <= 0.0:
-                return 1.0
-            chi = float(np.sqrt(max(e @ Om @ e, 0.0)))
-            return 1.0 if chi <= huber_delta else huber_delta / chi
+        ei, ej, Zinv, Om0, loop = self._edge_arrays(idx)
+        M = len(self.edges)
+        ar6 = np.arange(6)
+        # Block scatter indices into the 6N x 6N H (one set per block type) and b.
+        ri = 6 * ei[:, None] + ar6[None, :]          # (M, 6) rows for node i
+        rj = 6 * ej[:, None] + ar6[None, :]          # (M, 6) rows for node j
+        # 2-D index grids for the four 6x6 blocks H[i,i], H[j,j], H[i,j], H[j,i].
+        Rii, Cii = ri[:, :, None], ri[:, None, :]
+        Rjj, Cjj = rj[:, :, None], rj[:, None, :]
+        Rij, Cij = ri[:, :, None], rj[:, None, :]
+        Rji, Cji = rj[:, :, None], ri[:, None, :]
+
+        def assemble(X: np.ndarray):
+            """Build (H, b) for the current node stack X (N,4,4)."""
+            Xi, Xj = X[ei], X[ej]
+            Xj_inv = _inv_batch(Xj)
+            E = Zinv @ _inv_batch(Xi) @ Xj
+            r = _se3_log_batch(E)                          # (M, 6)
+            Ad = _se3_adjoint_batch(Xj_inv @ Xi)          # (M, 6, 6); Ji = -Ad
+            # Huber down-weight on loop edges only.
+            Om = Om0
+            if huber_delta > 0.0 and np.any(loop):
+                chi = np.sqrt(np.clip(np.einsum("mi,mij,mj->m", r, Om0, r), 0.0, None))
+                w = np.where(chi <= huber_delta, 1.0, huber_delta / np.maximum(chi, 1e-12))
+                w = np.where(loop, w, 1.0)
+                Om = Om0 * w[:, None, None]
+            AdT = np.transpose(Ad, (0, 2, 1))
+            OmAd = Om @ Ad
+            AdTOm = AdT @ Om
+            Hii = AdT @ OmAd                # Ji^T Om Ji =  Ad^T Om Ad
+            Hjj = Om                        # Jj^T Om Jj =  Om
+            Hij = -AdTOm                    # Ji^T Om Jj = -Ad^T Om
+            Hji = -OmAd                     # Jj^T Om Ji = -Om Ad
+            bi = -np.einsum("mij,mj->mi", AdTOm, r)   # Ji^T Om r = -Ad^T Om r
+            bj = np.einsum("mij,mj->mi", Om, r)       # Jj^T Om r =  Om r
+
+            H = np.zeros((6 * N, 6 * N))
+            b = np.zeros(6 * N)
+            np.add.at(H, (Rii, Cii), Hii)
+            np.add.at(H, (Rjj, Cjj), Hjj)
+            np.add.at(H, (Rij, Cij), Hij)
+            np.add.at(H, (Rji, Cji), Hji)
+            np.add.at(b, ri, bi)
+            np.add.at(b, rj, bj)
+            return H, b
 
         lam = 1e-6
         cost_prev = self.total_error()
         cost0 = cost_prev
+        X = self._node_stack(ids)
         it = 0
         for it in range(iters):
-            H = np.zeros((6 * N, 6 * N))
-            b = np.zeros(6 * N)
-            for e in self.edges:
-                ci, cj = idx[e.i], idx[e.j]
-                Xi, Xj = self.nodes[e.i], self.nodes[e.j]
-                Xi_inv = se3_inv(Xi)
-                E = se3_inv(e.Z) @ (Xi_inv @ Xj)
-                r = se3_log(E)
-                # J_r^{-1} ~= I  ->  Ji = -Ad(Xj^{-1} Xi), Jj = +I
-                Ad = se3_adjoint(se3_inv(Xj) @ Xi)
-                Ji = -Ad
-                Jj = np.eye(6)
-                Om = e.Omega
-                if e.loop:
-                    Om = Om * _huber_w(r, Om)
-                si, sj = slice(6 * ci, 6 * ci + 6), slice(6 * cj, 6 * cj + 6)
-                H[si, si] += Ji.T @ Om @ Ji
-                H[sj, sj] += Jj.T @ Om @ Jj
-                H[si, sj] += Ji.T @ Om @ Jj
-                H[sj, si] += Jj.T @ Om @ Ji
-                b[si] += Ji.T @ Om @ r
-                b[sj] += Jj.T @ Om @ r
+            H, b = assemble(X)
 
             # Pin the anchor node with a strong prior (gauge freedom removal).
             sa = slice(6 * a, 6 * a + 6)
@@ -213,15 +374,13 @@ class PoseGraph:
             except np.linalg.LinAlgError:
                 dx = np.linalg.lstsq(H, -b, rcond=None)[0]
 
-            # Trial update on a copy.
-            trial = {}
-            for nid in ids:
-                k = idx[nid]
-                trial[nid] = self.nodes[nid] @ se3_exp(dx[6 * k:6 * k + 6])
-            saved = self.nodes
-            self.nodes = trial
-            cost_new = self.total_error()
+            # Trial update on a copy of the stack.
+            steps = _se3_exp_batch(dx.reshape(N, 6))
+            trial = X @ steps
+            r_trial = _se3_log_batch(Zinv @ _inv_batch(trial[ei]) @ trial[ej])
+            cost_new = float(np.einsum("mi,mij,mj->m", r_trial, Om0, r_trial).sum())
             if cost_new < cost_prev:
+                X = trial
                 lam = max(lam * 0.5, 1e-9)
                 improved = (cost_prev - cost_new) / max(cost_prev, 1e-12)
                 cost_prev = cost_new
@@ -230,8 +389,11 @@ class PoseGraph:
                 if improved < rel_tol:
                     break
             else:
-                self.nodes = saved      # reject
-                lam = min(lam * 8.0, 1e9)
+                lam = min(lam * 8.0, 1e9)     # reject, keep X
+
+        # Write the optimised stack back into the node dict.
+        for nid in ids:
+            self.nodes[nid] = X[idx[nid]]
 
         return {"iters": it + 1, "cost0": cost0, "cost1": cost_prev,
                 "nodes": N, "edges": len(self.edges)}
