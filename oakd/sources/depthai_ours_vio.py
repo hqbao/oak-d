@@ -204,7 +204,7 @@ class OakOursVioSource(PoseSource):
                  backend: str = "f2f", slam_kf_every: int = 5,
                  slam_radius_m: float = 0.0, ba_window: int = 6,
                  ba_kf_every: int = 5, ba_iters: int = 5,
-                 use_own_klt: bool = False, slam_kf_min_trans: float = 0.0,
+                 slam_kf_min_trans: float = 0.0,
                  slam_kf_min_rot: float = 0.0, slam_max_kf: int = 0) -> None:
         super().__init__()
         self.width = int(width)
@@ -237,18 +237,6 @@ class OakOursVioSource(PoseSource):
         self.ba_window = int(ba_window)
         self.ba_kf_every = int(ba_kf_every)
         self.ba_iters = int(ba_iters)
-        # Optical-flow + corner backend for the display front-end. Our own
-        # pure-NumPy pyramidal LK + Shi-Tomasi (library-free) tracks the same
-        # corners to sub-pixel agreement with cv2, BUT costs ~104 ms/frame --
-        # ~2x over the 50 ms budget at 20 fps. Running it in this SYNCHRONOUS
-        # read loop makes the viewer fall behind: the drain-to-latest logic then
-        # skips frames, the inter-frame motion jumps, KLT's forward-backward
-        # check fails and tracking is lost. So LIVE defaults to cv2 (3 ms/frame,
-        # smooth real time); pass use_own_klt=True (viewer --own-klt) only to
-        # watch the library-free path live and accept the lag. Offline scoring
-        # (tools/vio_run.py) always uses our own -- there time does not matter
-        # and ATE is at parity (lab_loop f2f 1.18 vs 1.27%).
-        self.use_own_klt = bool(use_own_klt)
 
         # --- live SLAM overlay (read by the 3D viewer) ----------------------
         # Thread-safe snapshot of the SLAM map for the UI: keyframe dots, the
@@ -305,7 +293,6 @@ class OakOursVioSource(PoseSource):
         self._slam_reset.set()
 
     def _run(self) -> None:
-        import cv2
         import depthai as dai  # lazy: --source fake works without depthai/device
 
         left_socket = dai.CameraBoardSocket.CAM_B
@@ -365,38 +352,17 @@ class OakOursVioSource(PoseSource):
 
             # The displayed pose is ALWAYS produced by the fast frame-to-frame
             # VO, so the read loop never blocks on BA and the UI stays smooth.
-            # When the user opts into our own library-free frontend live
-            # (use_own_klt), pick the config by whether Numba is available:
+            # The live frontend is ALWAYS our own library-free KLT + Shi-Tomasi
+            # (no cv2). Pick the config by whether Numba is available:
             #   * with Numba, the JIT core tracks the FULL-quality config in
             #     ~15 ms/frame (well under the 50 ms budget at 20 fps), so use it.
             #   * without Numba the pure-NumPy path costs ~140 ms/frame, so fall
             #     back to the lighter ``live_own`` preset (~38-58 ms) to stay
             #     roughly real time.
-            # cv2 (use_own_klt False) stays the default at ~3 ms/frame.
-            if self.use_own_klt:
-                from ..vio.klt_numba import HAVE_NUMBA
-                fe_cfg = (FrontendConfig(use_own_klt=True) if HAVE_NUMBA
-                          else FrontendConfig.live_own())
-            else:
-                # Live cv2 frontend, tuned for FAST hand-held pushes. The camera
-                # delivers only ~14-20 fps (device measured, drop=0 -- not a host
-                # frame-drop), so during a fast push the inter-frame pixel motion
-                # is large and the default pyramid (win=21, level=3 -> ~168 px
-                # reach) loses KLT tracks: measured on gold ``push_fwdback_20s``,
-                # 25 % of the 30-60 mm/frame "fast push" frames failed KLT
-                # (ok-rate 0.75) and the translation collapsed to 0.70x -- the
-                # "đẩy nhanh thì ì lại / chỉ đi đoạn ngắn" symptom (vision drops
-                # out -> the inertial filter has nothing to correct with ->
-                # coasts then decays -> stalls). A larger window + one more
-                # pyramid level (win=31, level=4 -> ~496 px reach) plus a looser
-                # forward-backward gate (blur inflates the f-b residual on fast
-                # frames) recovers the fast bucket to ok-rate 0.81 / scale 0.80
-                # while leaving the slow/still buckets unchanged (ok 0.93->0.94,
-                # overall scale 0.90). This is a LIVE-ONLY config object; the
-                # offline gold path (``tools/vio_run.py``) builds its own
-                # frontend, so the byte-identical gold scores are untouched.
-                fe_cfg = FrontendConfig(use_own_klt=False, win_size=31,
-                                        max_level=4, fb_threshold=2.0)
+            from ..vio.klt_numba import HAVE_NUMBA
+            fe_cfg = (FrontendConfig() if HAVE_NUMBA
+                      else FrontendConfig.live_own())
+
             # Translation is owned by vision (frame-to-frame RGB-D PnP) with the
             # gyro FUSED softly: the gyro corrects a slipped vision rotation via
             # the disagreement gate (``gyro_disagree_deg``) and damps the
@@ -585,7 +551,7 @@ class OakOursVioSource(PoseSource):
             # inter-frame rotation and hand it to ``vo.process`` as the rotation
             # prior. ``so3_exp`` is the same exponential map the offline
             # GyroPreintegrator uses, so live and offline share one convention.
-            from ..vio.imu import so3_exp
+            from ..vio.imu import so3_exp, so3_log
             gyro_bias = (self._gyro_bias if self._gyro_bias is not None
                          else np.zeros(3))
             gyro_last_ts: float | None = None
@@ -617,7 +583,9 @@ class OakOursVioSource(PoseSource):
 
                 gray = ld.getCvFrame()
                 if gray.ndim == 3:
-                    gray = cv2.cvtColor(gray, cv2.COLOR_BGR2GRAY)
+                    # BGR -> luminance (Rec.601), library-free; live display only
+                    gray = (gray[..., 0] * 0.114 + gray[..., 1] * 0.587
+                            + gray[..., 2] * 0.299).astype(np.uint8)
                 depth_mm = dd.getCvFrame()
                 depth_m = depth_mm.astype(np.float32) / 1000.0
 
@@ -741,7 +709,7 @@ class OakOursVioSource(PoseSource):
                 # leveling apply downstream exactly as before.
                 R_wc = vo.pose[:3, :3]
                 gyro_deg = (float(np.degrees(np.linalg.norm(
-                    cv2.Rodrigues(R_imu_accum)[0]))) if gyro_cnt > 0 else 0.0)
+                    so3_log(R_imu_accum)))) if gyro_cnt > 0 else 0.0)
                 vo_t_now = vo.pose[:3, 3].copy()
                 vis_ok = bool(vo.last_info.get("ok", False))
                 if prev_vo_t is not None and vis_ok:

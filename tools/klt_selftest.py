@@ -260,7 +260,7 @@ def report_timing() -> None:
     img1 = translate(img0, 1.5, 1.0)
     g0, g1 = img0.astype(np.uint8), img1.astype(np.uint8)
 
-    full = FrontendConfig(use_own_klt=True)
+    full = FrontendConfig()
     live = FrontendConfig.live_own()
 
     def run(cfg, detector_pts):

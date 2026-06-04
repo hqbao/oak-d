@@ -17,7 +17,10 @@ day after) must pass. This is the **single source of truth** for regression.
 
 ## Scenarios
 
-6 scenarios were chosen to cover the different "axes" of VIO/SLAM stress.
+12 scenarios cover the different "axes" of VIO/SLAM stress. The first 6 are the
+original core suite; the second 6 were added later as targeted stress cases for
+the from-scratch `ours` pipeline (phantom translation, scale under fast motion,
+textureless surfaces).
 
 | ID | Name | Duration | Purpose |
 |---|---|---|---|
@@ -27,6 +30,12 @@ day after) must pass. This is the **single source of truth** for regression.
 | 4 | `corridor_60s` | 60s | long-range drift, distant loop closure (~15 m loop) |
 | 5 | `quick_motion_15s` | 15s | tracking robustness (fast shake + head turn) |
 | 6 | `loop_closure_45s` | 45s | C4 keyframes + loop closure DB persistence |
+| 7 | `still_15s` | ~16s | stationary honesty check (no phantom drift when not moving) |
+| 8 | `push_straight_fast_15s` | ~16s | translation scale under fast forward push |
+| 9 | `push_fwdback_20s` | ~21s | forward-then-back translation, scale symmetry |
+| 10 | `push_shake_20s` | ~21s | hard shake — low-parallax phantom-translation stress |
+| 11 | `whitewall_move_15s` | ~16s | moving at a textureless wall — PnP inlier-gate stress |
+| 12 | `yaw_inplace_15s` | ~17s | in-place yaw — rotation-only, phantom-translation case |
 
 ### How to record each scenario
 

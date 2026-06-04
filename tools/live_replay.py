@@ -34,7 +34,6 @@ import json
 import sys
 from pathlib import Path
 
-import cv2
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -46,7 +45,7 @@ from oakd.vio import (  # noqa: E402
     RGBDVisualOdometry,
     SessionReader,
 )
-from oakd.vio.imu import so3_exp  # noqa: E402
+from oakd.vio.imu import so3_exp, so3_log  # noqa: E402
 from tools.vio_run import load_basalt_positions, umeyama  # noqa: E402
 
 
@@ -166,7 +165,7 @@ def replay(session_dir: Path, max_frames: int = 0, verbose: bool = False,
         # inertial filter step
         R_wc = vo.pose[:3, :3]
         gyro_deg = (float(np.degrees(np.linalg.norm(
-            cv2.Rodrigues(R_imu_accum)[0]))) if gyro_cnt > 0 else 0.0)
+            so3_log(R_imu_accum)))) if gyro_cnt > 0 else 0.0)
         vo_t_now = vo.pose[:3, 3].copy()
         vis_ok = bool(vo.last_info.get("ok", False))
         dp_vis = (vo_t_now - prev_vo_t) if (prev_vo_t is not None and vis_ok) else None

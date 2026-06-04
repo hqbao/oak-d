@@ -13,7 +13,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-import cv2
 import numpy as np
 
 from .corners import good_features_to_track
@@ -33,11 +32,6 @@ class FrontendConfig:
     fb_threshold: float = 1.0
     # re-detect when tracked count drops below this fraction of max_corners
     redetect_ratio: float = 0.6
-    # use our own pure-NumPy implementations (klt.py pyramidal LK + corners.py
-    # Shi-Tomasi) instead of cv2. Tracks/detects the same corners to sub-pixel
-    # agreement with cv2; slower but fully library-free. When False the frontend
-    # falls back to OpenCV for both tracking and detection (faster live display).
-    use_own_klt: bool = True
 
     @classmethod
     def live_own(cls) -> "FrontendConfig":
@@ -49,11 +43,10 @@ class FrontendConfig:
         read loop falls behind, skips frames and loses tracking. A smaller
         window + pyramid + corner budget drops the per-frame cost to ~38-58 ms
         (at/under budget) while keeping ATE essentially unchanged offline
-        (lab_loop 1.27->1.25%, quick_motion 2.14->2.59%). Use this when the user
-        opts into the library-free path live (viewer ``--own-klt``); offline
-        scoring keeps the full-quality default.
+        (lab_loop 1.27->1.25%, quick_motion 2.14->2.59%). Used live when Numba
+        is unavailable; offline scoring keeps the full-quality default.
         """
-        return cls(use_own_klt=True, win_size=13, max_level=2, max_corners=200)
+        return cls(win_size=13, max_level=2, max_corners=200)
 
 
 
@@ -73,11 +66,6 @@ class KLTFrontend:
         self._prev_gray: np.ndarray | None = None
         self._state = TrackState()
         self._next_id = 0
-        self._lk_params = dict(
-            winSize=(self.cfg.win_size, self.cfg.win_size),
-            maxLevel=self.cfg.max_level,
-            criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, 0.01),
-        )
 
     @property
     def tracks(self) -> TrackState:
@@ -87,22 +75,15 @@ class KLTFrontend:
                prev_pts: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         """Forward+backward KLT; returns (next_pts, status_bool).
 
-        Uses our own :func:`calc_optical_flow_pyr_lk` when ``use_own_klt`` is set
-        (the default, library-free), otherwise ``cv2.calcOpticalFlowPyrLK``. Both
-        return the same ``(N, 2) float32`` / ``(N,) status`` contract.
+        Uses our own library-free :func:`calc_optical_flow_pyr_lk`, returning the
+        ``(N, 2) float32`` next points + ``(N,) bool`` status contract.
         """
-        if self.cfg.use_own_klt:
-            nxt, st = calc_optical_flow_pyr_lk(
-                prev_gray, gray, prev_pts,
-                win_size=self.cfg.win_size, max_level=self.cfg.max_level)
-            back, st2 = calc_optical_flow_pyr_lk(
-                gray, prev_gray, nxt,
-                win_size=self.cfg.win_size, max_level=self.cfg.max_level)
-        else:
-            nxt, st, _ = cv2.calcOpticalFlowPyrLK(
-                prev_gray, gray, prev_pts, None, **self._lk_params)
-            back, st2, _ = cv2.calcOpticalFlowPyrLK(
-                gray, prev_gray, nxt, None, **self._lk_params)
+        nxt, st = calc_optical_flow_pyr_lk(
+            prev_gray, gray, prev_pts,
+            win_size=self.cfg.win_size, max_level=self.cfg.max_level)
+        back, st2 = calc_optical_flow_pyr_lk(
+            gray, prev_gray, nxt,
+            win_size=self.cfg.win_size, max_level=self.cfg.max_level)
         fb_err = np.linalg.norm(prev_pts - back, axis=1)
         st = st.reshape(-1).astype(bool)
         st2 = st2.reshape(-1).astype(bool)
@@ -119,30 +100,14 @@ class KLTFrontend:
         need = self.cfg.max_corners - existing.shape[0]
         if need <= 0:
             return np.empty((0, 2), np.float32)
-        if self.cfg.use_own_klt:
-            return good_features_to_track(
-                gray,
-                max_corners=need,
-                quality_level=self.cfg.quality_level,
-                min_distance=self.cfg.min_distance,
-                block_size=self.cfg.block_size,
-                exclude=existing,
-            )
-        mask = np.full(gray.shape, 255, dtype=np.uint8)
-        r = int(self.cfg.min_distance)
-        for x, y in existing:
-            cv2.circle(mask, (int(x), int(y)), r, 0, -1)
-        corners = cv2.goodFeaturesToTrack(
+        return good_features_to_track(
             gray,
-            maxCorners=need,
-            qualityLevel=self.cfg.quality_level,
-            minDistance=self.cfg.min_distance,
-            blockSize=self.cfg.block_size,
-            mask=mask,
+            max_corners=need,
+            quality_level=self.cfg.quality_level,
+            min_distance=self.cfg.min_distance,
+            block_size=self.cfg.block_size,
+            exclude=existing,
         )
-        if corners is None:
-            return np.empty((0, 2), np.float32)
-        return corners.reshape(-1, 2).astype(np.float32)
 
     def process(self, gray: np.ndarray) -> TrackState:
         """Advance the tracker by one frame; returns the live track set.

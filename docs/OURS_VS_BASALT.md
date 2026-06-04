@@ -28,7 +28,7 @@ does not have to re-derive it.
 | Visual input | Raw **stereo** (left+right), multi-view triangulation | **RGB-D**: left gray + the chip's stereo **depth map** (SGBM blob output) |
 | Scale source | IMU (metric) + stereo baseline, jointly | **Depth map** per-frame (blur-biased on fast motion) |
 | Rotation | Joint with everything | **Gyro preintegration** owns it; vision corrects, weighted by inlier confidence + a gyro-disagreement gate |
-| Translation | Joint, IMU-constrained | Frame-to-frame **`solvePnPRansac`** with depth → metric `t`; smoothed by `InertialTranslationFilter` |
+| Translation | Joint, IMU-constrained | Frame-to-frame **own PnP** (`oakd/vio/pnp.py`: RANSAC DLT + LM, library-free, default) with depth → metric `t`; smoothed by `InertialTranslationFilter` |
 | Accelerometer | Constrains velocity/position/scale (preint factor) | **Tilt leveling only** (complementary filter at rest); feed-forward to position is **OFF** by default |
 | Optimiser | Sliding-window **bundle adjustment + marginalisation prior** | Production `ours`: **none** (pure f2f). `ours-ba`: analytic Schur BA window. `ours-slam`: + ORB loop + SE(3) pose graph |
 | Bias estimation | Online gyro+accel bias in the window | Gyro bias from a startup static window only (no online accel bias on the production path) |
@@ -39,7 +39,9 @@ does not have to re-derive it.
 - Frontend (own pure-NumPy KLT + Shi-Tomasi, forward-backward check):
   `oakd/vio/frontend.py`, `klt.py`, `klt_numba.py`, `corners.py`
 - Frame-to-frame RGB-D PnP + gyro fusion: `oakd/vio/odometry.py`
-  (`RGBDVisualOdometry`, `OdometryConfig`)
+  (`RGBDVisualOdometry`, `OdometryConfig`); own library-free PnP solver in
+  `oakd/vio/pnp.py` (RANSAC DLT + robust-LM seed rescue + LM refine, default;
+  `OAKD_OWN_PNP=0` switches to the cv2 oracle for the dev A/B only)
 - Position smoother: `oakd/vio/inertial_filter.py`
   (`InertialTranslationFilter`, `use_accel_prediction=False`)
 - IMU preintegration (Forster): `oakd/vio/imu.py`

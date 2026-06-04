@@ -6,25 +6,48 @@ to a Raspberry Pi 5 later.
 
 ```
 oak-d/
-  oakd/                package
-    frames.py          camera <-> body (FRD) <-> world (NED) transforms
-    pose.py            Pose dataclass + ring buffer
-    sources/           pose providers
-      base.py          PoseSource ABC
-      fake.py          procedural figure-8 trajectory (UI bring-up)
-      depthai_vio.py   real stereo-inertial VIO (dai.node.BasaltVIO)
-      depthai_slam.py  VIO + SLAM with loop closure (BasaltVIO + RTABMapSLAM)
+  oakd/                  package
+    frames.py            camera <-> body (FRD) <-> world (NED) transforms
+    pose.py              Pose dataclass + ring buffer
+    recorder.py          live-run logger (C0..C9 streams to sessions/<name>/)
+    sources/             pose providers
+      base.py            PoseSource ABC
+      fake.py            procedural figure-8 trajectory (UI bring-up)
+      depthai_vio.py     real stereo-inertial VIO (dai.node.BasaltVIO)
+      depthai_slam.py    VIO + SLAM with loop closure (BasaltVIO + RTABMapSLAM)
+      depthai_ours_vio.py  our from-scratch RGB-D VIO/SLAM (ours / ours-ba / ours-slam)
+    vio/                 from-scratch VIO/SLAM (library-free; replaces Basalt)
+      frontend.py        own KLT + Shi-Tomasi feature frontend (cv2-free)
+      klt.py             pyramidal Lucas-Kanade optical flow (pure NumPy)
+      klt_numba.py       Numba JIT of the KLT inner loop (optional dep)
+      corners.py         Shi-Tomasi corner detector
+      pnp.py             own RANSAC DLT + LM PnP (replaces cv2.solvePnPRansac)
+      odometry.py        frame-to-frame RGB-D PnP + gyro fusion
+      imu.py             Forster on-manifold IMU preintegration
+      inertial_filter.py translation smoother (vision + optional accel)
+      bundle.py          sliding-window bundle adjustment (analytic Schur)
+      windowed.py        windowed BA driver (ours-ba)
+      vio_window.py      tight-coupled joint VIO solve (experimental --backend vio)
+      loopclosure.py     ORB loop detector + PnP/F-matrix verify (cv2, ours-slam)
+      posegraph.py       SE(3) pose graph
+      slam.py            full SLAM driver (ours-slam)
+      geometry.py        SO(3)/SE(3) Lie-algebra helpers
+      reader.py          recorded-session reader for offline scoring
+      pngio.py           pure-Python 8-bit PNG codec (replaces cv2.imread/imwrite)
     ui/
-      theme.py         military dark palette (mirrors flight-controller/_ui.py)
-      viewer3d.py      pyqtgraph GLViewWidget — trajectory, drone triad, grid
-      panels.py        telemetry side-panel
-      mainwindow.py    top-level QMainWindow + toolbar (view presets)
+      theme.py           military dark palette (mirrors flight-controller/_ui.py)
+      viewer3d.py        pyqtgraph GLViewWidget — trajectory, drone triad, grid
+      panels.py          telemetry side-panel
+      mainwindow.py      top-level QMainWindow + toolbar (view presets)
   tools/
     view_pose3d.py       live 3D viewer from OAK over USB (run.sh entry)
-    record_session.py    dump C0..C6 + PCL from a live run to sessions/<name>/
+    record_session.py    dump C0..C9 + PCL from a live run to sessions/<name>/
     viz_session.py       offline multi-tab replay of a recorded session
     compare_sessions.py  ATE/RPE between two pose streams (VIO vs SLAM, etc.)
     baseline_report.py   scan sessions/gold/, emit Markdown baseline report
+    vio_run.py           offline scoring of ours f2f/ba/slam/vio vs Basalt
+    live_replay.py       replay a recorded session through the live ours pipeline
+    *_selftest.py        regression guards (klt, ba, posegraph, imu_preint, vio_ba)
   run.sh
   requirements.txt
 ```
@@ -135,9 +158,9 @@ Tuning knobs (all optional, shown with their defaults):
 # implementations (pyramidal Lucas-Kanade + Shi-Tomasi, no library). The KLT
 # inner loop is JIT-compiled with Numba (optional dep) so our own frontend runs
 # in real time live (~15 ms/frame, vs ~140 ms pure-NumPy); without numba it
-# falls back to a lighter live preset. Offline scoring uses the full config.
-# The live viewer defaults to cv2; pass --own-klt to run our own frontend live:
-./run.sh --source ours --own-klt                   # library-free frontend, live
+# falls back to a lighter live preset. The live `ours`/`ours-ba` path uses this
+# library-free frontend unconditionally (no cv2, no flag); offline scoring uses
+# the full config.
 ```
 
 Offline scoring of the same backends against the Basalt reference:
@@ -207,9 +230,21 @@ in the numbers instead of as lag on the device.
       and corner detection (Shi-Tomasi, `oakd/vio/corners.py`) replacing cv2;
       KLT inner loop JIT-accelerated with Numba (`oakd/vio/klt_numba.py`,
       optional) so the library-free frontend runs live (~15 ms/frame)
+- [x] Own library-free PnP (`oakd/vio/pnp.py`: RANSAC DLT + robust-LM seed
+      rescue + plain-LS Levenberg-Marquardt refine) replacing
+      `cv2.solvePnPRansac` as the default. Measured vs cv2 on gold f2f: better
+      on the genuine forward-motion sessions (corridor 0.79->0.77,
+      lab_straight 1.11->1.09, push_straight_fast 1.65->1.20) and a wash
+      through windowed BA. The live `ours`/`ours-ba` path (own KLT + own PnP)
+      and the offline f2f/ba scoring are now fully cv2-free; cv2 is lazily
+      imported only for ORB loop closure (`ours-slam`) and the dev-only PnP A/B
+      oracle (`OAKD_OWN_PNP=0`)
+- [x] Pure-Python PNG codec (`oakd/vio/pngio.py`, 8-bit grayscale, all 5 PNG
+      filters) for frame IO, replacing `cv2.imread`/`imwrite` (decode verified
+      byte-for-byte vs cv2)
 - [x] Logging + offline replay (`tools/record_session.py` + `tools/viz_session.py`)
 - [x] Persistent SLAM database (auto save `rtabmap.db` + extract KF/loop via `tools/extract_kf_from_db.py`)
-- [x] Gold regression suite (6 sessions, see `docs/GOLD_SESSIONS.md`)
+- [x] Gold regression suite (12 sessions, see `docs/GOLD_SESSIONS.md`)
 - [ ] UDP / UART link to flight-controller
 - [ ] Tracking-lost UI badge
 - [ ] Calibration check tool

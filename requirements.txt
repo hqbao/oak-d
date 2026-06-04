@@ -1,5 +1,9 @@
 depthai>=3.6
 numpy>=2.0
+# cv2 is no longer in the from-scratch VIO production/live path (own KLT + own
+# PnP + pure-Python PNG codec; live `ours`/`ours-ba` is cv2-free). It is still
+# imported lazily for: ORB loop closure (ours-slam) and the dev-only PnP A/B
+# oracle (OAKD_OWN_PNP=0). Drop it once loop closure moves to library-free too.
 opencv-python>=4.10
 pyqtgraph>=0.13
 PyQt6>=6.6

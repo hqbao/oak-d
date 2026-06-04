@@ -38,8 +38,9 @@ from pathlib import Path
 from threading import Lock
 from typing import Any, Sequence
 
-import cv2
 import numpy as np
+
+from .vio.pngio import imwrite_gray
 
 
 class SessionRecorder:
@@ -112,8 +113,8 @@ class SessionRecorder:
             self._frame_seq += 1
             ts = self.now_ns() if ts_ns is None else int(ts_ns)
         base = f"{seq:06d}"
-        cv2.imwrite(str(self.img_dir / f"{base}_L.png"), left_u8)
-        cv2.imwrite(str(self.img_dir / f"{base}_R.png"), right_u8)
+        imwrite_gray(self.img_dir / f"{base}_L.png", left_u8)
+        imwrite_gray(self.img_dir / f"{base}_R.png", right_u8)
         depth_u16.astype("<u2").tofile(self.img_dir / f"{base}_D.raw16")
         h, w = depth_u16.shape[:2]
         rec = {

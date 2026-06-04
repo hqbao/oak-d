@@ -25,7 +25,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-import cv2
 import numpy as np
 
 
@@ -82,6 +81,7 @@ class LoopDetector:
     """Detects loops between a query keyframe and a set of older keyframes."""
 
     def __init__(self, K: np.ndarray, cfg: LoopConfig | None = None):
+        import cv2  # ORB loop closure (ours-slam only); not a runtime dep of f2f/ba
         self.K = np.asarray(K, dtype=np.float64)
         self.cfg = cfg or LoopConfig()
         self.orb = cv2.ORB_create(nfeatures=self.cfg.orb_features)
@@ -122,6 +122,7 @@ class LoopDetector:
         point in the OLD camera frame to the CURRENT camera frame, or ``None`` if
         the loop is not geometrically confirmed.
         """
+        import cv2  # ORB loop closure (ours-slam only); lazy so f2f/ba stay cv2-free
         good = self._good_matches(cur, old)
         if len(good) < self.cfg.min_matches:
             return None

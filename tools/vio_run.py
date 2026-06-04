@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -227,7 +228,8 @@ def score_session(session_dir: Path, max_frames: int, verbose: bool,
     # especially yaw, which gravity cannot recover -- keep the attitude right
     # even when KLT briefly loses tracks. It is a no-op where vision is healthy
     # (see gold ATE parity), so it is safe to leave on for every backend.
-    odom_cfg = OdometryConfig(gyro_fuse=use_gyro)
+    odom_cfg = OdometryConfig(gyro_fuse=use_gyro,
+                              use_own_pnp=os.environ.get("OAKD_OWN_PNP", "1") != "0")
 
     # Load the IMU stream once up front (the tight-coupled VIO backend needs it
     # at construction, and the gyro rotation prior reuses the same arrays).

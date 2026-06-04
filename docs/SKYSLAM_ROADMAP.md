@@ -253,10 +253,14 @@ sum + smaller-eigenvalue response + NMS + occupancy-grid min-distance). They are
 drop-ins for `cv2.calcOpticalFlowPyrLK` / `cv2.goodFeaturesToTrack`, agree with
 them closely (lab_loop: KLT adjacent-frame mean 0.025 px; corners same 173 points,
 nn mean 0.03 px) and keep ATE parity (lab_loop f2f 1.18→1.27%). They are the
-default frontend now; `--cv2-klt` falls back to OpenCV for a faster live display
-(the pure-NumPy versions are ~25× slower). These are the reference to port to
-NEON-optimised `fast_detector.c` / `klt_tracker.c`. The only remaining cv2 call in
-the default path is image decode (`cv2.imread`), not frontend math.
+ONLY frontend now -- the cv2 fallback was removed, so the live `ours`/`ours-ba`
+path and offline f2f/ba scoring carry no cv2 (Numba JITs the KLT inner loop to
+~15 ms/frame live; without Numba a lighter `live_own` preset keeps it real time).
+These are the reference to port to NEON-optimised `fast_detector.c` /
+`klt_tracker.c`. PnP is also our own (`oakd/vio/pnp.py`) and frame IO uses a
+pure-Python PNG codec (`oakd/vio/pngio.py`), so no cv2 call remains in the
+`ours`/`ours-ba` path; cv2 is only used by ORB loop closure (`ours-slam`) and the
+dev-only PnP A/B oracle.
 
 --- (3–5 days code | 2–3 weeks debug)
 

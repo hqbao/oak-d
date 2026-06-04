@@ -28,18 +28,17 @@ def _build_source(name: str, args):
         return OakBasaltSlamSource()
     if name == "ours":
         from oakd.sources.depthai_ours_vio import OakOursVioSource
-        return OakOursVioSource(fps=args.fps, backend="f2f",
-                                use_own_klt=args.own_klt)
+        return OakOursVioSource(fps=args.fps, backend="f2f")
     if name == "ours-ba":
         from oakd.sources.depthai_ours_vio import OakOursVioSource
         return OakOursVioSource(
-            fps=args.fps, backend="ba", use_own_klt=args.own_klt,
+            fps=args.fps, backend="ba",
             ba_window=args.ba_window, ba_kf_every=args.ba_kf_every,
             ba_iters=args.ba_iters)
     if name == "ours-slam":
         from oakd.sources.depthai_ours_vio import OakOursVioSource
         return OakOursVioSource(
-            fps=args.fps, backend="slam", use_own_klt=args.own_klt,
+            fps=args.fps, backend="slam",
             slam_kf_every=args.slam_kf_every, slam_radius_m=args.slam_radius,
             slam_kf_min_trans=args.slam_kf_min_trans,
             slam_kf_min_rot=args.slam_kf_min_rot,
@@ -47,7 +46,7 @@ def _build_source(name: str, args):
     if name == "ours-vio":
         from oakd.sources.depthai_ours_vio import OakOursVioSource
         return OakOursVioSource(
-            fps=args.fps, backend="vio", use_own_klt=args.own_klt,
+            fps=args.fps, backend="vio",
             ba_window=args.ba_window, ba_kf_every=args.ba_kf_every)
     raise SystemExit(f"unknown --source '{name}' "
                      f"(expected: fake|oak|slam|ours|ours-ba|ours-slam|"
@@ -64,13 +63,6 @@ def main() -> int:
                          "ours-vio = tight-coupled visual+IMU VIO)")
     ap.add_argument("--fps", type=int, default=20,
                     help="camera frame rate (ours/ours-ba/ours-slam) [20]")
-    ap.add_argument("--own-klt", action="store_true", dest="own_klt",
-                    help="use our own pure-NumPy KLT + corner detector for the "
-                         "LIVE display (library-free). With Numba installed the "
-                         "KLT inner loop is JIT-compiled and runs full quality at "
-                         "~15ms/frame (real time); without Numba it falls back to "
-                         "a lighter preset. Default OFF: live uses cv2 (~3ms). "
-                         "Offline scoring (tools/vio_run.py) always uses our own.")
     # SLAM tuning (ours-slam)
     ap.add_argument("--slam-kf-every", type=int, default=5, dest="slam_kf_every",
                     help="SLAM update cadence: insert+loop-detect every N frames "

@@ -31,8 +31,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator
 
-import cv2
 import numpy as np
+
+from .pngio import imread_gray
 
 
 @dataclass
@@ -159,17 +160,14 @@ class SessionReader:
 
     def load_frame(self, index: int, load_right: bool = False) -> Frame:
         rec = self._frames[index]
-        gray_left = cv2.imread(
-            str(self.input_dir / rec["left_path"]), cv2.IMREAD_UNCHANGED
-        )
-        if gray_left is None:
-            raise FileNotFoundError(self.input_dir / rec["left_path"])
+        left_path = self.input_dir / rec["left_path"]
+        if not left_path.exists():
+            raise FileNotFoundError(left_path)
+        gray_left = imread_gray(left_path)
 
         gray_right = None
         if load_right and rec.get("right_path"):
-            gray_right = cv2.imread(
-                str(self.input_dir / rec["right_path"]), cv2.IMREAD_UNCHANGED
-            )
+            gray_right = imread_gray(self.input_dir / rec["right_path"])
 
         h, w = int(rec["height"]), int(rec["width"])
         depth_mm = np.fromfile(

@@ -47,7 +47,6 @@ from __future__ import annotations
 from collections import Counter
 from dataclasses import dataclass, field
 
-import cv2
 import numpy as np
 
 from .bundle import BAConfig, optimize

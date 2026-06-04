@@ -7,8 +7,9 @@ VO:
 1. Take tracks seen in *both* the previous and current frame.
 2. Back-project the previous-frame observations to 3D using the previous depth
    map (metric, from the recorded stereo depth).
-3. Solve ``cv2.solvePnPRansac`` for the rigid transform that reprojects those 3D
-   points onto their current-frame pixels -> ``T_prev->cur``.
+3. Solve our own ``pnp.solve_pnp_ransac`` (library-free RANSAC + LM) for the
+   rigid transform that reprojects those 3D points onto their current-frame
+   pixels -> ``T_prev->cur``.
 4. Compose into the world pose: ``T_w_cur = T_w_prev @ inv(T_prev->cur)``.
 
 Everything is metric because depth is metric, so the trajectory has true scale
@@ -19,10 +20,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-import cv2
 import numpy as np
 
 from .frontend import FrontendConfig, KLTFrontend
+from .imu import so3_exp, so3_log
+from .pnp import solve_pnp_ransac
 
 
 def level_attitude(R: np.ndarray, accel_cam: np.ndarray,
@@ -255,14 +257,20 @@ class OdometryConfig:
     # correct anyway. Default 0 (off) -> offline gold byte-for-byte unchanged;
     # the live source enables it.
     min_inliers_for_translation: int = 0
+    # --- library-free PnP (default ON) --------------------------------------
+    # Use the pure-NumPy ``pnp.solve_pnp_ransac`` (RANSAC DLT + robust LM seed +
+    # plain-LS refine) instead of ``cv2.solvePnPRansac``, so the production path
+    # carries no cv2 dependency. Measured vs cv2 on gold: better on the genuine
+    # forward-motion sessions (corridor, lab_straight, push_straight_fast) and a
+    # wash through windowed BA. Set False (dev only, OAKD_OWN_PNP=0) to A/B
+    # against the cv2 oracle, which is then lazily imported.
+    use_own_pnp: bool = True
 
 
 
 def _scale_rotation(R: np.ndarray, s: float) -> np.ndarray:
     """Return the rotation that applies a fraction ``s`` of ``R`` (axis-angle)."""
-    rvec, _ = cv2.Rodrigues(R)
-    R_s, _ = cv2.Rodrigues(rvec * float(s))
-    return R_s
+    return so3_exp(so3_log(R) * float(s))
 
 
 def _translation_given_rotation(obj: np.ndarray, img: np.ndarray,
@@ -390,33 +398,51 @@ class RGBDVisualOdometry:
                 obj = np.asarray(obj_pts, dtype=np.float64)
                 img = np.asarray(img_pts, dtype=np.float64)
 
-                use_guess = False
-                rvec0 = None
-                tvec0 = None
-                if R_prior is not None:
-                    rvec0, _ = cv2.Rodrigues(np.asarray(R_prior, dtype=np.float64))
-                    # Warm-start the translation with the predicted velocity (if
-                    # enabled) so the iterative refinement converges on large
-                    # fast-motion steps instead of from a zero-motion guess.
-                    if (self.cfg.predict_translation
-                            and self._vel_t is not None):
-                        tvec0 = self._vel_t.reshape(3, 1).astype(np.float64)
-                    else:
-                        tvec0 = np.zeros((3, 1))
-                    use_guess = True
-
-                ok, rvec, tvec, inliers = cv2.solvePnPRansac(
-                    obj, img, self.K, None,
-                    rvec=rvec0, tvec=tvec0, useExtrinsicGuess=use_guess,
-                    iterationsCount=self.cfg.ransac_iters,
-                    reprojectionError=self.cfg.ransac_reproj_px,
-                    confidence=self.cfg.ransac_conf,
-                    flags=cv2.SOLVEPNP_ITERATIVE,
-                )
+                if self.cfg.use_own_pnp:
+                    # cur<-prev rotation prior (R_prior is prev<-cur).
+                    R_seed = (np.asarray(R_prior, np.float64).T
+                              if R_prior is not None else None)
+                    ok, R_own, t_own, inliers = solve_pnp_ransac(
+                        obj, img, self.K, R_init=R_seed,
+                        reproj_px=self.cfg.ransac_reproj_px,
+                        iters=self.cfg.ransac_iters,
+                        conf=self.cfg.ransac_conf,
+                        min_points=self.cfg.min_pnp_points)
+                else:
+                    # Dev-only A/B path against the cv2 oracle (OAKD_OWN_PNP=0).
+                    # cv2 is imported lazily here so the production path (own
+                    # PnP) carries no cv2 runtime dependency.
+                    import cv2
+                    use_guess = False
+                    rvec0 = tvec0 = None
+                    if R_prior is not None:
+                        rvec0, _ = cv2.Rodrigues(
+                            np.asarray(R_prior, dtype=np.float64))
+                        # Warm-start the translation with the predicted velocity
+                        # (if enabled) so the iterative refinement converges on
+                        # large fast-motion steps instead of a zero-motion guess.
+                        if (self.cfg.predict_translation
+                                and self._vel_t is not None):
+                            tvec0 = self._vel_t.reshape(3, 1).astype(np.float64)
+                        else:
+                            tvec0 = np.zeros((3, 1))
+                        use_guess = True
+                    ok, rvec, tvec, inliers = cv2.solvePnPRansac(
+                        obj, img, self.K, None,
+                        rvec=rvec0, tvec=tvec0, useExtrinsicGuess=use_guess,
+                        iterationsCount=self.cfg.ransac_iters,
+                        reprojectionError=self.cfg.ransac_reproj_px,
+                        confidence=self.cfg.ransac_conf,
+                        flags=cv2.SOLVEPNP_ITERATIVE,
+                    )
                 if ok and inliers is not None and len(inliers) >= self.cfg.min_pnp_points:
-                    R, _ = cv2.Rodrigues(rvec)
+                    if self.cfg.use_own_pnp:
+                        R = R_own
+                    else:
+                        import cv2
+                        R, _ = cv2.Rodrigues(rvec)
                     ninl = int(len(inliers))
-                    t_use = tvec.reshape(3)
+                    t_use = t_own if self.cfg.use_own_pnp else tvec.reshape(3)
                     # Freeze translation when vision is untrustworthy (too few
                     # inliers -> textureless / white wall). Advance rotation by
                     # the gyro but hold the position put; do NOT coast (no real
@@ -441,13 +467,13 @@ class RGBDVisualOdometry:
                         # transpose it into PnP's cur<-prev point-rotation frame.
                         R_gyro = np.asarray(R_prior, dtype=np.float64).T
                         rot_deg = float(np.degrees(np.linalg.norm(
-                            cv2.Rodrigues(R_gyro)[0])))
+                            so3_log(R_gyro))))
                         info["rot_deg"] = rot_deg
                         gain = self.cfg.gyro_corr_gain_max * min(
                             1.0, ninl / max(self.cfg.gyro_trust_inliers, 1))
                         R_corr = R @ R_gyro.T          # vision relative to gyro
                         disagree_deg = float(np.degrees(
-                            np.linalg.norm(cv2.Rodrigues(R_corr)[0])))
+                            np.linalg.norm(so3_log(R_corr))))
                         info["gyro_corr_deg"] = disagree_deg
                         # When vision disagrees strongly with the gyro, the
                         # vision rotation is the suspect one (fast-rotation KLT
@@ -484,7 +510,7 @@ class RGBDVisualOdometry:
                                 obj[idx], img[idx], R_fused, self.K)
                         else:
                             dev = float(np.degrees(np.linalg.norm(
-                                cv2.Rodrigues(R_fused @ R.T)[0])))
+                                so3_log(R_fused @ R.T))))
                             if dev > 0.5:
                                 t_use = _translation_given_rotation(
                                     obj[idx], img[idx], R_fused, self.K)
@@ -624,7 +650,7 @@ class RGBDVisualOdometry:
         # damping zeroes it on success frames), so coasting a stale forward
         # velocity through a yaw would re-introduce the phantom drift. Slow/no
         # rotation is exactly the fast straight-line regime we want to bridge.
-        rot_deg = float(np.degrees(np.linalg.norm(cv2.Rodrigues(R_gyro_pc)[0])))
+        rot_deg = float(np.degrees(np.linalg.norm(so3_log(R_gyro_pc))))
         if (self.cfg.predict_translation and self._vel_t is not None
                 and rot_deg < self.cfg.rot_damp_gate_deg
                 and self._predict_count < self.cfg.predict_max_frames):
