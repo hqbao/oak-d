@@ -72,10 +72,26 @@ def colorize_depth(depth_m: np.ndarray) -> np.ndarray:
     return colored
 
 
+def _text_style(width: int, ref: float = 0.6, ref_thick: int = 2):
+    """Font scale + thickness + top-left margin scaled to the frame width.
+
+    All overlay text was sized for the 640-wide baseline; on a small frame
+    (e.g. 54 px) that fixed size covers the whole image. Scale everything by
+    ``width / 640`` so the labels keep the same RELATIVE size at any resolution,
+    with a small floor so they stay renderable on tiny frames.
+    """
+    s = max(0.15, ref * width / 640.0)
+    thick = max(1, round(ref_thick * width / 640.0))
+    mx = max(2, round(8 * width / 640.0))
+    my = max(round(s * 18) + 2, 6)  # baseline y for top-anchored text
+    return s, thick, mx, my
+
+
 def _label(img: np.ndarray, text: str) -> np.ndarray:
     out = img.copy()
-    cv2.putText(out, text, (8, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.6,
-                (255, 255, 255), 2, cv2.LINE_AA)
+    s, thick, mx, my = _text_style(img.shape[1])
+    cv2.putText(out, text, (mx, my), cv2.FONT_HERSHEY_SIMPLEX, s,
+                (255, 255, 255), thick, cv2.LINE_AA)
     return out
 
 
@@ -373,10 +389,12 @@ def run_live(cfg: SGMConfig, width: int, height: int, fps: int,
                 lmean = float(disp_left.mean()); lstd = float(disp_left.std())
                 vr = float((ours > 0).mean()) * 100.0
                 left_bgr = _label(_gray_bgr(disp_left), "left (rect)")
+                ds, dthick, dmx, _ = _text_style(width, ref=0.5, ref_thick=1)
                 cv2.putText(left_bgr,
                             f"seq{seq} exp{lmean:.0f}/{lstd:.0f} val{vr:.0f}%",
-                            (8, height - 12), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
-                            (0, 255, 0), 1, cv2.LINE_AA)
+                            (dmx, height - max(3, round(12 * width / 640.0))),
+                            cv2.FONT_HERSHEY_SIMPLEX, ds,
+                            (0, 255, 0), dthick, cv2.LINE_AA)
                 panel = np.hstack([
                     left_bgr,
                     _label(colorize_depth(shown), f"OURS {ms:.0f}ms"),
