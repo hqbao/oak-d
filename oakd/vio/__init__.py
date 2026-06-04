@@ -18,6 +18,7 @@ from .posegraph import PoseGraph, se3_adjoint, se3_inv, se3_log
 from .reader import CameraCalib, Frame, SessionReader, StereoCalib
 from .resolution import ResolutionProfile
 from .slam import SlamConfig, SlamMap
+from .synced import ImuSegment, SyncedSample, iter_synced, slice_imu
 from .stereo import (
     LeftRectifier,
     RightRectifier,
@@ -67,6 +68,10 @@ __all__ = [
     "se3_log",
     "SlamConfig",
     "SlamMap",
+    "ImuSegment",
+    "SyncedSample",
+    "iter_synced",
+    "slice_imu",
     "ResolutionProfile",
     "StereoConfig",
     "StereoMatcher",
