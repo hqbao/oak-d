@@ -154,6 +154,13 @@ Tuning knobs (all optional, shown with their defaults):
 ./run.sh --source ours-ba --ba-window 6 --ba-kf-every 5 --ba-iters 5
 ./run.sh --source ours --fps 20                    # camera frame rate (any ours-* source)
 
+# Run lighter at a lower resolution (any ours-* source). Cost scales with the
+# pixel count, so half the width = ~1/4 the work. The pipeline auto-scales its
+# pixel-unit vision thresholds from the 640x400 baseline; seven per-resolution
+# knobs can be overridden to co-tune. See docs/RESOLUTION_TUNING.md.
+./run.sh --source ours --width 320 --height 200    # half res, auto-scaled
+./run.sh --source ours --width 320 --height 200 --max-corners 240 --klt-win 13
+
 # Optical flow tracking AND corner detection have our own pure-NumPy
 # implementations (pyramidal Lucas-Kanade + Shi-Tomasi, no library). The KLT
 # inner loop is JIT-compiled with Numba (optional dep) so our own frontend runs

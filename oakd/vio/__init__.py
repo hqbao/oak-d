@@ -16,6 +16,7 @@ from .loopclosure import KeyframeAppearance, LoopConfig, LoopDetector
 from .odometry import OdometryConfig, RGBDVisualOdometry, level_attitude
 from .posegraph import PoseGraph, se3_adjoint, se3_inv, se3_log
 from .reader import CameraCalib, Frame, SessionReader, StereoCalib
+from .resolution import ResolutionProfile
 from .slam import SlamConfig, SlamMap
 from .stereo import (
     LeftRectifier,
@@ -66,6 +67,7 @@ __all__ = [
     "se3_log",
     "SlamConfig",
     "SlamMap",
+    "ResolutionProfile",
     "StereoConfig",
     "StereoMatcher",
     "SGMConfig",

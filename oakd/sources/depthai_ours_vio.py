@@ -57,7 +57,7 @@ import numpy as np
 from ..pose import Pose
 from ..frames import quat_to_rpy
 from ..vio import (
-    FrontendConfig, InertialTranslationFilter, KLTFrontend, OdometryConfig,
+    InertialTranslationFilter, KLTFrontend,
     RGBDVisualOdometry, gravity_aligned_R0, level_attitude,
 )
 from .base import PoseSource
@@ -213,12 +213,30 @@ class OakOursVioSource(PoseSource):
                  ba_kf_every: int = 5, ba_iters: int = 5,
                  slam_kf_min_trans: float = 0.0,
                  slam_kf_min_rot: float = 0.0, slam_max_kf: int = 0,
-                 depth_fast: bool = True) -> None:
+                 depth_fast: bool = True,
+                 max_corners: int | None = None,
+                 min_distance: float | None = None,
+                 klt_win: int | None = None, klt_levels: int | None = None,
+                 reproj_px: float | None = None,
+                 num_disparities: int | None = None,
+                 orb_features: int | None = None) -> None:
         super().__init__()
         self.width = int(width)
         self.height = int(height)
         self.cam_fps = int(fps)
         self.backend = backend
+        # Resolution-aware vision tuning. Every pixel-unit threshold in the
+        # pipeline was tuned at 640x400; running at a lower resolution to save
+        # CPU shrinks all of them, so they are auto-scaled from that baseline to
+        # the live (width, height). Any of the seven knobs can be overridden at
+        # runtime (None = keep the auto-scaled value) -- this is the set we
+        # co-tune per resolution (see docs/RESOLUTION_TUNING.md).
+        from ..vio.resolution import ResolutionProfile
+        self.res = ResolutionProfile.for_resolution(
+            self.width, self.height,
+            max_corners=max_corners, min_distance=min_distance,
+            klt_win=klt_win, klt_levels=klt_levels, reproj_px=reproj_px,
+            num_disparities=num_disparities, orb_features=orb_features)
         # Depth feeding the VIO is ALWAYS our own from-scratch SGM matcher
         # (oakd.vio.stereo) run live on the rectified left + the RAW syncedRight
         # frame. The chip StereoDepth map is deliberately NOT used here: this is
@@ -370,7 +388,7 @@ class OakOursVioSource(PoseSource):
             # depth path is VPU-free: nothing reads the chip's rectifiedLeft or
             # StereoDepth output.
             from ..vio.reader import StereoCalib
-            from ..vio.stereo import SGMConfig, SGMStereoMatcher
+            from ..vio.stereo import SGMStereoMatcher
 
             def _intr(sock):
                 Ki = np.array(ch.getCameraIntrinsics(
@@ -389,11 +407,12 @@ class OakOursVioSource(PoseSource):
                 "intrinsics_right": _intr(right_socket),
                 "T_left_right": T_lr.tolist(),
             })
-            sgm_cfg = SGMConfig.live() if self.depth_fast else SGMConfig()
+            sgm_cfg = self.res.sgm(fast=self.depth_fast)
             matcher = SGMStereoMatcher.from_calib(calib, sgm_cfg,
                                                   rectify_left=True)
             print(f"[ours-vio] depth source: OURS SGM "
                   f"({'live/half-res' if self.depth_fast else 'full'})")
+            print(f"[ours-vio] resolution profile: {self.res.describe()}")
 
             # IMU->left-camera rotation (for bringing accel into the optical
             # frame). depthai returns the extrinsic with translation in cm; we
@@ -415,8 +434,7 @@ class OakOursVioSource(PoseSource):
             #     back to the lighter ``live_own`` preset (~38-58 ms) to stay
             #     roughly real time.
             from ..vio.klt_numba import HAVE_NUMBA
-            fe_cfg = (FrontendConfig() if HAVE_NUMBA
-                      else FrontendConfig.live_own())
+            fe_cfg = self.res.frontend(numba=HAVE_NUMBA)
 
             # Translation is owned by vision (frame-to-frame RGB-D PnP) with the
             # gyro FUSED softly: the gyro corrects a slipped vision rotation via
@@ -469,9 +487,8 @@ class OakOursVioSource(PoseSource):
             # untouched -- fast-push p25 is 33 inliers, and the ~8% of its frames
             # that dip below 12 are genuine tracking losses where freezing for one
             # frame is correct anyway (measured: ATE 2.14% -> 1.82%).
-            od_cfg = OdometryConfig(gyro_fuse=True,
-                                    max_translation_speed=4.0,
-                                    min_inliers_for_translation=12)
+            od_cfg = self.res.odometry(gyro_fuse=True,
+                                       max_translation_speed=4.0)
             vo = RGBDVisualOdometry(
                 K, od_cfg, frontend=KLTFrontend(fe_cfg))
 
@@ -1243,7 +1260,8 @@ class OakOursVioSource(PoseSource):
         # samples are submitted per keyframe (see the read loop), so a moving
         # keyframe simply carries no gravity constraint.
         cfg = WindowedConfig(window=self.ba_window, kf_every=self.ba_kf_every,
-                             ba=BAConfig(max_iters=self.ba_iters, huber_px=2.0,
+                             ba=BAConfig(max_iters=self.ba_iters,
+                                         huber_px=self.res.ba_huber_px(),
                                          use_gravity=True))
         ba_map = WindowedBAMap(K, cfg)
 
@@ -1420,6 +1438,7 @@ class OakOursVioSource(PoseSource):
         # Spatial gating keeps loop detection bounded as the map grows so the
         # configured keyframe cadence stays sustainable on the background thread.
         slam = SlamMap(K, SlamConfig(
+            loop=self.res.loop(),
             loop_search_radius_m=self.slam_radius_m,
             loop_max_odom_rot_deg=30.0,
             kf_min_trans_m=self.slam_kf_min_trans,
