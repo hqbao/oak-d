@@ -250,6 +250,9 @@ in the numbers instead of as lag on the device.
       filters) for frame IO, replacing `cv2.imread`/`imwrite` (decode verified
       byte-for-byte vs cv2)
 - [x] Logging + offline replay (`tools/record_session.py` + `tools/viz_session.py`)
+- [x] Transparent time-synced (image, depth, IMU) input building block
+      (`oakd/vio/synced.py`) + inspector `tools/synced_view.py` (replay + `--live`:
+      image | depth | gyro angular-velocity chart + 3D accel vector)
 - [x] Persistent SLAM database (auto save `rtabmap.db` + extract KF/loop via `tools/extract_kf_from_db.py`)
 - [x] Gold regression suite (12 sessions, see `docs/GOLD_SESSIONS.md`)
 - [ ] UDP / UART link to flight-controller

@@ -36,6 +36,12 @@ does not have to re-derive it.
 | Keyframes / marginalisation | Yes (Basalt KF management + marginalisation) | No marginalisation; `ours-ba` keeps a fixed-size window, `ours-slam` keeps a pose graph |
 
 ### Code map (ours)
+- Transparent time-synced input (`image, depth, IMU`) building block:
+  `oakd/vio/synced.py` (`iter_synced`, `SyncedSample`, `slice_imu`) — groups the
+  IMU samples that fall in each frame interval `(t_prev, t_cur]` on the one
+  recorder `ts_ns` clock; the inspector `tools/synced_view.py` shows the triplet
+  (replay + `--live`): image | depth | gyro angular-velocity line chart + 3D
+  accel vector. Honest-only: every panel traces to a real recorded stream.
 - Frontend (own pure-NumPy KLT + Shi-Tomasi, forward-backward check):
   `oakd/vio/frontend.py`, `klt.py`, `klt_numba.py`, `corners.py`
 - Frame-to-frame RGB-D PnP + gyro fusion: `oakd/vio/odometry.py`
