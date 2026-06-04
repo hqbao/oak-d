@@ -34,8 +34,11 @@ Usage::
     python tools/synced_view.py --session sessions/gold/lab_loop_30s
     python tools/synced_view.py --scale 1.5 --no-bias             # raw gyro bias
 
+    python tools/synced_view.py --live                            # live OAK-D
+    python tools/synced_view.py --live --width 320 --height 200   # lighter live
+
 Keys: SPACE pause/resume, ``n`` step one frame (paused), ``r`` reset attitude,
-``q`` / ESC quit.
+``q`` / ESC quit. (Live has no pause/step; ``r`` reset + ``q`` quit only.)
 """
 from __future__ import annotations
 
@@ -51,8 +54,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from oakd.frames import quat_to_rot, quat_to_rpy, rot_to_quat  # noqa: E402
 from oakd.vio import (  # noqa: E402
-    GyroPreintegrator, SessionReader, slice_imu,
+    GyroPreintegrator, SessionReader, SGMConfig, SGMStereoMatcher,
+    StereoCalib, slice_imu,
 )
+from oakd.vio.resolution import ResolutionProfile  # noqa: E402
 
 # Fixed depth range (metres) for the colormap so colours are stable across
 # frames (a per-frame autoscale makes the scene "breathe" and hides drift).
@@ -280,19 +285,247 @@ def run(session_dir: Path, fps: float, scale: float, use_bias: bool) -> int:
     return 0
 
 
+def run_live(width: int, height: int, fps: int, scale: float,
+             use_bias: bool, fast: bool, bias_window_s: float = 1.0) -> int:
+    """Live (image, depth, IMU) triplet from a connected OAK-D.
+
+    Mirrors the VPU-free live VIO input exactly (oakd.sources.depthai_ours_vio):
+    taps the two RAW cameras + the IMU, rectifies BOTH frames and runs our SGM
+    ourselves (no chip StereoDepth), and integrates/averages the IMU the same way
+    the VIO does -- so the triplet shown here is the real pipeline input.
+
+    The gyro is integrated **live** into a running camera-frame attitude (the
+    same ``so3_exp`` recursion the VIO uses), shown as a quaternion + triad; the
+    accel samples drained each frame are averaged into one specific-force vector.
+    """
+    import depthai as dai  # lazy: replay mode works without depthai
+    from oakd.vio.imu import so3_exp
+
+    left_socket = dai.CameraBoardSocket.CAM_B
+    right_socket = dai.CameraBoardSocket.CAM_C
+    res = ResolutionProfile.for_resolution(width, height)
+    cfg = res.sgm(fast=fast)
+    win = "synced_view LIVE  [ image | depth | IMU ]"
+
+    with dai.Pipeline() as p:
+        left = p.create(dai.node.Camera).build(left_socket, sensorFps=fps)
+        right = p.create(dai.node.Camera).build(right_socket, sensorFps=fps)
+        imu = p.create(dai.node.IMU)
+        imu.enableIMUSensor([dai.IMUSensor.ACCELEROMETER_RAW,
+                             dai.IMUSensor.GYROSCOPE_RAW], 200)
+        imu.setBatchReportThreshold(1)
+        imu.setMaxBatchReports(10)
+
+        left_out = left.requestOutput((width, height))
+        right_out = right.requestOutput((width, height))
+        q_left = left_out.createOutputQueue(maxSize=4, blocking=False)
+        q_right = right_out.createOutputQueue(maxSize=4, blocking=False)
+        q_imu = imu.out.createOutputQueue(maxSize=50, blocking=False)
+        p.start()
+
+        ch = p.getDefaultDevice().readCalibration()
+
+        def _intr(sock):
+            Ki = np.array(ch.getCameraIntrinsics(sock, width, height),
+                          dtype=np.float64)
+            dist = list(ch.getDistortionCoefficients(sock))
+            return {"fx": float(Ki[0, 0]), "fy": float(Ki[1, 1]),
+                    "cx": float(Ki[0, 2]), "cy": float(Ki[1, 2]),
+                    "dist": [float(x) for x in dist],
+                    "width": int(width), "height": int(height)}
+
+        T_lr = np.array(ch.getCameraExtrinsics(left_socket, right_socket),
+                        dtype=np.float64).reshape(4, 4)
+        calib = StereoCalib.from_json({
+            "intrinsics_left": _intr(left_socket),
+            "intrinsics_right": _intr(right_socket),
+            "T_left_right": T_lr.tolist(),
+        })
+        matcher = SGMStereoMatcher.from_calib(calib, cfg, rectify_left=True)
+
+        # IMU->left-camera rotation: brings gyro/accel into the camera optical
+        # frame so the triad/quaternion match the VIO convention. Identity (and
+        # an "IMU frame" label) if the device has no extrinsics.
+        try:
+            R_imu_cam = np.array(
+                ch.getImuToCameraExtrinsics(left_socket), dtype=np.float64
+            )[:3, :3]
+            frame = "cam frame"
+        except Exception:
+            R_imu_cam = np.eye(3)
+            frame = "IMU frame"
+
+        print(f"live {width}x{height}@{fps}  SGM ndisp={cfg.num_disparities} "
+              f"downscale={cfg.downscale}  IMU triad in {frame}")
+        print(f"compiling SGM kernels (one-time JIT)...", flush=True)
+        dummy = np.zeros((height, width), np.uint8)
+        matcher.dense_depth(dummy, dummy)
+        print("ready", flush=True)
+
+        # --- estimate the gyro zero-rate bias from a short static window -------
+        # Same assumption the VIO makes: the device is held still at startup, so
+        # the mean gyro over the first second is its bias. Skipped with --no-bias.
+        gyro_bias = np.zeros(3)
+        if use_bias:
+            print(f"hold STILL ~{bias_window_s:.0f}s for gyro bias...",
+                  flush=True)
+            buf, t_start = [], time.monotonic()
+            while time.monotonic() - t_start < bias_window_s:
+                msg = q_imu.tryGet()
+                if msg is None:
+                    cv2.waitKey(1)
+                    continue
+                for pkt in msg.packets:
+                    g = pkt.gyroscope
+                    w = np.array([g.x, g.y, g.z], np.float64)
+                    if np.all(np.isfinite(w)):
+                        buf.append(w)
+            if buf:
+                gyro_bias = np.mean(buf, axis=0)
+            print(f"gyro bias = {gyro_bias.round(5)} rad/s "
+                  f"({len(buf)} samples)", flush=True)
+
+        cv2.namedWindow(win, cv2.WINDOW_NORMAL)
+        cv2.startWindowThread()
+        print("keys: r reset attitude | q quit")
+
+        def _as_gray(msg):
+            g = msg.getCvFrame()
+            if g.ndim == 3:
+                g = cv2.cvtColor(g, cv2.COLOR_BGR2GRAY)
+            return g
+
+        pend_l: dict[int, np.ndarray] = {}
+        pend_r: dict[int, np.ndarray] = {}
+        R_cum = np.eye(3)            # running gyro-integrated attitude (cam frame)
+        R_ref = np.eye(3)            # reference for the "reset attitude" key
+        gyro_last_ts: float | None = None
+        shown_a_frame = False
+        t_run0 = time.monotonic()
+
+        while p.isRunning():
+            got = False
+            while True:
+                m = q_left.tryGet()
+                if m is None:
+                    break
+                pend_l[m.getSequenceNum()] = _as_gray(m)
+                got = True
+            while True:
+                m = q_right.tryGet()
+                if m is None:
+                    break
+                pend_r[m.getSequenceNum()] = _as_gray(m)
+                got = True
+
+            # Drain the IMU EVERY iteration: integrate gyro into the running
+            # attitude (per-sample dt, bias-subtracted, conjugated to the camera
+            # frame) and accumulate accel to average over this display frame.
+            R_imu_step = np.eye(3)
+            gyro_n = 0
+            acc_sum = np.zeros(3)
+            acc_n = 0
+            msg = q_imu.tryGet()
+            while msg is not None:
+                for pkt in msg.packets:
+                    a = pkt.acceleroMeter
+                    v = np.array([a.x, a.y, a.z], np.float64)
+                    if np.all(np.isfinite(v)):
+                        acc_sum += v
+                        acc_n += 1
+                    g = pkt.gyroscope
+                    w = np.array([g.x, g.y, g.z], np.float64)
+                    if np.all(np.isfinite(w)):
+                        try:
+                            ts = g.getTimestampDevice().total_seconds()
+                        except Exception:
+                            ts = None
+                        if ts is not None:
+                            if gyro_last_ts is not None:
+                                dt = ts - gyro_last_ts
+                                if 0.0 < dt < 0.1:
+                                    R_imu_step = R_imu_step @ so3_exp(
+                                        (w - gyro_bias) * dt)
+                                    gyro_n += 1
+                            gyro_last_ts = ts
+                msg = q_imu.tryGet()
+            # Conjugate the IMU-frame increment into the camera frame, advance
+            # the running attitude.
+            if gyro_n > 0:
+                R_cum = R_cum @ (R_imu_cam @ R_imu_step @ R_imu_cam.T)
+                U, _, Vt = np.linalg.svd(R_cum)
+                R_cum = U @ Vt
+            delta_deg = float(np.degrees(np.linalg.norm(
+                cv2.Rodrigues(R_imu_step)[0].ravel()))) if gyro_n else 0.0
+            accel_cam = (R_imu_cam @ (acc_sum / acc_n)
+                         if acc_n else np.full(3, np.nan))
+
+            common = pend_l.keys() & pend_r.keys()
+            if common:
+                seq = max(common)
+                gl, gr = pend_l[seq], pend_r[seq]
+                pend_l = {k: v for k, v in pend_l.items() if k > seq}
+                pend_r = {k: v for k, v in pend_r.items() if k > seq}
+                rect_left, ours = matcher.dense_depth_rectified_left(gl, gr)
+                disp_left = np.clip(rect_left, 0, 255).astype(np.uint8)
+
+                R_show = R_ref.T @ R_cum
+                q_show = rot_to_quat(R_show)
+                panel_imu = render_imu_panel(
+                    height, R_show, q_show, delta_deg, accel_cam,
+                    n_imu=acc_n,
+                    frame_str=f"seq {seq}  t {time.monotonic()-t_run0:6.1f}s  "
+                              f"{frame}")
+                valid = float((ours > 1e-6).mean()) * 100.0
+                left_lbl = _label(_gray_bgr(disp_left), "image (rect-left)")
+                depth_lbl = _label(colorize_depth(ours),
+                                   f"depth  valid {valid:.0f}%")
+                panel = np.hstack([left_lbl, depth_lbl, panel_imu])
+                if scale != 1.0:
+                    panel = cv2.resize(panel, None, fx=scale, fy=scale,
+                                       interpolation=cv2.INTER_NEAREST)
+                cv2.imshow(win, panel)
+                shown_a_frame = True
+            elif not shown_a_frame:
+                placeholder = np.zeros((height, width * 2 + height, 3),
+                                       dtype=np.uint8)
+                cv2.imshow(win, _label(placeholder, "waiting for camera..."))
+
+            key = cv2.waitKey(1) & 0xFF
+            if key in (ord("q"), 27):
+                break
+            if key == ord("r"):
+                R_ref = R_cum.copy()
+            if not got:
+                time.sleep(0.002)
+    cv2.destroyAllWindows()
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--session", type=Path,
                     default=Path("sessions/gold/corridor_60s"),
                     help="recorded session directory to replay")
+    ap.add_argument("--live", action="store_true",
+                    help="pull from a connected OAK-D instead of replaying")
+    ap.add_argument("--fast", action="store_true",
+                    help="(live) use the half-res SGM preset -- faster")
+    ap.add_argument("--width", type=int, default=640,
+                    help="(live) capture width [640]")
+    ap.add_argument("--height", type=int, default=400,
+                    help="(live) capture height [400]")
     ap.add_argument("--fps", type=float, default=20.0,
-                    help="replay speed (frames/second)")
+                    help="replay speed / live frame-rate cap (frames/second)")
     ap.add_argument("--scale", type=float, default=1.0,
                     help="upscale the whole panel for visibility")
     ap.add_argument("--no-bias", action="store_true",
                     help="do NOT subtract the startup gyro bias (show raw drift)")
     args = ap.parse_args()
+    if args.live:
+        return run_live(args.width, args.height, int(args.fps), args.scale,
+                        use_bias=not args.no_bias, fast=args.fast)
     return run(args.session, args.fps, args.scale, use_bias=not args.no_bias)
 
 
