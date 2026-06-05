@@ -38,7 +38,7 @@ from typing import Iterator
 
 import numpy as np
 
-from ..pngio import imread_gray
+from ..misc.pngio import imread_gray
 
 
 @dataclass

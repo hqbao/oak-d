@@ -2,7 +2,7 @@
 
 The viewer ([ours.ui.mainwindow.MainWindow]) consumes 6-DoF poses from anything
 implementing :class:`PoseSource`: it ``start(callback)``s the source, which runs
-a background thread and pushes :class:`~ours.lib.pose.Pose` samples (NED) to the
+a background thread and pushes :class:`~ours.lib.misc.pose.Pose` samples (NED) to the
 callback. This is the UI's input contract -- it deliberately knows nothing about
 how the poses are produced.
 
@@ -24,8 +24,8 @@ from collections.abc import Callable
 
 import numpy as np
 
-from ..lib.frames import rpy_to_quat
-from ..lib.pose import Pose
+from ..lib.misc.frames import rpy_to_quat
+from ..lib.misc.pose import Pose
 
 PoseCallback = Callable[[Pose], None]
 

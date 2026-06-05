@@ -2,7 +2,7 @@
 
 Each subpackage is one *flow*: a single thread that runs a short list of *tasks*
 sequentially and talks to the other flows only over the pub/sub
-:class:`~ours.lib.pubsub.Bus`. The flows wrap the pure algorithms in
+:class:`~ours.lib.flow.pubsub.Bus`. The flows wrap the pure algorithms in
 ``ours.lib``; they hold no maths of their own.
 
     capture   grabs stereo frames + IMU            -> frame.raw, imu.sample

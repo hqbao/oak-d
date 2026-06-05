@@ -13,13 +13,13 @@ from __future__ import annotations
 
 import numpy as np
 
-from ...lib import topics
+from ...lib.flow import topics
 from ...lib.backend.bundle import BAConfig
 from ...lib.backend.windowed import WindowedBAMap, WindowedConfig
 from ...lib.flow import Flow
-from ...lib.messages import Keyframe, PoseMsg
-from ...lib.pubsub import Bus
-from ...lib.task import Task
+from ...lib.flow.messages import Keyframe, PoseMsg
+from ...lib.flow.pubsub import Bus
+from ...lib.flow.task import Task
 
 
 class _RunBA(Task):

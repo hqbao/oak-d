@@ -3,7 +3,7 @@
 This is the architecture-aligned live source: it wires the flow graph
 (:func:`ours.app.build_live`) with a :class:`~ours.flows.ui.render.UiRenderFlow`
 whose callback converts each streamed ``pose.odom`` (camera-optical world) into a
-viewer :class:`~ours.lib.pose.Pose` in NED and pushes it through the
+viewer :class:`~ours.lib.misc.pose.Pose` in NED and pushes it through the
 :class:`~ours.ui.source.PoseSource` callback the viewer already understands.
 
 It replaces the monolithic ``OakOursVioSource`` as the default live source while
@@ -20,10 +20,10 @@ import time
 
 import numpy as np
 
-from ..lib.frames import rot_to_quat
-from ..lib.messages import PoseMsg
-from ..lib.pose import Pose
-from ..lib.pubsub import Bus
+from ..lib.misc.frames import rot_to_quat
+from ..lib.flow.messages import PoseMsg
+from ..lib.misc.pose import Pose
+from ..lib.flow.pubsub import Bus
 from .source import PoseSource
 
 # Camera optical (x right, y down, z forward) -> world NED, and the column

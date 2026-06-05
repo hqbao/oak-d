@@ -5,10 +5,10 @@ cameras (no VPU StereoDepth) plus the IMU and publishes the SAME topics, so the
 depth / odometry / backend / slam / ui flows are byte-for-byte identical live or
 offline:
 
-* one :class:`~ours.lib.messages.ImuInit` (startup gravity-align accel), then
-* per matched stereo pair, one :class:`~ours.lib.messages.ImuPrior` (the gyro
+* one :class:`~ours.lib.flow.messages.ImuInit` (startup gravity-align accel), then
+* per matched stereo pair, one :class:`~ours.lib.flow.messages.ImuPrior` (the gyro
   rotation prior integrated since the previous frame) followed by one
-  :class:`~ours.lib.messages.RawFrame` carrying the RAW left + RAW right frames
+  :class:`~ours.lib.flow.messages.RawFrame` carrying the RAW left + RAW right frames
   (the depth flow rectifies both).
 
 Only the *capture* concern lives here -- depth, odometry, BA and SLAM are other
@@ -31,7 +31,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from ...lib import topics
+from ...lib.flow import topics
 from ...lib.config.resolution import ResolutionProfile
 from ...lib.flow import SourceFlow
 from ...lib.imu.accel_calib import AccelCalibration
@@ -42,9 +42,9 @@ from ...lib.imu.calib_store import (
 )
 from ...lib.imu.imu import so3_exp
 from ...lib.io.reader import StereoCalib
-from ...lib.messages import ImuInit, ImuPrior, RawFrame
-from ...lib.pubsub import Bus
-from ...lib.task import Task
+from ...lib.flow.messages import ImuInit, ImuPrior, RawFrame
+from ...lib.flow.pubsub import Bus
+from ...lib.flow.task import Task
 
 # Accel leveling only runs when the camera is at rest, detected from the residual
 # of the raw accelerometer against its EMA (recent motion energy, m/s^2). Mirrors

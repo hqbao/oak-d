@@ -67,7 +67,7 @@ def _menu_actions(menubar, title):
 
 
 def test_mainwindow_menus(app):
-    from ..lib.pose import PoseHistory
+    from ..lib.misc.pose import PoseHistory
     src = FakePoseSource()
     win = MainWindow(PoseHistory(capacity=100), src, source_name="fake")
     mb = win.menuBar()

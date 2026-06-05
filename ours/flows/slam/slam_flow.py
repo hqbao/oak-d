@@ -8,12 +8,12 @@ Tasks (per ``keyframe``):
 """
 from __future__ import annotations
 
-from ...lib import topics
+from ...lib.flow import topics
 from ...lib.flow import Flow
 from ...lib.loop.slam import SlamConfig, SlamMap
-from ...lib.messages import Keyframe, LoopCorrection
-from ...lib.pubsub import Bus
-from ...lib.task import Task
+from ...lib.flow.messages import Keyframe, LoopCorrection
+from ...lib.flow.pubsub import Bus
+from ...lib.flow.task import Task
 
 
 class _SlamStep(Task):

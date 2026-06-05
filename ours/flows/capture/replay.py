@@ -4,10 +4,10 @@ This is the offline drop-in for the live OAK-D camera. It reads a session with
 :class:`~ours.lib.io.reader.SessionReader` and publishes exactly what the live
 capture flow publishes, so every downstream flow is identical live or offline:
 
-* one :class:`~ours.lib.messages.ImuInit` up front (the startup gravity-align
+* one :class:`~ours.lib.flow.messages.ImuInit` up front (the startup gravity-align
   accelerometer), then
-* per frame, one :class:`~ours.lib.messages.ImuPrior` (the gyro rotation prior
-  for ``[prev_ts, ts]``) followed by one :class:`~ours.lib.messages.RawFrame`.
+* per frame, one :class:`~ours.lib.flow.messages.ImuPrior` (the gyro rotation prior
+  for ``[prev_ts, ts]``) followed by one :class:`~ours.lib.flow.messages.RawFrame`.
 
 The IMU->prior fusion lives HERE (not in the odometry flow) so live and replay
 share one odometry flow. The prior is computed with the same
@@ -20,13 +20,13 @@ the base class emits ``END`` on ``frame.raw`` so the graph drains.
 """
 from __future__ import annotations
 
-from ...lib import topics
+from ...lib.flow import topics
 from ...lib.flow import SourceFlow
 from ...lib.imu.imu import GyroPreintegrator
 from ...lib.io.reader import SessionReader
-from ...lib.messages import ImuInit, ImuPrior, RawFrame
-from ...lib.pubsub import Bus
-from ...lib.task import Task
+from ...lib.flow.messages import ImuInit, ImuPrior, RawFrame
+from ...lib.flow.pubsub import Bus
+from ...lib.flow.task import Task
 
 
 class _PublishCapture(Task):

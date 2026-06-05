@@ -2,8 +2,8 @@
 
 IMU chain (topic ``imu.sample``), routed by message type:
 
-* :class:`~ours.lib.messages.ImuInit`  -- stash the startup gravity-align accel.
-* :class:`~ours.lib.messages.ImuPrior` -- stash this frame's gyro rotation prior
+* :class:`~ours.lib.flow.messages.ImuInit`  -- stash the startup gravity-align accel.
+* :class:`~ours.lib.flow.messages.ImuPrior` -- stash this frame's gyro rotation prior
   (keyed by ``seq``) so the matching depth frame can pick it up.
 
 Frame chain (per ``frame.depth``):
@@ -24,13 +24,13 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from ...lib import topics
+from ...lib.flow import topics
 from ...lib.flow import Flow
-from ...lib.messages import DepthFrame, ImuInit, ImuPrior, Keyframe, PoseMsg
+from ...lib.flow.messages import DepthFrame, ImuInit, ImuPrior, Keyframe, PoseMsg
 from ...lib.odometry.odometry import OdometryConfig, RGBDVisualOdometry
-from ...lib.pubsub import Bus
-from ...lib.runtime import NUMBA_PARALLEL_LOCK
-from ...lib.task import Task
+from ...lib.flow.pubsub import Bus
+from ...lib.flow.runtime import NUMBA_PARALLEL_LOCK
+from ...lib.flow.task import Task
 
 
 @dataclass

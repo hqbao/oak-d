@@ -54,8 +54,8 @@ import time
 
 import numpy as np
 
-from ours.lib.pose import Pose
-from ours.lib.frames import quat_to_rpy
+from ours.lib.misc.pose import Pose
+from ours.lib.misc.frames import quat_to_rpy
 from ours.lib import (
     InertialTranslationFilter, KLTFrontend,
     RGBDVisualOdometry, gravity_aligned_R0, level_attitude,

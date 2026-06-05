@@ -5,15 +5,15 @@ subscribed topic, each stash their message into the flow's public buffers:
 
 * ``odom``        -- ``{seq: position}`` from ``pose.odom``
 * ``refined``     -- ``{seq: position}`` from ``pose.refined``
-* ``corrections`` -- list of :class:`~ours.lib.messages.LoopCorrection`
+* ``corrections`` -- list of :class:`~ours.lib.flow.messages.LoopCorrection`
 """
 from __future__ import annotations
 
-from ...lib import topics
+from ...lib.flow import topics
 from ...lib.flow import Flow
-from ...lib.messages import LoopCorrection, PoseMsg
-from ...lib.pubsub import Bus
-from ...lib.task import Task
+from ...lib.flow.messages import LoopCorrection, PoseMsg
+from ...lib.flow.pubsub import Bus
+from ...lib.flow.task import Task
 
 
 class _CollectOdom(Task):

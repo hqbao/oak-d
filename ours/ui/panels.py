@@ -7,7 +7,7 @@ from PyQt6.QtWidgets import (
     QFrame, QGridLayout, QLabel, QVBoxLayout, QWidget,
 )
 
-from ..lib.pose import Pose, PoseHistory
+from ..lib.misc.pose import Pose, PoseHistory
 
 
 def _panel(title: str) -> tuple[QFrame, QVBoxLayout]:

@@ -9,11 +9,11 @@ from __future__ import annotations
 
 from typing import Callable
 
-from ...lib import topics
+from ...lib.flow import topics
 from ...lib.flow import Flow
-from ...lib.messages import PoseMsg
-from ...lib.pubsub import Bus
-from ...lib.task import Task
+from ...lib.flow.messages import PoseMsg
+from ...lib.flow.pubsub import Bus
+from ...lib.flow.task import Task
 
 
 class _Render(Task):

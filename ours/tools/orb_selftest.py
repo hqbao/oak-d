@@ -38,7 +38,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from ours.lib.pngio import imread_gray                              # noqa: E402
+from ours.lib.misc.pngio import imread_gray                              # noqa: E402
 from ours.lib.loop.orb import (                                      # noqa: E402
     ORB, OrbConfig, find_fundamental_ransac, hamming_knn,
     match_ratio_mutual,

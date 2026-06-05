@@ -3,17 +3,17 @@
 Tasks (run sequentially per ``frame.raw``):
 
 1. ``_ComputeDepth`` -- run the SGM matcher on (rectified left, raw right).
-2. ``_PublishDepth``  -- publish the :class:`~ours.lib.messages.DepthFrame`.
+2. ``_PublishDepth``  -- publish the :class:`~ours.lib.flow.messages.DepthFrame`.
 """
 from __future__ import annotations
 
-from ...lib import topics
+from ...lib.flow import topics
 from ...lib.flow import Flow
-from ...lib.messages import DepthFrame, RawFrame
-from ...lib.pubsub import Bus
-from ...lib.runtime import NUMBA_PARALLEL_LOCK
+from ...lib.flow.messages import DepthFrame, RawFrame
+from ...lib.flow.pubsub import Bus
+from ...lib.flow.runtime import NUMBA_PARALLEL_LOCK
 from ...lib.stereo.stereo import SGMStereoMatcher
-from ...lib.task import Task
+from ...lib.flow.task import Task
 
 
 class _ComputeDepth(Task):

@@ -15,14 +15,16 @@ Modules are grouped into subpackages for clarity:
     loop/      orb, loopclosure, posegraph, slam    (loop closure SLAM)
     io/        reader, synced                       (session readers)
     config/    resolution                           (resolution profiles)
+    misc/      frames, geometry, pose, pngio        (shared helpers)
+    flow/      flow, task, pubsub, messages, ...     (flow architecture)
 
 The flat re-exports below are the stable public API: ``from ours.lib import
 RGBDVisualOdometry, ORB, SessionReader, ...``. Live-pipeline orchestration
-(threads + pub/sub) lives in ``ours.lib.flow`` / ``ours.lib.pubsub`` and the
-``ours.flows`` package; offline tools call this library directly.
+(threads + pub/sub) lives in ``ours.lib.flow`` and the ``ours.flows`` package;
+offline tools call this library directly.
 """
 from .frontend.frontend import FrontendConfig, KLTFrontend, TrackState
-from .geometry import backproject, valid_mask
+from .misc.geometry import backproject, valid_mask
 from .imu.imu import GyroPreintegrator, gravity_aligned_R0, so3_exp
 from .imu.inertial_filter import InertialFilterConfig, InertialTranslationFilter
 from .loop.loopclosure import KeyframeAppearance, LoopConfig, LoopDetector
