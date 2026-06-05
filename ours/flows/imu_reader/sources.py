@@ -98,24 +98,22 @@ class ReplayImuSource(ImuSource):
 
 
 class LiveImuSource(ImuSource):
-    """Streams the OAK-D IMU (accelerometer + gyroscope) at ``rate_hz``.
+    """Streams the OAK-D IMU (accelerometer + gyroscope) from a shared device.
 
-    Opens a minimal depthai pipeline with only the IMU node and pushes every
-    decoded sample to the callback, tagging it with the gyro device timestamp
-    (the clock shared with the camera frames). depthai is imported lazily.
+    Reads the IMU output queue of a :class:`~ours.lib.oak_live.SharedLiveDevice`
+    -- the SAME device/pipeline the camera reader uses, because the OAK-D is
+    single-client -- and pushes every decoded sample to the callback, tagged with
+    the gyro device timestamp (the clock shared with the camera frames).
 
-    Hardware-facing: this path is validated on the bench, not in the offline test
-    harness. The OAK-D is single-client, so this must not run while a
-    :class:`~ours.flows.capture.live.LiveCaptureFlow` (which owns its own IMU) is
-    open on the same device.
+    Hardware-facing: validated on the bench, not in the offline test harness.
     """
 
-    def __init__(self, rate_hz: int = 200) -> None:
-        self.rate_hz = int(rate_hz)
+    def __init__(self, device) -> None:
+        self.device = device
         self.error: str | None = None
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
-        self._pipeline = None
+        self._acquired = False
 
     def start(self, on_sample: SampleCallback,
               on_exhausted: Callable[[], None] | None = None) -> None:
@@ -129,24 +127,20 @@ class LiveImuSource(ImuSource):
 
     def _run(self, on_sample: SampleCallback) -> None:
         try:
-            import depthai as dai
             from ...lib.imu.decode import decode_imu_packets
         except Exception as e:                                    # noqa: BLE001
             self.error = f"depthai not available: {e}"
             return
-        p = None
         try:
-            p = dai.Pipeline()
-            imu = p.create(dai.node.IMU)
-            imu.enableIMUSensor([dai.IMUSensor.ACCELEROMETER_RAW,
-                                 dai.IMUSensor.GYROSCOPE_RAW], self.rate_hz)
-            imu.setBatchReportThreshold(1)
-            imu.setMaxBatchReports(20)
-            q = imu.out.createOutputQueue(maxSize=100, blocking=False)
-            p.start()
-            self._pipeline = p
-            while not self._stop.is_set() and p.isRunning():
-                msg = q.tryGet()
+            self.device.acquire()
+            self._acquired = True
+        except Exception as e:                                    # noqa: BLE001
+            self.error = f"device open failed: {e}"
+            return
+        try:
+            q = self.device.q_imu
+            while not self._stop.is_set() and self.device.is_running():
+                msg = q.tryGet() if q is not None else None
                 if msg is None:
                     time.sleep(0.002)
                     continue
@@ -156,11 +150,9 @@ class LiveImuSource(ImuSource):
         except Exception as e:                                    # noqa: BLE001
             self.error = f"IMU stream failed: {e}"
         finally:
-            if p is not None:
-                try:
-                    p.stop()
-                except Exception:
-                    pass
+            if self._acquired:
+                self.device.release()
+                self._acquired = False
 
     def stop(self, timeout: float = 2.0) -> None:
         self._stop.set()

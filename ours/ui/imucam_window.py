@@ -45,12 +45,18 @@ SourceFactory = Callable[[], tuple[CamSource, ImuSource]]
 
 def live_source_factory(width: int = 640, height: int = 400,
                         fps: int = 20) -> SourceFactory:
-    """Default factory: the OAK-D cameras + IMU (depthai pulled lazily here)."""
+    """Default factory: the OAK-D cameras + IMU off ONE shared device.
+
+    The OAK-D is single-client, so the camera and IMU sources must read one
+    shared pipeline; opening two would fail the second with
+    ``X_LINK_DEVICE_NOT_FOUND``. depthai is pulled lazily by the shared device.
+    """
     def _make() -> tuple[CamSource, ImuSource]:
         from ..flows.cam_reader.sources import LiveCamSource
         from ..flows.imu_reader.sources import LiveImuSource
-        return (LiveCamSource(width=width, height=height, fps=fps),
-                LiveImuSource(rate_hz=200))
+        from ..lib.oak_live import SharedLiveDevice
+        device = SharedLiveDevice(width=width, height=height, fps=fps)
+        return LiveCamSource(device), LiveImuSource(device)
     return _make
 
 

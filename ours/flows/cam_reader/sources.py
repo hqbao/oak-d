@@ -55,41 +55,23 @@ class ReplayCamSource(CamSource):
 
 
 class LiveCamSource(CamSource):
-    """Grabs synced stereo pairs from the OAK-D (raw left + raw right).
+    """Grabs synced stereo pairs from a shared OAK-D (raw left + raw right).
 
-    Opens both mono cameras (no VPU StereoDepth) and pairs left/right by sequence
-    number -- the cameras are hardware-synced, so a shared ``seq`` is a true
-    same-instant pair. The frame device timestamp (left) is the clock the IMU
-    flow drains against. depthai is imported lazily; hardware-only.
+    Reads the mono pair off a :class:`~ours.lib.oak_live.SharedLiveDevice` (the
+    OAK-D is single-client, so the camera and IMU readers must share ONE
+    device/pipeline). It pairs left/right by sequence number -- the cameras are
+    hardware-synced, so a shared ``seq`` is a true same-instant pair -- and tags
+    the pair with the left frame's device timestamp, the clock the IMU flow
+    drains against. depthai is pulled lazily by the shared device; hardware-only.
     """
 
-    def __init__(self, *, width: int = 640, height: int = 400,
-                 fps: int = 20) -> None:
-        self.width = int(width)
-        self.height = int(height)
-        self.fps = int(fps)
-        self._dai = None
-        self._pipeline = None
-        self._q_left = None
-        self._q_right = None
+    def __init__(self, device) -> None:
+        self.device = device
         self._pend_l: dict[int, object] = {}
         self._pend_r: dict[int, object] = {}
 
     def open(self) -> None:
-        import depthai as dai
-
-        self._dai = dai
-        p = dai.Pipeline()
-        left = p.create(dai.node.Camera).build(
-            dai.CameraBoardSocket.CAM_B, sensorFps=self.fps)
-        right = p.create(dai.node.Camera).build(
-            dai.CameraBoardSocket.CAM_C, sensorFps=self.fps)
-        left_out = left.requestOutput((self.width, self.height))
-        right_out = right.requestOutput((self.width, self.height))
-        self._q_left = left_out.createOutputQueue(maxSize=4, blocking=False)
-        self._q_right = right_out.createOutputQueue(maxSize=4, blocking=False)
-        p.start()
-        self._pipeline = p
+        self.device.acquire()
 
     @staticmethod
     def _seq(msg) -> int:
@@ -107,11 +89,11 @@ class LiveCamSource(CamSource):
         return g
 
     def read(self):
-        if self._pipeline is None:
-            self.open()
-        p = self._pipeline
-        ql, qr = self._q_left, self._q_right
-        while p.isRunning():
+        dev = self.device
+        ql, qr = dev.q_left, dev.q_right
+        if ql is None or qr is None:
+            return None
+        while dev.is_running():
             ld = ql.tryGet()
             while True:
                 nxt = ql.tryGet()
@@ -148,9 +130,4 @@ class LiveCamSource(CamSource):
         return None
 
     def close(self) -> None:
-        if self._pipeline is not None:
-            try:
-                self._pipeline.stop()
-            except Exception:
-                pass
-            self._pipeline = None
+        self.device.release()

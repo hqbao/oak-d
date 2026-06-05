@@ -266,6 +266,7 @@ Self-tests (run before/after touching the from-scratch VIO):
 .venv/bin/python ours/tools/imu_preint_selftest.py # IMU preintegration vs closed form
 .venv/bin/python ours/tools/vio_ba_selftest.py     # tight-coupled VIO joint solve
 .venv/bin/python -m ours.tools.imucam_sync_selftest  # split cam/IMU sync contract (1 pkt/frame, samples in (prev,ts])
+.venv/bin/python -m ours.tools.oak_live_selftest     # single-client shared OAK-D (cam+IMU open the device once)
 QT_QPA_PLATFORM=offscreen .venv/bin/python -m ours.tools.imucam_window_selftest  # in-app synced view renders (offscreen Qt)
 ```
 
