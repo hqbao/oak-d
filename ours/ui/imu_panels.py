@@ -153,7 +153,14 @@ _PRESET_TIP = {
     "LEFT": "camera on the +Y side (looking across)",
     "TOP": "camera straight down the +Z body axis",
 }
-_VIEW_DIST = 3.2
+_VIEW_DIST = 4.6                          # ~0.7x the old 3.2 -> whole vector fits
+
+# Display-only mirror of the body Y axis: the GL camera looks at the scene from
+# behind, which flips on-screen left/right relative to how the operator holds
+# the device. Negating Y for the DRAWN geometry (arrow + Y triad/label) makes a
+# negative-Y specific force lean left, matching the physical tilt. The sensor
+# numbers in the |a| readout are the true, unflipped values.
+_DISP_FLIP = np.array([1.0, -1.0, 1.0], dtype=np.float64)
 
 
 def _ring(radius: float, plane: str, n: int = 72):
@@ -259,12 +266,14 @@ class Accel3DView(QtWidgets.QWidget):
         # tip labels so axes stay identifiable after the user rotates the view.
         for vec, hexc, name in zip(((1, 0, 0), (0, 1, 0), (0, 0, 1)),
                                    _AXIS_HEX, ("X", "Y", "Z")):
-            pts = np.array([(0, 0, 0), vec], dtype=np.float32)
+            dvec = (np.asarray(vec, dtype=np.float64) * _DISP_FLIP).astype(
+                np.float32)
+            pts = np.array([(0, 0, 0), dvec], dtype=np.float32)
             self._gl.addItem(gl.GLLinePlotItem(
                 pos=pts, color=_rgba(hexc), width=2.0, antialias=True))
             try:
                 self._gl.addItem(gl.GLTextItem(
-                    pos=np.array(vec, dtype=np.float32) * 1.12,
+                    pos=dvec * 1.12,
                     text=name, color=QColor(hexc)))
             except Exception:
                 pass                       # GLTextItem missing on old pyqtgraph
@@ -315,7 +324,9 @@ class Accel3DView(QtWidgets.QWidget):
         length = float(np.linalg.norm(v))
         if length > 1e-4:
             # Rebuild the arrow at the true length, then rotate +Z -> direction.
-            d = v / length
+            # Mirror Y for display (see _DISP_FLIP) so on-screen left/right
+            # matches the operator's physical left/right.
+            d = (v / length) * _DISP_FLIP
             axis = np.cross((0.0, 0.0, 1.0), d)
             s = float(np.linalg.norm(axis))
             c = float(np.clip(d[2], -1.0, 1.0))
