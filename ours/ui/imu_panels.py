@@ -30,7 +30,7 @@ _G = 9.80665
 # Per-axis colours reused from the 3D scene so x/y/z read the same everywhere:
 #   x -> red, y -> green, z -> cyan.
 _AXIS_HEX = (theme.AXIS_N, theme.AXIS_E, theme.AXIS_U)
-_GYRO_FLOOR_DPS = 10.0      # never let the auto-scale collapse below ±this
+_GYRO_FLOOR_DPS = 1.0       # never let the auto-scale collapse below ±this
 _GYRO_SHRINK = 0.06         # expand-fast / shrink-slow hysteresis factor
 
 
