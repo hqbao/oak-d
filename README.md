@@ -7,32 +7,27 @@ to a Raspberry Pi 5 later.
 ```
 oak-d/
   ours/                  OUR from-scratch pipeline (library-free; self-contained)
-    pose.py              own Pose dataclass + ring buffer (copy, kept independent)
-    frames.py            own camera/body/world transforms (copy)
-    pngio.py             own pure-Python PNG codec (copy)
+    app.py               wire + run the 6 flows over a pub/sub bus (live + replay)
+    depthai_ours_vio.py  live OAK-D source driving ours.lib (ours/-ba/-slam/-vio)
+    lib/                 the algorithm library + runtime building blocks
+      pose.py            own Pose dataclass + ring buffer (copy, kept independent)
+      frames.py          own camera/body/world transforms (copy)
+      pngio.py           own pure-Python PNG codec (copy)
+      geometry.py        SO(3)/SE(3) Lie-algebra helpers
+      pubsub.py flow.py task.py  thread-per-flow actor model + topics/messages
+      frontend/          KLT + Shi-Tomasi feature frontend (cv2-free; Numba KLT)
+      stereo/            own SGM dense depth + rectification
+      imu/               Forster IMU preintegration + translation filter
+      odometry/          frame-to-frame RGB-D PnP (+ gyro fusion) + own RANSAC PnP
+      backend/           sliding-window bundle adjustment (analytic Schur)
+      loop/              own ORB + F-matrix loop closure + SE(3) pose graph + SLAM
+      io/                recorded-session reader + time-synced bundles
+      config/            resolution-aware tuning profiles
+    flows/               live-pipeline orchestration (one thread + tasks per flow)
+      capture/ depth/ odometry/ backend/ slam/ ui/
     sources/             own PoseSource base + fake source (copy)
     ui/                  own Qt 3D viewer (theme/viewer3d/panels/mainwindow, copy)
-    depthai_ours_vio.py  live OAK-D source driving ours.vio (ours/-ba/-slam/-vio)
-    vio/                 the algorithm library
-      frontend.py        own KLT + Shi-Tomasi feature frontend (cv2-free)
-      klt.py             pyramidal Lucas-Kanade optical flow (pure NumPy)
-      klt_numba.py       Numba JIT of the KLT inner loop (optional dep)
-      corners.py         Shi-Tomasi corner detector
-      pnp.py             own RANSAC DLT + LM PnP (replaces cv2.solvePnPRansac)
-      odometry.py        frame-to-frame RGB-D PnP + gyro fusion
-      imu.py             Forster on-manifold IMU preintegration
-      inertial_filter.py translation smoother (vision + optional accel)
-      bundle.py          sliding-window bundle adjustment (analytic Schur)
-      windowed.py        windowed BA driver (ours-ba)
-      vio_window.py      tight-coupled joint VIO solve (experimental --backend vio)
-      loopclosure.py     loop detector: own ORB + F-matrix + PnP verify (ours-slam)
-      orb.py             own oriented-FAST + steered-BRIEF + Hamming + F-RANSAC
-      posegraph.py       SE(3) pose graph
-      slam.py            full SLAM driver (ours-slam)
-      geometry.py        SO(3)/SE(3) Lie-algebra helpers
-      reader.py          recorded-session reader for offline scoring
-      synced.py          transparent time-synced (image, depth, IMU) bundles
-    tools/
+    tools/               offline scoring + self-tests (call ours.lib directly)
       view_pose3d.py     live 3D viewer (run.sh entry; ours backends)
       vio_run.py         offline scoring of ours f2f/ba/slam/vio vs Basalt
       live_replay.py     replay a recorded session through the live ours pipeline
@@ -237,17 +232,17 @@ in the numbers instead of as lag on the device.
       vision correction gated on inliers AND vision/gyro disagreement; gyro
       propagates rotation when vision fails, so fast yaw no longer freezes the
       pose. No-op on well-tracked frames (gold ATE unchanged)
-- [~] Tight-coupled VIO core (`ours/vio/vio_window.py`): Forster on-manifold
+- [~] Tight-coupled VIO core (`ours/lib/backend/vio_window.py`): Forster on-manifold
       IMU preintegration + joint visual-inertial window solve (pose + velocity
       + gyro/accel bias + landmarks), self-test validated, wired offline as the
       opt-in `--backend vio`. Experimental: still regresses vs `ba` on healthy
       gold (rough dense FD solver + long-horizon accel/gravity drift); needs
       online gravity estimation before it replaces the loosely-coupled path
-- [x] Own pure-NumPy optical flow (pyramidal Lucas-Kanade, `ours/vio/klt.py`)
-      and corner detection (Shi-Tomasi, `ours/vio/corners.py`) replacing cv2;
-      KLT inner loop JIT-accelerated with Numba (`ours/vio/klt_numba.py`,
+- [x] Own pure-NumPy optical flow (pyramidal Lucas-Kanade, `ours/lib/frontend/klt.py`)
+      and corner detection (Shi-Tomasi, `ours/lib/frontend/corners.py`) replacing cv2;
+      KLT inner loop JIT-accelerated with Numba (`ours/lib/frontend/klt_numba.py`,
       optional) so the library-free frontend runs live (~15 ms/frame)
-- [x] Own library-free PnP (`ours/vio/pnp.py`: RANSAC DLT + robust-LM seed
+- [x] Own library-free PnP (`ours/lib/odometry/pnp.py`: RANSAC DLT + robust-LM seed
       rescue + plain-LS Levenberg-Marquardt refine) replacing
       `cv2.solvePnPRansac` as the default. Measured vs cv2 on gold f2f: better
       on the genuine forward-motion sessions (corridor 0.79->0.77,
@@ -256,12 +251,12 @@ in the numbers instead of as lag on the device.
       and the offline f2f/ba scoring are now fully cv2-free; cv2 is lazily
       imported only for ORB loop closure (`ours-slam`) and the dev-only PnP A/B
       oracle (`OAKD_OWN_PNP=0`)
-- [x] Pure-Python PNG codec (`ours/pngio.py`, 8-bit grayscale, all 5 PNG
+- [x] Pure-Python PNG codec (`ours/lib/pngio.py`, 8-bit grayscale, all 5 PNG
       filters) for frame IO, replacing `cv2.imread`/`imwrite` (decode verified
       byte-for-byte vs cv2)
 - [x] Logging + offline replay (`baseline/tools/record_session.py` + `baseline/tools/viz_session.py`)
 - [x] Transparent time-synced (image, depth, IMU) input building block
-      (`ours/vio/synced.py`) + inspector `ours/tools/synced_view.py` (replay + `--live`:
+      (`ours/lib/io/synced.py`) + inspector `ours/tools/synced_view.py` (replay + `--live`:
       image | depth | gyro angular-velocity chart + 3D accel vector)
 - [x] Persistent SLAM database (auto save `rtabmap.db` + extract KF/loop via `baseline/tools/extract_kf_from_db.py`)
 - [x] Gold regression suite (12 sessions, see `docs/GOLD_SESSIONS.md`)
