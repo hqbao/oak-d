@@ -106,8 +106,8 @@ class KeypointWorker(threading.Thread):
                     break
                 # KLT uses numba parallel=True, which is not threadsafe across
                 # Python threads -- serialize it like the odometry flow's
-                # ProcessVO does so concurrent frontends (e.g. two windows, or a
-                # window + the VIO source) can't abort the numba runtime.
+                # TrackFeatures does so concurrent frontends (e.g. two windows, or
+                # a window + the VIO source) can't abort the numba runtime.
                 with NUMBA_PARALLEL_LOCK:
                     state = frontend.process(gray)
                 ids = np.asarray(state.ids, dtype=np.int64).reshape(-1)

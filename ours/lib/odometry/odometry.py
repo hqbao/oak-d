@@ -357,10 +357,27 @@ class RGBDVisualOdometry:
         cx, cy = self.K[0, 2], self.K[1, 2]
         return np.array([(u - cx) * z / fx, (v - cy) * z / fy, z])
 
+    def track(self, gray: np.ndarray) -> dict[int, np.ndarray]:
+        """Run the KLT frontend on one frame; return the live ``{id: pixel}``.
+
+        Split out of :meth:`process` so the flow pipeline can run feature
+        TRACKING as its own task (``TrackFeatures``). This is the ONLY ``numba
+        parallel=True`` section on the odometry thread, so only it needs the
+        process-wide parallel lock; the downstream :meth:`estimate` is pure NumPy
+        and runs lock-free (overlapping the depth matcher on its own thread).
+        """
+        state = self.frontend.process(gray)
+        return {int(i): p for i, p in zip(state.ids, state.points)}
+
     def process(self, gray: np.ndarray, depth_m: np.ndarray,
                 R_prior: np.ndarray | None = None,
                 dt_s: float | None = None) -> np.ndarray:
         """Advance odometry by one frame; returns the current 4x4 world pose.
+
+        Thin wrapper: :meth:`track` then :meth:`estimate`. Kept so every existing
+        caller (the legacy source, the offline tools, the regression tests) stays
+        byte-for-byte unchanged; the live flow runs the two halves as separate
+        tasks instead.
 
         ``R_prior`` (optional) is the predicted previous->current camera rotation
         (e.g. from gyro preintegration). When given it seeds the PnP solver, which
@@ -371,9 +388,20 @@ class RGBDVisualOdometry:
         per-frame translation to a physically plausible hand speed (clamps the
         non-physical phantom jumps that make the path wobble under shake/yaw).
         """
-        state = self.frontend.process(gray)
-        cur_obs = {int(i): p for i, p in zip(state.ids, state.points)}
+        return self.estimate(self.track(gray), depth_m, R_prior, dt_s)
 
+    def estimate(self, cur_obs: dict[int, np.ndarray], depth_m: np.ndarray,
+                 R_prior: np.ndarray | None = None,
+                 dt_s: float | None = None) -> np.ndarray:
+        """Estimate motion from already-tracked features; returns the world pose.
+
+        ``cur_obs`` is the live ``{track_id: current_pixel}`` produced by
+        :meth:`track`. This is the pure-NumPy half (build correspondences ->
+        RGB-D PnP -> optional gyro fusion / translation handling -> compose pose);
+        it never enters a numba parallel region, so the flow ``EstimateMotion``
+        task runs it WITHOUT the parallel lock. See :meth:`process` for the
+        ``R_prior`` / ``dt_s`` semantics.
+        """
         info = {"n_tracks": len(cur_obs), "n_pnp": 0, "n_inliers": 0,
                 "ok": False, "reason": ""}
 

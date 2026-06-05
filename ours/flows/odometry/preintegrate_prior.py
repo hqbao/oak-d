@@ -1,9 +1,9 @@
 """``preintegrate_prior`` task: build this frame's IMU prior from the packet.
 
 Replaces the old ``route_imu`` task. In the unified front-end the odometry flow
-consumes the SAME synced :class:`~ours.lib.flow.messages.ImuCamPacket` the depth
-flow does (one acquisition stream, no separate capture monolith). The IMU->prior
-fusion that used to live in the capture flow now lives HERE, per packet:
+consumes the SAME synced :class:`~ours.lib.flow.messages.ImuCamPacket` the imu_cam
+flow's depth task does (one acquisition stream, no separate capture monolith). The
+IMU->prior fusion that used to live in the capture flow now lives HERE, per packet:
 
 * ``R_prior`` -- the inter-frame camera-frame rotation integrated from the
   packet's gyro (already bias-corrected by the imu_cam flow's ApplyCalibration),
@@ -13,7 +13,7 @@ fusion that used to live in the capture flow now lives HERE, per packet:
   stillness flag, so a keyframe can carry a gravity prior into the back-end.
 
 The result is stashed in ``priors[seq]`` so the matching depth frame
-(``ProcessVO``) picks it up by ``seq``.
+(``EstimateMotion``) picks it up by ``seq``.
 """
 from __future__ import annotations
 

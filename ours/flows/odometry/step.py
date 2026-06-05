@@ -1,7 +1,7 @@
 """Internal carrier threading one frame's result through the odometry chain.
 
-Not a task -- a small flow-internal message handed from :class:`ProcessVO` to the
-downstream :class:`PublishPose` / :class:`EmitKeyframe` tasks.
+Not a task -- a small flow-internal message handed from :class:`EstimateMotion` to
+the downstream :class:`PublishPose` / :class:`EmitKeyframe` tasks.
 """
 from __future__ import annotations
 

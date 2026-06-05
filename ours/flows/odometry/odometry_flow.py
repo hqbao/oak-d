@@ -5,7 +5,8 @@ edges of the unified acquisition front-end:
 
 * ``imucam.sample`` ->
   [:class:`~ours.flows.odometry.preintegrate_prior.PreintegratePrior`]
-* ``frame.depth`` -> [:class:`~ours.flows.odometry.process_vo.ProcessVO`,
+* ``frame.depth`` -> [:class:`~ours.flows.odometry.track_features.TrackFeatures`,
+  :class:`~ours.flows.odometry.estimate_motion.EstimateMotion`,
   :class:`~ours.flows.odometry.publish_pose.PublishPose`,
   :class:`~ours.flows.odometry.emit_keyframe.EmitKeyframe`,
   :class:`~ours.flows.odometry.signal_done.SignalDone`]
@@ -17,9 +18,14 @@ so the chain continues).
 
 Both inputs come from the SAME flow: the imu_cam flow publishes ``imucam.sample``
 and, with its depth task, ``frame.depth``. This flow owns the IMU->prior fusion
-itself (``PreintegratePrior``). The
-:class:`~ours.flows.odometry.step.Step` carrier threads one frame's result between
-the frame-chain tasks.
+itself (``PreintegratePrior``). The frame-chain splits the visual odometry into
+two tasks -- ``TrackFeatures`` (KLT, the only numba-parallel section, holds the
+parallel lock) then ``EstimateMotion`` (pure-NumPy PnP + fusion, lock-free) -- so
+the heavy motion solve overlaps the next frame's depth matcher instead of
+serialising against it. The :class:`~ours.flows.odometry.tracked.Tracked` carrier
+threads the tracks between them; the
+:class:`~ours.flows.odometry.step.Step` carrier threads the result through the
+rest of the chain.
 
 Joining two END-bearing inputs (``imucam.sample`` + ``frame.depth``, both from the
 imu_cam flow) means the flow must see BOTH ENDs before draining:
@@ -27,7 +33,7 @@ imu_cam flow) means the flow must see BOTH ENDs before draining:
 
 ``R_imu_cam`` (IMU->camera rotation) drives the gyro prior; ``accel_align`` is the
 one-shot startup gravity reference (camera frame) the front-end measured, seeded
-here so ``ProcessVO`` levels the initial attitude. Both may be ``None`` (pure
+here so ``EstimateMotion`` levels the initial attitude. Both may be ``None`` (pure
 vision / no usable IMU).
 """
 from __future__ import annotations
@@ -37,7 +43,8 @@ import numpy as np
 from ...lib.flow import Flow, Bus, topics
 from ...lib.odometry.odometry import OdometryConfig, RGBDVisualOdometry
 from .preintegrate_prior import PreintegratePrior
-from .process_vo import ProcessVO
+from .track_features import TrackFeatures
+from .estimate_motion import EstimateMotion
 from .publish_pose import PublishPose
 from .emit_keyframe import EmitKeyframe
 from .signal_done import SignalDone
@@ -61,5 +68,6 @@ class OdometryFlow(Flow):
         self.expected_ends = 2          # imucam.sample + frame.depth both end
         self.on(topics.IMUCAM_SAMPLE, [PreintegratePrior()])
         self.on(topics.FRAME_DEPTH,
-                [ProcessVO(), PublishPose(), EmitKeyframe(), SignalDone()])
+                [TrackFeatures(), EstimateMotion(), PublishPose(),
+                 EmitKeyframe(), SignalDone()])
         self.forwards_to(topics.POSE_ODOM, topics.KEYFRAME)

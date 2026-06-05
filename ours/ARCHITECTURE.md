@@ -131,7 +131,7 @@ flowchart TD
     end
     subgraph ODO["odometry flow"]
         PIP["PreintegratePrior"]
-        PV["ProcessVO"] --> PP["PublishPose"] --> EK["EmitKeyframe"]
+        TF["TrackFeatures"] --> PV["EstimateMotion"] --> PP["PublishPose"] --> EK["EmitKeyframe"]
     end
     subgraph BCK["backend flow"]
         RB["RunBA"] --> PR["PublishRefined"]
@@ -150,7 +150,7 @@ flowchart TD
 
     PCS -- "cam.sync" --> PIC
     PICAM -- "imucam.sample" --> PIP
-    PD -- "frame.depth" --> PV
+    PD -- "frame.depth" --> TF
     PP -- "pose.odom" --> COd
     PP -- "pose.odom" --> RP
     EK -- "keyframe" --> RB
@@ -163,15 +163,15 @@ flowchart TD
 
 The dotted edge is the one **intra-flow** hand-off: `PreintegratePrior` stashes
 the gyro prior for sequence `seq` in the odometry flow's own `ctx.state`, and
-`ProcessVO` pops it when the matching depth frame arrives. This is shared state
-inside a single thread/flow — it does **not** cross the Bus and does **not**
+`EstimateMotion` pops it when the matching depth frame arrives. This is shared
+state inside a single thread/flow — it does **not** cross the Bus and does **not**
 violate the §2 rule (which only forbids *cross-flow* calls).
 
 | Flow | Tasks (in order) | Subscribes | Publishes |
 |---|---|---|---|
 | **cam** | `produce` → `PublishCamSync` | — (source) | `cam.sync` |
 | **imu_cam** | `AdmitFrame` → `PackImuCam` → `PublishImuRaw` → `ApplyCalibration` → `PublishImuCam` → `ComputeDepth` → `PublishDepth` ; `CompleteAdmission` | `cam.sync`, `frame.done` | `imu.raw`, `imucam.sample`, `frame.depth` |
-| **odometry** | `PreintegratePrior` ⟂ `ProcessVO` → `PublishPose` → `EmitKeyframe` → `SignalDone` | `imucam.sample`, `frame.depth` | `pose.odom`, `keyframe`, `frame.done` |
+| **odometry** | `PreintegratePrior` ⟂ `TrackFeatures` → `EstimateMotion` → `PublishPose` → `EmitKeyframe` → `SignalDone` | `imucam.sample`, `frame.depth` | `pose.odom`, `keyframe`, `frame.done` |
 | **backend** | `RunBA` → `PublishRefined` | `keyframe` | `pose.refined` |
 | **slam** | `SlamStep` → `PublishCorrection` | `keyframe` | `loop.correction` |
 | **ui-collector** | `CollectOdom` / `CollectRefined` / `CollectCorrection` | `pose.odom`, `pose.refined`, `loop.correction` | — (sink) |
@@ -204,7 +204,9 @@ never count) so it stays byte-for-byte deterministic (60-for-60).
   `admission.py` (realtime credit gate) + `admit_frame.py` / `complete_admission.py`,
   `compute_depth.py`, `publish_depth.py` (depth as a task in this flow),
   `imu_stream.py` (IMU-only reader for the calib wizards), `imu_cam_flow.py`.
-- `odometry/`: `preintegrate_prior.py`, `process_vo.py`, `publish_pose.py`,
+- `odometry/`: `preintegrate_prior.py`, `track_features.py` (KLT, holds the numba
+  parallel lock), `estimate_motion.py` (pure-NumPy PnP + gyro fusion, lock-free),
+  `tracked.py` (TrackFeatures→EstimateMotion carrier), `publish_pose.py`,
   `emit_keyframe.py`, `signal_done.py` (backpressure credit), `step.py` (carrier),
   `odometry_flow.py`.
 - `backend/`: `run_ba.py`, `publish_refined.py`, `backend_flow.py`.
