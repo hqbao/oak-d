@@ -130,10 +130,24 @@ class ImuCamWindow(QWidget):
         self._timer.timeout.connect(self._on_tick)
 
     # ------------------------------------------------------------------ #
+    def ensure_started(self) -> None:
+        """(Re)start streaming. Retries cleanly after a previous failure.
+
+        Called every time the view is opened from the menu: if it is already
+        streaming it is a no-op (just raise the window); if it failed before
+        (e.g. the OAK-D was unplugged) it tears the dead graph down and starts
+        fresh, so plugging the device in and reopening retries.
+        """
+        if self._running and not self._failed:
+            return
+        self._teardown()
+        self.start()
+
     def start(self) -> None:
         """Build the flow graph and begin streaming into the widget."""
         if self._running:
             return
+        self._clear_queue()                  # drop any stale END sentinel
         cam_src, imu_src = self._make_sources()
         self._bus = Bus()
         self._sink = _QueueSink(self._bus, self._queue)
@@ -155,6 +169,9 @@ class ImuCamWindow(QWidget):
         self._timer.start()
 
     def stop(self) -> None:
+        self._teardown()
+
+    def _teardown(self) -> None:
         self._timer.stop()
         for f in (self._cam, self._imu, self._sink):
             if f is not None:
@@ -164,6 +181,13 @@ class ImuCamWindow(QWidget):
                     pass
         self._cam = self._imu = self._sink = self._bus = None
         self._running = False
+
+    def _clear_queue(self) -> None:
+        while True:
+            try:
+                self._queue.get_nowait()
+            except queue.Empty:
+                break
 
     # ------------------------------------------------------------------ #
     def _on_tick(self) -> None:
@@ -199,9 +223,9 @@ class ImuCamWindow(QWidget):
         if self._failed:
             return
         self._failed = True
-        self._timer.stop()
         self._view.setText(f"⚠  {message}")
-        self._status.setText("not streaming")
+        self._status.setText("not streaming — reopen from the Visualize menu to retry")
+        self._teardown()          # release the dead graph so a reopen retries
 
     def _failure_reason(self) -> str | None:
         """The first concrete error reported by the camera or IMU source."""
@@ -241,8 +265,7 @@ class ImuCamWindow(QWidget):
     # ------------------------------------------------------------------ #
     def showEvent(self, event) -> None:                              # noqa: N802
         super().showEvent(event)
-        if not self._running:
-            self.start()
+        self.ensure_started()
 
     def closeEvent(self, event) -> None:                             # noqa: N802
         try:

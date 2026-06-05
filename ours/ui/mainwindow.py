@@ -202,6 +202,7 @@ class MainWindow(QMainWindow):
         win.show()
         win.raise_()
         win.activateWindow()
+        win.ensure_started()          # retry on every open (e.g. after replug)
         self.statusBar().showMessage("Synced camera + IMU view opened.", 2500)
 
     def _launch_triplet(self) -> None:

@@ -114,6 +114,44 @@ def test_device_not_found(app, reader: SessionReader) -> None:
     _check("X_LINK_DEVICE_NOT_FOUND" in win._view.text(),
            f"widget shows the device error (got: {win._view.text()!r})")
     _check(not win._timer.isActive(), "render timer stopped after failure")
+    _check(not win._running, "failed window released the graph (running=False)")
+
+    win.close()
+    _check(not win._running, "window stopped the flows on close")
+
+
+def test_retry_after_replug(app, reader: SessionReader) -> None:
+    print(" retry after replug (fail -> device appears -> reopen streams)")
+    # A factory that fails the first time (device absent) and works after.
+    state = {"opened": 0}
+
+    def _make():
+        state["opened"] += 1
+        if state["opened"] == 1:
+            return (_DeadCamSource(reader, max_frames=_MAX_FRAMES),
+                    ReplayImuSource(reader, realtime=False))
+        return (ReplayCamSource(reader, max_frames=_MAX_FRAMES),
+                ReplayImuSource(reader, realtime=False))
+
+    win = ImuCamWindow(_make, fps=120)
+    win._startup_timeout_s = 3.0
+    win.show()                                       # 1st open -> fails
+    _run_until(app, lambda: win._failed, 8.0)
+    _check(win._failed, "first open failed (device absent)")
+
+    win.ensure_started()                             # reopen -> retries
+    _check(win._running and not win._failed, "reopen restarted the stream")
+
+    seqs: list[int] = []
+
+    def _got() -> bool:
+        txt = win._status.text()
+        if txt.startswith("seq="):
+            seqs.append(int(txt.split("seq=")[1].split()[0]))
+        return len(seqs) >= 3 or win._ended
+
+    _run_until(app, _got, 12.0)
+    _check(len(seqs) >= 1, f"streamed after replug (saw seq {seqs[:3]})")
 
     win.close()
     _check(not win._running, "window stopped the flows on close")
@@ -126,6 +164,7 @@ def main() -> int:
 
     test_happy_path(app, reader)
     test_device_not_found(app, reader)
+    test_retry_after_replug(app, reader)
 
     print("ALL PASS")
     return 0
