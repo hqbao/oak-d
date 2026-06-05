@@ -55,4 +55,13 @@ class PreintegratePrior(Task):
             at_rest = bool(gyro_still and accel_still)
 
         ctx.state["priors"][msg.seq] = ImuPrior(msg.seq, R_prior, accel_cam, at_rest)
+        # Safety cap: in the normal full-fidelity path each prior is popped by the
+        # matching depth frame, so the dict stays ~1 entry and this never fires.
+        # Under a latest-only visualiser graph, frames whose depth was coalesced
+        # away leave their prior un-popped; drop the oldest so the dict can't grow
+        # without bound over a long live session.
+        priors = ctx.state["priors"]
+        if len(priors) > 256:
+            for seq in sorted(priors)[:-256]:
+                priors.pop(seq, None)
         return None

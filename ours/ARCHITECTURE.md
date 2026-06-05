@@ -65,7 +65,7 @@ just like they import `lib.stereo` or `lib.odometry`.
 
 | Module | Role |
 |---|---|
-| `flow.py` | `Flow` / `SourceFlow` / `FlowContext` — one thread running a fixed task chain |
+| `flow.py` | `Flow` / `SourceFlow` / `FlowContext` — one thread running a fixed task chain (FIFO or latest-only inbox) |
 | `task.py` | `Task` — the smallest input→output step in a chain |
 | `pubsub.py` | `Bus` — thread-safe publish/subscribe between flows |
 | `messages.py` | one immutable message type per topic (the flow contract) |
@@ -75,13 +75,35 @@ just like they import `lib.stereo` or `lib.odometry`.
 Layering: depends only on the standard library + numpy. It does **not** import
 the concrete flows or the algorithm libraries.
 
+### Inbox modes: FIFO vs latest-only
+A reactive `Flow` drains an inbox queue on its own thread. `Bus.publish` is
+synchronous but only drops the message into the subscriber's inbox, so the heavy
+work runs on the *subscribing* flow's thread (actor model) — the publish stays
+cheap.
+
+- **FIFO (default):** an unbounded queue, every message processed in order. The
+  VIO + deterministic replay require this — dropping a frame would corrupt the
+  pose. It is correct as long as the consumer keeps up with the producer.
+- **latest-only (`Flow(latest_only=True)`):** a *coalescing* inbox that keeps only
+  the newest unprocessed message per topic. A **realtime visualiser** needs this:
+  a free-running producer (the live cam paces 20 fps) feeding a FIFO whose
+  consumer is even slightly slower (SGM+KLT are serialized by the numba lock, so
+  the chain runs < 20 fps) makes the inbox grow **without bound** → the view falls
+  seconds behind and keeps drifting. Latest-only drops the backlog so each stage
+  always works on the freshest frame; latency is bounded to ~one frame per stage.
+  `END` is a control signal and is never coalesced away. The keypoint-depth view
+  builds its whole graph latest-only (`build_*(realtime_latest=True)`); the VIO
+  and replay never do.
+
 ### Numba concurrency guard
 `numba parallel=True` is used only in `lib/stereo` (SGM) and
 `lib/frontend/klt_numba` (KLT). The default `workqueue` numba layer is **not**
 threadsafe across Python threads, so running the depth task (SGM, on the `imu_cam`
 thread) and the odometry flow (KLT) concurrently crashes. `runtime.NUMBA_PARALLEL_LOCK` serializes the two
 parallel regions; all other flows (pure numpy) run free. `tbb`/`omp` layers are
-not installable on this host (macOS arm64, py3.13).
+not installable on this host (macOS arm64, py3.13). Note this lock caps the
+cam→imu_cam→odometry chain below the camera frame rate, which is exactly why the
+realtime visualiser path needs the latest-only inbox above.
 
 ---
 

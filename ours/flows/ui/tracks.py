@@ -23,8 +23,9 @@ from .render_tracks import RenderTracks
 class UiTracksFlow(Flow):
     """Sink flow that forwards each ``frame.tracks`` to ``on_tracks``."""
 
-    def __init__(self, bus: Bus, on_tracks: Callable[[FrameTracks], None]) -> None:
-        super().__init__("ui", bus)
+    def __init__(self, bus: Bus, on_tracks: Callable[[FrameTracks], None], *,
+                 latest_only: bool = False) -> None:
+        super().__init__("ui", bus, latest_only=latest_only)
         self.ctx.state["on_tracks"] = on_tracks
         self.expected_ends = 1                       # only frame.tracks carries END
         self.on(topics.FRAME_TRACKS, [RenderTracks()])

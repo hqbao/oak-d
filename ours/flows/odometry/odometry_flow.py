@@ -51,8 +51,9 @@ class OdometryFlow(Flow):
                  R_imu_cam: np.ndarray | None = None,
                  accel_align: np.ndarray | None = None,
                  odom_cfg: OdometryConfig | None = None,
-                 kf_every: int = 5, use_gyro: bool = True) -> None:
-        super().__init__("odometry", bus)
+                 kf_every: int = 5, use_gyro: bool = True,
+                 latest_only: bool = False) -> None:
+        super().__init__("odometry", bus, latest_only=latest_only)
         self.ctx.state["vo"] = RGBDVisualOdometry(K, odom_cfg or OdometryConfig())
         self.ctx.state["kf_every"] = int(kf_every)
         self.ctx.state["use_gyro"] = bool(use_gyro)

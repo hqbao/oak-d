@@ -91,6 +91,9 @@ class KeypointWorker(threading.Thread):
     """
 
     mode = "—"
+    #: live realtime view builds a latest-only graph (bounded latency); replay
+    #: keeps the full-fidelity FIFO graph (offline, deterministic, every frame).
+    latest_only = False
 
     def __init__(self, maxsize: int = 4) -> None:
         super().__init__(daemon=True)
@@ -139,7 +142,8 @@ class KeypointWorker(threading.Thread):
 
         bus = Bus()
         try:
-            self._drive(bus, UiTracksFlow(bus, on_tracks))
+            self._drive(bus, UiTracksFlow(bus, on_tracks,
+                                          latest_only=self.latest_only))
         except Exception as exc:           # surface, don't crash the UI
             self.error = str(exc)
         finally:
@@ -210,6 +214,7 @@ class LiveKeypointWorker(KeypointWorker):
     """
 
     mode = "LIVE"
+    latest_only = True
 
     def __init__(self, width: int = 640, height: int = 400, fps: int = 20,
                  fast: bool = False) -> None:
@@ -221,7 +226,8 @@ class LiveKeypointWorker(KeypointWorker):
 
         device, (cam_flow, imu_flow), flows, _ = build_live(
             bus, width=self._w, height=self._h, fps=self._fps,
-            depth_fast=self._fast, ui=sink, with_backend_slam=False)
+            depth_fast=self._fast, ui=sink, with_backend_slam=False,
+            realtime_latest=True)
         for f in flows:
             f.start()
         imu_flow.start()

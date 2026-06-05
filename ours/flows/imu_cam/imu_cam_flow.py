@@ -52,8 +52,9 @@ class ImuCamFlow(Flow):
                  calibration: ImuCalibration | None = None,
                  calibration_provider:
                      Callable[[], ImuCalibration | None] | None = None,
+                 latest_only: bool = False,
                  ) -> None:
-        super().__init__("imu-cam", bus)
+        super().__init__("imu-cam", bus, latest_only=latest_only)
         self.source = source
         self.buffer = TimedImuBuffer(capacity=buffer_capacity)
 

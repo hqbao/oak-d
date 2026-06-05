@@ -30,6 +30,8 @@ from .pubsub import Bus
 from .task import Task
 
 _SENTINEL = object()
+#: inbox payload marker: "the real message is the current self._latest[topic]".
+_LATEST = object()
 
 
 class FlowContext:
@@ -74,12 +76,27 @@ class _BaseFlow(threading.Thread):
 
 
 class Flow(_BaseFlow):
-    """A reactive flow: drains an inbox and routes messages by topic."""
+    """A reactive flow: drains an inbox and routes messages by topic.
 
-    def __init__(self, name: str, bus: Bus) -> None:
+    By default the inbox is an unbounded FIFO: every published message is
+    processed in order (needed for the VIO + deterministic offline replay, where
+    dropping a frame would corrupt the result). A realtime *visualiser* graph, by
+    contrast, must stay fresh: if its consumer chain is even slightly slower than
+    the producer, a FIFO inbox grows without bound and the view falls seconds
+    behind. Such a flow is built with ``latest_only=True`` -- a **coalescing**
+    inbox that keeps only the most-recent unprocessed message per topic, so the
+    consumer always works on the freshest frame and the backlog is dropped.
+    Latency is then bounded to ~one frame per stage regardless of the rate
+    mismatch. ``END`` is a control signal and is never coalesced away.
+    """
+
+    def __init__(self, name: str, bus: Bus, *, latest_only: bool = False) -> None:
         super().__init__(name, bus)
-        self._inbox: "queue.Queue[tuple[str, Any]]" = queue.Queue()
+        self._inbox: "queue.Queue" = queue.Queue()
         self._routes: dict[str, list[Task]] = {}
+        self._latest_only = bool(latest_only)
+        self._latest: dict[str, Any] = {}        # topic -> newest unprocessed msg
+        self._latest_lock = threading.Lock()
         self.done = threading.Event()  #: set after all expected ENDs are handled
         self.expected_ends = 1  #: a sink subscribing N END-bearing topics sets this to N
         self._ends_seen = 0
@@ -88,8 +105,28 @@ class Flow(_BaseFlow):
     def on(self, topic: str, tasks: Sequence[Task]) -> "Flow":
         """Run ``tasks`` (in order) whenever a message arrives on ``topic``."""
         self._routes[topic] = list(tasks)
-        self.bus.subscribe(topic, lambda m, t=topic: self._inbox.put((t, m)))
+        if self._latest_only:
+            self.bus.subscribe(topic, lambda m, t=topic: self._coalesce(t, m))
+        else:
+            self.bus.subscribe(topic, lambda m, t=topic: self._inbox.put((t, m)))
         return self
+
+    def _coalesce(self, topic: str, msg: Any) -> None:
+        """Keep only the newest unprocessed ``msg`` per topic (latest-only mode).
+
+        The inbox carries just a topic *token*; the message itself lives in
+        ``self._latest[topic]`` and is overwritten by each newer arrival, so a
+        backlog never builds. A token is enqueued only when there was nothing
+        pending for the topic (one token drives one drain) -- except ``END``,
+        which always enqueues a token so it is delivered even if it overwrites a
+        pending data frame (losing the last frame is fine; dropping END is not).
+        """
+        with self._latest_lock:
+            pending = topic in self._latest
+            self._latest[topic] = msg
+            enqueue = (not pending) or (msg is END)
+        if enqueue:
+            self._inbox.put((topic, _LATEST))
 
     def on_end(self) -> None:
         """Hook called once END has been received. Override for custom drain."""
@@ -103,21 +140,31 @@ class Flow(_BaseFlow):
             topic, msg = self._inbox.get()
             if msg is _SENTINEL:
                 break
+            if msg is _LATEST:
+                # Coalescing inbox: the token names a topic; pull its current
+                # newest message (None if already drained by an earlier token).
+                with self._latest_lock:
+                    msg = self._latest.pop(topic, _SENTINEL)
+                if msg is _SENTINEL:
+                    continue
             if msg is END:
-                self._ends_seen += 1
-                # Emit our own END only once EVERY END-bearing input has drained
-                # (expected_ends). A single-input flow keeps the old behaviour
-                # (expected_ends defaults to 1 -> emits on the first END); a
-                # multi-input join (e.g. odometry on imucam.sample + frame.depth)
-                # waits for all of them so it never signals "done" early.
-                if self._ends_seen >= self.expected_ends and not self._emitted_end:
-                    self._emitted_end = True
-                    self._emit_end()
-                self.on_end()
-                if self._ends_seen >= self.expected_ends:
-                    self.done.set()
+                self._handle_end()
                 continue
             self._run_chain(self.ctx, self._routes.get(topic, ()), msg)
+
+    def _handle_end(self) -> None:
+        self._ends_seen += 1
+        # Emit our own END only once EVERY END-bearing input has drained
+        # (expected_ends). A single-input flow keeps the old behaviour
+        # (expected_ends defaults to 1 -> emits on the first END); a
+        # multi-input join (e.g. odometry on imucam.sample + frame.depth)
+        # waits for all of them so it never signals "done" early.
+        if self._ends_seen >= self.expected_ends and not self._emitted_end:
+            self._emitted_end = True
+            self._emit_end()
+        self.on_end()
+        if self._ends_seen >= self.expected_ends:
+            self.done.set()
 
 
 class SourceFlow(_BaseFlow):
