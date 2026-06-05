@@ -162,6 +162,11 @@ class SixFaceCollector:
     def complete(self) -> bool:
         return len(self._caps) == 6
 
+    @property
+    def calibration(self) -> AccelCalibration | None:
+        """The solved calibration once all six faces are captured, else None."""
+        return self._cal
+
     def reset(self) -> None:
         self._coll.reset()
         self._caps.clear()

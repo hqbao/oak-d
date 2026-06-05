@@ -34,7 +34,12 @@ import numpy as np
 from ...lib import topics
 from ...lib.config.resolution import ResolutionProfile
 from ...lib.flow import SourceFlow
-from ...lib.imu.bias_store import load_gyro_bias, save_gyro_bias
+from ...lib.imu.accel_calib import AccelCalibration
+from ...lib.imu.calib_store import (
+    load_accel_calib,
+    load_gyro_bias,
+    save_gyro_bias,
+)
 from ...lib.imu.imu import so3_exp
 from ...lib.io.reader import StereoCalib
 from ...lib.messages import ImuInit, ImuPrior, RawFrame
@@ -102,6 +107,7 @@ class LiveCaptureFlow(SourceFlow):
         self._q_imu = None
         self._R_imu_cam = np.eye(3)
         self._gyro_bias = np.zeros(3)
+        self._accel_cal: AccelCalibration | None = None
         self._accel_align: np.ndarray | None = None
 
     # ------------------------------------------------------------------ #
@@ -177,6 +183,13 @@ class LiveCaptureFlow(SourceFlow):
                 print(f"[live] gyro bias loaded from cache (device {dev_id}): "
                       f"{cached.round(5).tolist()} rad/s. Pass "
                       "recalibrate_bias=True to re-measure.", file=sys.stderr)
+            # Six-position accel calibration (bias+scale+misalignment) if the
+            # operator has run the wizard for this device; else raw accel.
+            self._accel_cal = load_accel_calib(dev_id)
+            if self._accel_cal is not None:
+                print(f"[live] accel calibration loaded (device {dev_id}): "
+                      f"residual {self._accel_cal.residual_g:.4f} m/s^2.",
+                      file=sys.stderr)
             # Always read gravity-align (and the bias too when not cached).
             self._accel_align = self._collect_startup(
                 estimate_bias=cached is None, device_id=dev_id)
@@ -184,6 +197,16 @@ class LiveCaptureFlow(SourceFlow):
         sgm_cfg = self.res.sgm(fast=self.depth_fast)
         return LiveCalib(K=K, calib=calib, sgm_cfg=sgm_cfg, res=self.res,
                          accel_align=self._accel_align)
+
+    def _cal_accel(self, a_raw) -> np.ndarray:
+        """Apply the six-position accel calibration if one is loaded.
+
+        ``a_cal = T (a_raw - b)`` is linear, so applying it to a streak mean
+        equals the mean of the corrected samples -- we correct at the mean to
+        save work. Pass-through (raw) when no calibration is cached.
+        """
+        a = np.asarray(a_raw, dtype=np.float64)
+        return self._accel_cal.apply(a) if self._accel_cal is not None else a
 
     @staticmethod
     def _device_id(pipeline) -> str:
@@ -273,7 +296,8 @@ class LiveCaptureFlow(SourceFlow):
                     if moved:
                         print("[live] startup: settled after initial motion "
                               "-> leveled at rest.", file=sys.stderr)
-                    return self._R_imu_cam @ np.mean(accel, axis=0)
+                    return self._R_imu_cam @ self._cal_accel(
+                        np.mean(accel, axis=0))
         # Timed out without a clean still window. Use the accel mean for a rough
         # level; when estimating, leave the gyro bias unset (a motion-biased
         # estimate is worse than none). Warn so the user holds still + restarts.
@@ -283,7 +307,7 @@ class LiveCaptureFlow(SourceFlow):
                   "and restart for a stable VIO.", file=sys.stderr)
         if not accel:
             return None
-        return self._R_imu_cam @ np.mean(accel, axis=0)
+        return self._R_imu_cam @ self._cal_accel(np.mean(accel, axis=0))
 
     # ------------------------------------------------------------------ #
     @staticmethod
@@ -384,7 +408,7 @@ class LiveCaptureFlow(SourceFlow):
                 accel_cam = None
                 at_rest = False
                 if acc_cnt > 0:
-                    accel_raw = R_imu_cam @ (acc_sum / acc_cnt)
+                    accel_raw = R_imu_cam @ self._cal_accel(acc_sum / acc_cnt)
                     if accel_ema is None:
                         accel_ema = accel_raw.copy()
                     else:

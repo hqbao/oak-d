@@ -99,4 +99,38 @@ QStatusBar {{
     color: {TEXT_DIM};
     border-top: 1px solid {PANEL_EDGE};
 }}
+
+QMenuBar {{
+    background-color: {PANEL};
+    color: {TEXT};
+    border-bottom: 1px solid {PANEL_EDGE};
+    padding: 2px;
+}}
+QMenuBar::item {{ background: transparent; padding: 4px 10px; }}
+QMenuBar::item:selected {{ background-color: {BTN_HOV}; color: {ACCENT}; }}
+QMenu {{
+    background-color: {PANEL};
+    color: {TEXT};
+    border: 1px solid {PANEL_EDGE};
+}}
+QMenu::item {{ padding: 5px 22px; }}
+QMenu::item:selected {{ background-color: {BTN_PRIMARY}; color: {TEXT}; }}
+QMenu::separator {{ height: 1px; background: {PANEL_EDGE}; margin: 4px 8px; }}
+
+QDialog {{ background-color: {BG}; }}
+
+QProgressBar {{
+    background-color: {BTN_BG};
+    border: 1px solid {PANEL_EDGE};
+    border-radius: 3px;
+    text-align: center;
+    color: {TEXT};
+    height: 16px;
+}}
+QProgressBar::chunk {{ background-color: {BTN_PRIMARY}; }}
+
+QLabel#FaceDone   {{ color: {GOOD}; font-weight: bold; }}
+QLabel#FaceTodo   {{ color: {TEXT_FAINT}; }}
+QLabel#DialogHint {{ color: {TEXT_DIM}; }}
+QLabel#DialogMono {{ color: {TEXT}; font-weight: bold; }}
 """

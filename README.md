@@ -105,8 +105,29 @@ available as `--source ours-legacy`. For a device run with no GUI:
 
 At START the live path measures only the **gravity-align level** (which depends
 on how the camera is held); the **gyro bias** is a sensor constant, so it is
-calibrated once, saved per device under `.cache/imu_bias.json`, and reused on
+calibrated once, saved per device under `.cache/imu_calib.json`, and reused on
 later runs. Force a fresh bias measurement with `--recalibrate-bias`.
+
+The 3D viewer groups its features in a **menu bar** (the toolbar keeps only the
+primary START/STOP):
+
+- **View** — camera presets (ISO/TOP/FRONT/BACK/LEFT/RIGHT), Follow Camera,
+  Clear Trail, and Clear Keyframes (SLAM backend only).
+- **Calibration** — guided wizards that own the device while they run:
+  **Gyroscope Bias** (one still window) and **Accelerometer (6-position)** (hold
+  each face up/down; solves bias + scale + misalignment as the affine
+  `a_cal = T·(a_raw − b)`). Both persist per device into `.cache/imu_calib.json`
+  and the live path applies the accel calibration automatically on the next run.
+- **Visualize** — launches the proven live viewers in their own process:
+  **Camera + Depth + IMU** triplet (`synced_view --live`) and **Stereo Depth**
+  (`stereo_view --live`). These need exclusive device access, so the live
+  pipeline is released first.
+
+The calibration math and capture state machines live in `ours/lib/imu/`
+(`accel_calib.py`, `calib_collect.py`, `calib_store.py`) and are covered by
+offline self-tests (`accel_calib_selftest`, `calib_collect_selftest`,
+`calib_store_selftest`, `ui_calib_selftest`) that run without an OAK-D.
+
 
 Both `ours-ba` and `ours-slam` run their heavy optimisation on a background
 thread, so the display stays smooth. The accelerometer levels roll/pitch to
