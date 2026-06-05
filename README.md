@@ -137,7 +137,7 @@ primary START/STOP):
   - **Camera + Depth + IMU** triplet opens an in-app Qt window
     (`ours/ui/synced_window.py`): cameras on top (`image | depth`) and the IMU
     panels below (the same gyro chart + interactive 3D accel view), with a
-    fixed-range TURBO depth colormap (+ scale bar, `valid %`). The IMU shown is
+    fixed-range single-hue khaki depth ramp (+ scale bar, `valid %`). The IMU shown is
     **calibrated** (`gyro − bias`, accel affine) when a per-device calibration is
     cached — the panel title reads `IMU · CALIBRATED` vs `IMU · RAW`. Live off the
     OAK-D (host SGM) or a recorded session.
@@ -145,7 +145,7 @@ primary START/STOP):
     (`ours/ui/keypoints_window.py`): the rectified-left frame with every live
     **KLT-frontend track** drawn on it (the SAME frontend the odometry runs, not
     a parallel detector). Each dot's **colour = that keypoint's metric depth**
-    (the same fixed TURBO 0.3–8 m map + scale bar as the depth panel), so colour
+    (the same fixed khaki 0.3–8 m ramp + scale bar as the depth panel), so colour
     means the same distance everywhere; keypoints with no stereo return are
     **hollow grey rings** (never a faked colour), fresh tracks get an amber ring.
     A faint per-id **trail** shows where the *same* keypoint moved over the last

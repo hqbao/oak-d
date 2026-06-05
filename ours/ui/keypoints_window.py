@@ -4,7 +4,7 @@ The headline view for inspecting OUR visual frontend. Each frame shows the
 rectified-left image with every live :class:`~ours.lib.frontend.frontend.KLTFrontend`
 track drawn on it:
 
-* the dot **colour** = that keypoint's metric depth (the SAME fixed TURBO
+* the dot **colour** = that keypoint's metric depth (the SAME fixed khaki
   0.3-8.0 m map + scale-bar legend as the depth panel), so colour means the same
   distance everywhere; keypoints with no stereo return are hollow grey rings, not
   a faked colour;
@@ -299,7 +299,7 @@ class KeypointTrackWindow(QWidget):
         root.setSpacing(6)
         root.addWidget(self._build_header())
 
-        panel, lay, _ = _panel("FRAME · KLT TRACKS (TURBO depth)")
+        panel, lay, _ = _panel("FRAME · KLT TRACKS (depth shaded)")
         rasters = QHBoxLayout()
         rasters.setContentsMargins(0, 0, 0, 0)
         rasters.setSpacing(4)

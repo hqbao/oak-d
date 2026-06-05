@@ -32,7 +32,7 @@ import numpy as np                                                  # noqa: E402
 from PyQt6.QtWidgets import QApplication                            # noqa: E402
 
 from ours.lib.viz.depth_render import (                             # noqa: E402
-    colorize_depth, turbo_bgr, turbo_bgr_array,
+    colorize_depth, depth_color, depth_colors,
 )
 from ours.lib.viz.keypoint_overlay import (                         # noqa: E402
     TRAIL_LEN, TrackTrails, draw_overlay, marker_sizes, sample_depths,
@@ -64,15 +64,15 @@ def _run_until(app, predicate, timeout_s: float) -> None:
 def test_depth_color_matches_panel() -> None:
     print(" depth->colour is the SAME mapping as the depth panel")
     # Build a 1-row depth image of distinct depths; colorize_depth must agree
-    # with the per-value turbo_bgr_array exactly (single source of truth).
+    # with the per-value depth_colors exactly (single source of truth).
     depths = np.array([0.3, 1.0, 2.5, 4.0, 8.0, 12.0], dtype=np.float32)
     img = depths.reshape(1, -1)
     panel = colorize_depth(img)[0]                  # (M, 3) BGR
-    dots = turbo_bgr_array(depths)                  # (M, 3) BGR
+    dots = depth_colors(depths)                     # (M, 3) BGR
     _check(np.array_equal(panel, dots),
-           "turbo_bgr_array == colorize_depth pixel for pixel")
-    _check(turbo_bgr(2.5) == tuple(int(x) for x in dots[2]),
-           "scalar turbo_bgr matches the array form")
+           "depth_colors == colorize_depth pixel for pixel")
+    _check(depth_color(2.5) == tuple(int(x) for x in dots[2]),
+           "scalar depth_color matches the array form")
 
 
 def test_sample_depths() -> None:

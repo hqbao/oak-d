@@ -10,7 +10,7 @@ and the interactive 3D :class:`~ours.ui.imu_panels.Accel3DView` -- and adds a re
 Three honest panels, each showing exactly what the capture produces (no parallel
 pipeline)::
 
-    [ IMAGE · RECT-LEFT | DEPTH · TURBO (+scale bar) | GYRO chart / ACCEL 3D ]
+    [ IMAGE · RECT-LEFT | DEPTH · KHAKI (+scale bar) | GYRO chart / ACCEL 3D ]
 
 Two data sources drive the identical window through an injected worker factory:
 
@@ -315,7 +315,7 @@ def live_worker_factory(width: int = 640, height: int = 400, fps: int = 20,
 # Depth colormap scale-bar widget (static legend -- range is fixed)
 # --------------------------------------------------------------------------- #
 class _DepthScaleBar(QWidget):
-    """Vertical TURBO gradient + fixed tick labels for the depth colormap."""
+    """Vertical khaki-ramp gradient + fixed tick labels for the depth colormap."""
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -487,7 +487,7 @@ class SyncedViewWindow(QWidget):
         lay.setSpacing(4)
         row = QHBoxLayout()
         row.setContentsMargins(0, 0, 0, 0)
-        title = QLabel("DEPTH · TURBO")
+        title = QLabel("DEPTH · KHAKI")
         title.setObjectName("PanelTitle")
         row.addWidget(title)
         row.addStretch(1)

@@ -19,7 +19,7 @@ from collections import deque
 
 import numpy as np
 
-from .depth_render import turbo_bgr_array
+from .depth_render import depth_colors
 
 #: How many past positions of one track to keep / draw (the user's N).
 TRAIL_LEN = 20
@@ -155,7 +155,7 @@ def draw_overlay(gray: np.ndarray, depth_m: np.ndarray,
 
     z = sample_depths(depth_m, pts)
     valid = z > 1e-6
-    colors = turbo_bgr_array(z)                       # (M, 3) uint8 BGR
+    colors = depth_colors(z)                          # (M, 3) uint8 BGR
     dot_r, halo_r, fresh_r, line_w = marker_sizes(bg.shape[:2])
 
     if draw_trails:
