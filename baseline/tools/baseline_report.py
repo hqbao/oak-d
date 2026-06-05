@@ -17,9 +17,9 @@ import sys
 import time
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from tools.compare_sessions import (                # noqa: E402
+from baseline.tools.compare_sessions import (                # noqa: E402
     _load_jsonl, _load_pose_stream, compare,
 )
 

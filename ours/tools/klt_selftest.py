@@ -33,11 +33,11 @@ from pathlib import Path
 
 import numpy as np
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from oakd.vio.corners import good_features_to_track            # noqa: E402
-from oakd.vio.klt import _bilinear, calc_optical_flow_pyr_lk   # noqa: E402
-from oakd.vio.frontend import FrontendConfig                   # noqa: E402
+from ours.vio.corners import good_features_to_track            # noqa: E402
+from ours.vio.klt import _bilinear, calc_optical_flow_pyr_lk   # noqa: E402
+from ours.vio.frontend import FrontendConfig                   # noqa: E402
 
 try:
     import cv2
@@ -169,7 +169,7 @@ def _load_gold_pair():
         if not (sess / "meta.json").exists():
             continue
         try:
-            from oakd.vio.reader import SessionReader
+            from ours.vio.reader import SessionReader
             r = SessionReader(sess)
             if len(r) < 20:
                 continue
@@ -226,7 +226,7 @@ def test_backend_agreement() -> bool:
     true, which is the point -- the fallback is exercised either way.
     """
     print("== 1b. numba vs numpy backend agreement ==")
-    from oakd.vio.klt_numba import HAVE_NUMBA
+    from ours.vio.klt_numba import HAVE_NUMBA
     img0 = make_texture(seed=5)
     img1 = translate(img0, 2.1, -1.3)
     g0, g1 = img0.astype(np.uint8), img1.astype(np.uint8)

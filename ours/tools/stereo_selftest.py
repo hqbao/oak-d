@@ -28,13 +28,13 @@ from pathlib import Path
 
 import numpy as np
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from oakd.vio import (  # noqa: E402
+from ours.vio import (  # noqa: E402
     SessionReader, SGMConfig, SGMStereoMatcher, StereoConfig, StereoMatcher,
 )
-from oakd.vio.corners import good_features_to_track  # noqa: E402
-from oakd.vio.stereo import HAVE_NUMBA  # noqa: E402
+from ours.vio.corners import good_features_to_track  # noqa: E402
+from ours.vio.stereo import HAVE_NUMBA  # noqa: E402
 
 
 def _make_matcher(engine: str, reader: SessionReader):

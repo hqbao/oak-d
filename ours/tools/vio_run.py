@@ -25,9 +25,9 @@ from pathlib import Path
 
 import numpy as np
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from oakd.vio import (  # noqa: E402
+from ours.vio import (  # noqa: E402
     GyroPreintegrator,
     OdometryConfig,
     RGBDVisualOdometry,
@@ -36,9 +36,9 @@ from oakd.vio import (  # noqa: E402
     WindowedRGBDOdometry,
     WindowedVIORGBDOdometry,
 )
-from oakd.vio.slam import SlamConfig       # noqa: E402
-from oakd.vio.posegraph import se3_inv  # noqa: E402
-from oakd.vio.stereo import SGMConfig, SGMStereoMatcher  # noqa: E402
+from ours.vio.slam import SlamConfig       # noqa: E402
+from ours.vio.posegraph import se3_inv  # noqa: E402
+from ours.vio.stereo import SGMConfig, SGMStereoMatcher  # noqa: E402
 
 
 def load_basalt_positions(session_dir: Path) -> dict[int, np.ndarray]:

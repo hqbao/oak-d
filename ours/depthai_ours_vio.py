@@ -54,13 +54,13 @@ import time
 
 import numpy as np
 
-from ..pose import Pose
-from ..frames import quat_to_rpy
-from ..vio import (
+from oakd.pose import Pose
+from oakd.frames import quat_to_rpy
+from ours.vio import (
     InertialTranslationFilter, KLTFrontend,
     RGBDVisualOdometry, gravity_aligned_R0, level_attitude,
 )
-from .base import PoseSource
+from oakd.sources.base import PoseSource
 
 
 # Standard OpenCV optical (x right, y down, z forward) -> world NED.
@@ -231,7 +231,7 @@ class OakOursVioSource(PoseSource):
         # the live (width, height). Any of the seven knobs can be overridden at
         # runtime (None = keep the auto-scaled value) -- this is the set we
         # co-tune per resolution (see docs/RESOLUTION_TUNING.md).
-        from ..vio.resolution import ResolutionProfile
+        from ours.vio.resolution import ResolutionProfile
         self.res = ResolutionProfile.for_resolution(
             self.width, self.height,
             max_corners=max_corners, min_distance=min_distance,
@@ -387,8 +387,8 @@ class OakOursVioSource(PoseSource):
             # makes the matcher rectify the raw left frame too, so the whole
             # depth path is VPU-free: nothing reads the chip's rectifiedLeft or
             # StereoDepth output.
-            from ..vio.reader import StereoCalib
-            from ..vio.stereo import SGMStereoMatcher
+            from ours.vio.reader import StereoCalib
+            from ours.vio.stereo import SGMStereoMatcher
 
             def _intr(sock):
                 Ki = np.array(ch.getCameraIntrinsics(
@@ -433,7 +433,7 @@ class OakOursVioSource(PoseSource):
             #   * without Numba the pure-NumPy path costs ~140 ms/frame, so fall
             #     back to the lighter ``live_own`` preset (~38-58 ms) to stay
             #     roughly real time.
-            from ..vio.klt_numba import HAVE_NUMBA
+            from ours.vio.klt_numba import HAVE_NUMBA
             fe_cfg = self.res.frontend(numba=HAVE_NUMBA)
 
             # Translation is owned by vision (frame-to-frame RGB-D PnP) with the
@@ -624,7 +624,7 @@ class OakOursVioSource(PoseSource):
             # inter-frame rotation and hand it to ``vo.process`` as the rotation
             # prior. ``so3_exp`` is the same exponential map the offline
             # GyroPreintegrator uses, so live and offline share one convention.
-            from ..vio.imu import so3_exp, so3_log
+            from ours.vio.imu import so3_exp, so3_log
             gyro_bias = (self._gyro_bias if self._gyro_bias is not None
                          else np.zeros(3))
             gyro_last_ts: float | None = None
@@ -1251,8 +1251,8 @@ class OakOursVioSource(PoseSource):
         """
         import threading
 
-        from ..vio import WindowedBAMap, WindowedConfig
-        from ..vio.bundle import BAConfig
+        from ours.vio import WindowedBAMap, WindowedConfig
+        from ours.vio.bundle import BAConfig
 
         # use_gravity=True adds the accelerometer leveling prior INSIDE the
         # sliding-window BA, so the optimised map keeps its roll/pitch pinned to
@@ -1335,7 +1335,7 @@ class OakOursVioSource(PoseSource):
         """
         import threading
 
-        from ..vio.vio_window import (VioConfig, WindowedVIOConfig,
+        from ours.vio.vio_window import (VioConfig, WindowedVIOConfig,
                                       WindowedVIOMap)
 
         # startup gyro bias is collected in the IMU frame; rotate it into the
@@ -1432,8 +1432,8 @@ class OakOursVioSource(PoseSource):
         """
         import threading
 
-        from ..vio import SlamMap
-        from ..vio.slam import SlamConfig
+        from ours.vio import SlamMap
+        from ours.vio.slam import SlamConfig
 
         # Spatial gating keeps loop detection bounded as the map grows so the
         # configured keyframe cadence stays sustainable on the background thread.
@@ -1483,7 +1483,7 @@ class OakOursVioSource(PoseSource):
             return ov
 
         def worker():
-            from ..vio.posegraph import se3_inv
+            from ours.vio.posegraph import se3_inv
 
             while not stop.is_set():
                 event.wait()

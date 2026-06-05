@@ -36,17 +36,17 @@ from pathlib import Path
 
 import numpy as np
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from oakd.vio import (  # noqa: E402
+from ours.vio import (  # noqa: E402
     InertialFilterConfig,
     InertialTranslationFilter,
     OdometryConfig,
     RGBDVisualOdometry,
     SessionReader,
 )
-from oakd.vio.imu import so3_exp, so3_log  # noqa: E402
-from tools.vio_run import load_basalt_positions, umeyama  # noqa: E402
+from ours.vio.imu import so3_exp, so3_log  # noqa: E402
+from ours.tools.vio_run import load_basalt_positions, umeyama  # noqa: E402
 
 
 _REST_MOTION_THRESH = 0.35   # m/s^2, same as the live source

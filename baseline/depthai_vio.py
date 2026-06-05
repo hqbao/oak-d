@@ -25,9 +25,9 @@ import time
 
 import numpy as np
 
-from ..frames import quat_to_rot
-from ..pose import Pose
-from .base import PoseSource
+from oakd.frames import quat_to_rot
+from oakd.pose import Pose
+from oakd.sources.base import PoseSource
 
 
 # FLU world -> NED world: flip Y (left->east) and Z (up->down).

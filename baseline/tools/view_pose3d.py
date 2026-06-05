@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 
 # allow running directly without `pip install -e .`
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from PyQt6.QtWidgets import QApplication       # noqa: E402
 
@@ -21,14 +21,14 @@ def _build_source(name: str, args):
     if name == "fake":
         return FakePoseSource(rate_hz=100.0, radius_m=3.0, period_s=12.0)
     if name == "oak":
-        from oakd.sources.depthai_vio import OakBasaltVioSource
+        from baseline.depthai_vio import OakBasaltVioSource
         return OakBasaltVioSource()
     if name == "slam":
-        from oakd.sources.depthai_slam import OakBasaltSlamSource
+        from baseline.depthai_slam import OakBasaltSlamSource
         return OakBasaltSlamSource()
     # Resolution + per-resolution vision overrides shared by every ours-* source.
     # Each override defaults to None -> the source auto-scales it from the
-    # 640x400 baseline (see oakd/vio/resolution.py + docs/RESOLUTION_TUNING.md).
+    # 640x400 baseline (see ours/vio/resolution.py + docs/RESOLUTION_TUNING.md).
     res_kw = dict(
         width=args.width, height=args.height,
         max_corners=args.max_corners, min_distance=args.min_distance,
@@ -37,16 +37,16 @@ def _build_source(name: str, args):
         orb_features=args.orb_features,
     )
     if name == "ours":
-        from oakd.sources.depthai_ours_vio import OakOursVioSource
+        from ours.depthai_ours_vio import OakOursVioSource
         return OakOursVioSource(fps=args.fps, backend="f2f", **res_kw)
     if name == "ours-ba":
-        from oakd.sources.depthai_ours_vio import OakOursVioSource
+        from ours.depthai_ours_vio import OakOursVioSource
         return OakOursVioSource(
             fps=args.fps, backend="ba",
             ba_window=args.ba_window, ba_kf_every=args.ba_kf_every,
             ba_iters=args.ba_iters, **res_kw)
     if name == "ours-slam":
-        from oakd.sources.depthai_ours_vio import OakOursVioSource
+        from ours.depthai_ours_vio import OakOursVioSource
         return OakOursVioSource(
             fps=args.fps, backend="slam",
             slam_kf_every=args.slam_kf_every, slam_radius_m=args.slam_radius,
@@ -54,7 +54,7 @@ def _build_source(name: str, args):
             slam_kf_min_rot=args.slam_kf_min_rot,
             slam_max_kf=args.slam_max_kf, **res_kw)
     if name == "ours-vio":
-        from oakd.sources.depthai_ours_vio import OakOursVioSource
+        from ours.depthai_ours_vio import OakOursVioSource
         return OakOursVioSource(
             fps=args.fps, backend="vio",
             ba_window=args.ba_window, ba_kf_every=args.ba_kf_every, **res_kw)

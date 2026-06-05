@@ -35,10 +35,10 @@ from pathlib import Path
 
 import numpy as np
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from oakd.frames import quat_to_rpy  # noqa: E402
-from oakd.vio.imu import gravity_aligned_R0  # noqa: E402
+from ours.vio.imu import gravity_aligned_R0  # noqa: E402
 
 
 def _quat_to_rot(qw, qx, qy, qz):
@@ -147,7 +147,7 @@ def main() -> int:
         P = np.array([[0, 1, 0.0], [0, 0, 1], [1, 0, 0]])
         Rned = M @ R0 @ P
         # matrix -> quat -> rpy
-        from oakd.sources.depthai_ours_vio import _rot_to_quat_wxyz
+        from ours.depthai_ours_vio import _rot_to_quat_wxyz
         r, pi, y = np.degrees(quat_to_rpy(_rot_to_quat_wxyz(Rned)))
         gdir = g_cam / (np.linalg.norm(g_cam) + 1e-12)
         print(f"\n[{label}] {extra}")

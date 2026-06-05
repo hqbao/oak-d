@@ -18,16 +18,16 @@ from pathlib import Path
 
 import numpy as np
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from oakd.vio import (  # noqa: E402
+from ours.vio import (  # noqa: E402
     OdometryConfig,
     SessionReader,
     WindowedRGBDOdometry,
     WindowedVIORGBDOdometry,
     WindowedVIOConfig,
 )
-from oakd.vio.vio_window import VioConfig  # noqa: E402
+from ours.vio.vio_window import VioConfig  # noqa: E402
 
 
 def load_basalt(d: Path) -> dict[int, np.ndarray]:

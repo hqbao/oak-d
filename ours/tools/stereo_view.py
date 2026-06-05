@@ -44,13 +44,13 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from oakd.vio import (  # noqa: E402
+from ours.vio import (  # noqa: E402
     SessionReader, SGMConfig, SGMStereoMatcher, StereoCalib,
 )
-from oakd.vio.stereo import HAVE_NUMBA  # noqa: E402
-from oakd.vio.resolution import ResolutionProfile  # noqa: E402
+from ours.vio.stereo import HAVE_NUMBA  # noqa: E402
+from ours.vio.resolution import ResolutionProfile  # noqa: E402
 
 # Fixed depth range (metres) for the colormap, so colours are stable across
 # frames (a per-frame autoscale makes the scene "breathe" and hides drift).

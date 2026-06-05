@@ -20,10 +20,10 @@ from pathlib import Path
 
 import numpy as np
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from tools.live_replay import replay  # noqa: E402
-from tools.vio_run import load_basalt_positions, umeyama  # noqa: E402
+from ours.tools.live_replay import replay  # noqa: E402
+from ours.tools.vio_run import load_basalt_positions, umeyama  # noqa: E402
 
 
 def main():

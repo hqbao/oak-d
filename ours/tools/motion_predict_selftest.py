@@ -24,10 +24,10 @@ from pathlib import Path
 
 import numpy as np
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from oakd.vio.imu import so3_exp  # noqa: E402
-from oakd.vio.odometry import OdometryConfig, RGBDVisualOdometry  # noqa: E402
+from ours.vio.imu import so3_exp  # noqa: E402
+from ours.vio.odometry import OdometryConfig, RGBDVisualOdometry  # noqa: E402
 
 K = np.array([[300.0, 0.0, 320.0],
               [0.0, 300.0, 200.0],

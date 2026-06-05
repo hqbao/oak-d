@@ -19,7 +19,7 @@ from pathlib import Path
 
 import numpy as np
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from oakd.recorder import SessionRecorder  # noqa: E402
 
@@ -363,7 +363,7 @@ def main() -> int:
     db_path = out / "basalt" / "rtabmap.db"
     if db_path.exists():
         try:
-            from tools.extract_kf_from_db import extract as _extract_kf
+            from baseline.tools.extract_kf_from_db import extract as _extract_kf
             n_kf, n_lp = _extract_kf(out)
             print(f"  kf:     {n_kf} keyframes, {n_lp} loop links")
         except Exception as e:

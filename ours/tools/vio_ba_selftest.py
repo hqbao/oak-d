@@ -30,10 +30,10 @@ from pathlib import Path
 
 import numpy as np
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from oakd.vio.imu import preintegrate_imu, so3_exp, so3_log  # noqa: E402
-from oakd.vio.vio_window import (  # noqa: E402
+from ours.vio.imu import preintegrate_imu, so3_exp, so3_log  # noqa: E402
+from ours.vio.vio_window import (  # noqa: E402
     VioConfig,
     VioState,
     optimize_vio,

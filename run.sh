@@ -9,4 +9,4 @@ if [ ! -d .venv ]; then
   exit 1
 fi
 
-exec .venv/bin/python tools/view_pose3d.py "$@"
+exec .venv/bin/python baseline/tools/view_pose3d.py "$@"

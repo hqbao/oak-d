@@ -40,7 +40,7 @@ from typing import Any, Sequence
 
 import numpy as np
 
-from .vio.pngio import imwrite_gray
+from .pngio import imwrite_gray
 
 
 class SessionRecorder:

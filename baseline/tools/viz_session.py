@@ -28,7 +28,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal              # noqa: E402
 from PyQt6.QtGui import (                                    # noqa: E402
