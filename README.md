@@ -145,10 +145,15 @@ primary START/STOP):
   - **Camera + Depth + IMU** triplet opens an in-app Qt window
     (`ours/ui/synced_window.py`): cameras on top (`image | depth`) and the IMU
     panels below (the same gyro chart + interactive 3D accel view), with a
-    fixed-range single-hue khaki depth ramp (+ scale bar, `valid %`). The IMU shown is
-    **calibrated** (`gyro − bias`, accel affine) when a per-device calibration is
-    cached — the panel title reads `IMU · CALIBRATED` vs `IMU · RAW`. Live off the
-    OAK-D (host SGM) or a recorded session.
+    fixed-range single-hue khaki depth ramp (+ scale bar, `valid %`). Like the
+    keypoints view, the triplet is **subscribed from the running acquisition
+    front-end** — it builds `cam + imu_cam` on a private Bus (no odometry / no
+    backend / no SLAM) and a `UiTripletFlow` sink that **joins `frame.depth` +
+    `imucam.sample` by seq**; it no longer runs its own SGM/`dai.Pipeline`. The
+    IMU shown is **calibrated** (`gyro − bias`, accel affine) when a per-device
+    calibration is cached — the panel title reads `IMU · CALIBRATED` vs `IMU ·
+    RAW`. Live off the OAK-D (latest-only inbox for bounded latency) or a
+    recorded session.
   - **Keypoint Depth Tracker** opens an in-app Qt window
     (`ours/ui/keypoints_window.py`): the rectified-left frame with every live
     **KLT-frontend track** drawn on it. The tracks are **subscribed from the

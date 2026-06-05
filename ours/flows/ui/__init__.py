@@ -12,5 +12,6 @@ guarantees every upstream flow has fully drained.
 from .collector import UiCollectorFlow
 from .render import UiRenderFlow
 from .tracks import UiTracksFlow
+from .triplet import UiTripletFlow
 
-__all__ = ["UiCollectorFlow", "UiRenderFlow", "UiTracksFlow"]
+__all__ = ["UiCollectorFlow", "UiRenderFlow", "UiTracksFlow", "UiTripletFlow"]

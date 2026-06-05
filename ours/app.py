@@ -112,6 +112,28 @@ def _replay_imu_startup(reader: SessionReader, use_gyro: bool):
     return R_imu_cam, accel_align, gyro_bias
 
 
+def build_replay_frontend(bus: Bus, reader: SessionReader, *,
+                          depth_fast: bool = False, max_frames: int = 0,
+                          calibration: ImuCalibration | None = None,
+                          latest_only: bool = False):
+    """Wire ONLY the acquisition front-end (``cam`` + ``imu_cam`` with depth) from
+    a recorded session.
+
+    For visualisers that consume ``frame.depth`` / ``imucam.sample`` directly and
+    need no odometry/backend/slam (e.g. the image|depth|IMU triplet). ``calibration``
+    is the IMU correction the imu_cam flow applies (``None`` -> the published IMU is
+    raw); ``latest_only`` makes the front-end coalescing so a realtime visualiser
+    stays fresh. Returns ``(cam_flow, imu_flow)``.
+    """
+    sgm = SGMConfig.live() if depth_fast else SGMConfig()
+    matcher = SGMStereoMatcher.from_calib(reader.calib, sgm)
+    imu_flow = ImuCamFlow(bus, ReplayImuSource(reader), matcher=matcher,
+                          calibration=calibration, latest_only=latest_only)
+    cam_flow = CamFlow(
+        bus, ReplayCamSource(reader, max_frames=max_frames), fps=20)
+    return cam_flow, imu_flow
+
+
 def build_replay(bus: Bus, reader: SessionReader, *, kf_every: int = 5,
                  use_gyro: bool = True, depth_fast: bool = False,
                  max_frames: int = 0, ui=None, with_backend_slam: bool = True,
@@ -129,17 +151,13 @@ def build_replay(bus: Bus, reader: SessionReader, *, kf_every: int = 5,
     heavy back-end + SLAM flows for a pure odometry-output visualiser;
     ``realtime_latest=True`` makes the heavy flows latest-only (bounded latency).
     """
-    sgm = SGMConfig.live() if depth_fast else SGMConfig()
-    matcher = SGMStereoMatcher.from_calib(reader.calib, sgm)
-
     R_imu_cam, accel_align, gyro_bias = _replay_imu_startup(reader, use_gyro)
     calibration = (ImuCalibration(gyro_bias=gyro_bias)
                    if gyro_bias is not None else None)
 
-    imu_flow = ImuCamFlow(bus, ReplayImuSource(reader), matcher=matcher,
-                          calibration=calibration, latest_only=realtime_latest)
-    cam_flow = CamFlow(
-        bus, ReplayCamSource(reader, max_frames=max_frames), fps=20)
+    cam_flow, imu_flow = build_replay_frontend(
+        bus, reader, depth_fast=depth_fast, max_frames=max_frames,
+        calibration=calibration, latest_only=realtime_latest)
 
     ui = ui if ui is not None else UiCollectorFlow(bus)
     flows = build_graph(bus, reader.K, ui=ui, R_imu_cam=R_imu_cam,
@@ -149,21 +167,20 @@ def build_replay(bus: Bus, reader: SessionReader, *, kf_every: int = 5,
     return (cam_flow, imu_flow), flows, ui
 
 
-def build_live(bus: Bus, *, width: int = 640, height: int = 400, fps: int = 20,
-               kf_every: int = 5, use_gyro: bool = True, depth_fast: bool = True,
-               recalibrate_bias: bool = False, with_backend_slam: bool = True,
-               realtime_latest: bool = False,
-               ui=None, slam_cfg: SlamConfig | None = None):
-    """Construct the live OAK-D graph off ONE shared device.
+def build_live_frontend(bus: Bus, *, width: int = 640, height: int = 400,
+                        fps: int = 20, use_gyro: bool = True,
+                        depth_fast: bool = True, recalibrate_bias: bool = False,
+                        latest_only: bool = False):
+    """Open the OAK-D and wire ONLY the acquisition front-end (``cam`` +
+    ``imu_cam`` with depth) off ONE shared device.
 
-    Opens the device to read calibration + startup IMU references, then wires the
-    SAME front-end the replay path uses (``cam`` + ``imu_cam``) onto the live
-    sources. The depth matcher rectifies BOTH cameras (``rectify_left=True``)
-    since the raw left is unrectified. Returns
-    ``(device, (cam_flow, imu_flow), reactive_flows, ui)``; the caller starts the
-    threads and releases ``device`` when the run ends.
-
-    Hardware-only: validated on the bench, not in the offline test harness.
+    The shared half of :func:`build_live`, exposed for visualisers that consume
+    ``frame.depth`` / ``imucam.sample`` directly and need no odometry/backend/slam
+    (e.g. the image|depth|IMU triplet). The depth matcher rectifies BOTH cameras
+    (``rectify_left=True``) since the raw left is unrectified. Returns
+    ``(device, cam_flow, imu_flow, cal)`` where ``cal`` is the live-calibration
+    bundle (``cal.imu_calibration`` etc.); the caller starts the threads and
+    releases ``device`` when the run ends. Hardware-only.
     """
     from .lib.oak_live import SharedLiveDevice
     from .lib.live_calib import read_live_calibration
@@ -176,11 +193,31 @@ def build_live(bus: Bus, *, width: int = 640, height: int = 400, fps: int = 20,
                                 recalibrate_bias=recalibrate_bias)
     matcher = SGMStereoMatcher.from_calib(cal.calib, cal.sgm_cfg,
                                           rectify_left=True)
-
     imu_flow = ImuCamFlow(bus, LiveImuSource(device), matcher=matcher,
                           calibration=cal.imu_calibration,
-                          latest_only=realtime_latest)
+                          latest_only=latest_only)
     cam_flow = CamFlow(bus, LiveCamSource(device), fps=fps, realtime=True)
+    return device, cam_flow, imu_flow, cal
+
+
+def build_live(bus: Bus, *, width: int = 640, height: int = 400, fps: int = 20,
+               kf_every: int = 5, use_gyro: bool = True, depth_fast: bool = True,
+               recalibrate_bias: bool = False, with_backend_slam: bool = True,
+               realtime_latest: bool = False,
+               ui=None, slam_cfg: SlamConfig | None = None):
+    """Construct the live OAK-D graph off ONE shared device.
+
+    Opens the device to read calibration + startup IMU references, then wires the
+    SAME front-end the replay path uses (``cam`` + ``imu_cam``) onto the live
+    sources. Returns ``(device, (cam_flow, imu_flow), reactive_flows, ui)``; the
+    caller starts the threads and releases ``device`` when the run ends.
+
+    Hardware-only: validated on the bench, not in the offline test harness.
+    """
+    device, cam_flow, imu_flow, cal = build_live_frontend(
+        bus, width=width, height=height, fps=fps, use_gyro=use_gyro,
+        depth_fast=depth_fast, recalibrate_bias=recalibrate_bias,
+        latest_only=realtime_latest)
 
     ui = ui if ui is not None else UiCollectorFlow(bus)
     flows = build_graph(bus, cal.K, ui=ui, R_imu_cam=cal.R_imu_cam,

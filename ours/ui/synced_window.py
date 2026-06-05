@@ -12,14 +12,21 @@ pipeline)::
 
     [ IMAGE · RECT-LEFT | DEPTH · KHAKI (+scale bar) | GYRO chart / ACCEL 3D ]
 
-Two data sources drive the identical window through an injected worker factory:
+The data is **subscribed from the running acquisition front-end** -- the same
+``cam`` + ``imu_cam`` flows the VIO runs. The window builds that front-end on a
+private :class:`~ours.lib.flow.pubsub.Bus` (no odometry/backend/slam) and a
+:class:`~ours.flows.ui.triplet.UiTripletFlow` sink joins ``frame.depth`` (the
+rectified-left image + metric depth the depth task emits) with ``imucam.sample``
+(the calibrated IMU rows for that frame) by ``seq``. No second device, no second
+SGM: the triplet is literally the pipeline's output. Two sources drive the
+identical window through an injected worker factory:
 
-* **Live** (:class:`LiveTripletWorker`, default): taps the two RAW OAK-D cameras
-  + the IMU, rectifies the left frame and runs our own SGM on the host -- the
-  same real building blocks as :func:`ours.tools.synced_view.run_live`. Bench-only
-  (no device in CI); the offscreen self-test uses the replay worker instead.
-* **Replay** (:class:`ReplayTripletWorker`): replays a recorded session's stored
-  depth + IMU with no device -- fully offline, this is what the self-test drives.
+* **Live** (:class:`LiveTripletWorker`, default): wires the live OAK-D front-end
+  (:func:`ours.app.build_live_frontend`) off one shared device -- bench-only (no
+  device in CI); the offscreen self-test uses the replay worker instead.
+* **Replay** (:class:`ReplayTripletWorker`): wires the recorded-session front-end
+  (:func:`ours.app.build_replay_frontend`) with no device -- fully offline, this
+  is what the self-test drives.
 
 cv2 / pyqtgraph / depthai are all imported lazily (only when this window opens),
 so the base UI stays lightweight.
@@ -31,6 +38,7 @@ import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import numpy as np
 from PyQt6 import QtCore
@@ -78,11 +86,14 @@ class TripletSample:
 
 
 class TripletWorker(threading.Thread):
-    """Base producer: pushes :class:`TripletSample` (then ``None``) onto a queue.
+    """Base producer: subscribe the front-end, render, queue :class:`TripletSample`.
 
-    Subclasses implement :meth:`_produce`, yielding samples; the base handles the
-    queue (drop-newest when full to stay realtime), the stop flag and the END
-    sentinel. ``error`` carries the first fatal reason for the UI to surface.
+    Runs the acquisition graph (built by the subclass' :meth:`_drive`) with a
+    :class:`~ours.flows.ui.triplet.UiTripletFlow` sink. For each joined
+    (image, depth, IMU) unit it ships a finished :class:`TripletSample` (then
+    ``None``). It runs NO device pipeline or SGM itself -- the depth + IMU come
+    straight off the subscribed flows. ``error`` carries the first fatal reason
+    for the UI to surface.
     """
 
     mode = "—"
@@ -92,19 +103,38 @@ class TripletWorker(threading.Thread):
         self.queue: "queue.Queue" = queue.Queue(maxsize=maxsize)
         self.error: str | None = None
         self._stop = threading.Event()
+        self._imu_calibrated = False
 
     def stop(self) -> None:
         self._stop.set()
 
     def run(self) -> None:                                          # noqa: D401
+        from ..flows.ui.triplet import UiTripletFlow
+        from ..lib.flow.pubsub import Bus
+
+        t0_ns: list[int | None] = [None]
+
+        def on_triplet(seq, ts_ns, gray_left, depth_m, gyro, accel) -> None:
+            if t0_ns[0] is None:
+                t0_ns[0] = ts_ns
+            # Stay realtime: if the UI hasn't drained the last overlays, drop this
+            # one rather than letting the worker queue back up.
+            if self.queue.full():
+                return
+            sample = TripletSample(
+                gray_left=gray_left, depth_m=depth_m,
+                gyro_rows=np.asarray(gyro, dtype=np.float64),
+                accel_rows=np.asarray(accel, dtype=np.float64),
+                seq=int(seq), t_s=(ts_ns - t0_ns[0]) * 1e-9,
+                frame_label="IMU frame", imu_calibrated=self._imu_calibrated)
+            try:
+                self.queue.put_nowait(sample)
+            except queue.Full:
+                pass                       # drop to stay realtime
+
+        bus = Bus()
         try:
-            for sample in self._produce():
-                if self._stop.is_set():
-                    break
-                try:
-                    self.queue.put_nowait(sample)
-                except queue.Full:
-                    pass                       # drop to stay realtime
+            self._drive(bus, UiTripletFlow(bus, on_triplet))
         except Exception as exc:               # surface, don't crash the UI
             self.error = str(exc)
         finally:
@@ -113,12 +143,18 @@ class TripletWorker(threading.Thread):
             except queue.Full:
                 pass
 
-    def _produce(self):
+    def _drive(self, bus, sink) -> None:
+        """Build + run the acquisition graph feeding ``sink`` until stopped/drained."""
         raise NotImplementedError
 
 
 class ReplayTripletWorker(TripletWorker):
-    """Replay a recorded session's stored depth + IMU (no device, fully offline)."""
+    """Drive the recorded-session front-end and tap depth + IMU (fully offline).
+
+    ``calibration`` is the IMU correction the ``imu_cam`` flow applies (``None`` ->
+    the subscribed IMU is raw, the title shows ``RAW``); pass a non-identity
+    :class:`~ours.lib.imu.imu_calib.ImuCalibration` to show ``CALIBRATED``.
+    """
 
     mode = "REPLAY"
 
@@ -126,53 +162,49 @@ class ReplayTripletWorker(TripletWorker):
                  max_frames: int | None = None, calibration=None) -> None:
         super().__init__()
         self._session_dir = session_dir
-        self._fps = max(float(fps), 1e-3)
         self._max_frames = max_frames
         self._calib = calibration
+        # ``fps`` is accepted for call-site compatibility; the replay cam flow
+        # drives the schedule itself (full speed), so there is no UI-side throttle.
 
-    def _produce(self):
-        from ..lib import SessionReader, slice_imu
+    def _drive(self, bus, sink) -> None:
+        from ..app import build_replay_frontend
+        from ..lib.io.reader import SessionReader
 
-        reader = SessionReader(self._session_dir)
+        reader = SessionReader(Path(self._session_dir))
         if len(reader) == 0:
             self.error = f"no frames in {self._session_dir}"
             return
-        calib = self._calib
-        calibrated = calib is not None and not calib.is_identity
-        imu = reader.load_imu()
-        ts_i, gyro, accel = imu["ts_ns"], imu["gyro"], imu["accel"]
-        frame_ts = [int(r["ts_ns"]) for r in reader._frames]
-        period = 1.0 / self._fps
-        n = len(reader) if self._max_frames is None \
-            else min(len(reader), self._max_frames)
-        for i in range(n):
-            if self._stop.is_set():
-                return
-            t0 = time.perf_counter()
-            fr = reader.load_frame(i)
-            t_prev = frame_ts[0] if i == 0 else frame_ts[i - 1]
-            seg = slice_imu(ts_i, gyro, accel, t_prev, frame_ts[i],
-                            bracket=False)
-            grows = np.asarray(seg.gyro, dtype=np.float64)
-            arows = np.asarray(seg.accel, dtype=np.float64)
-            if calibrated:
-                grows, arows = calib.apply(grows, arows)
-            yield TripletSample(
-                gray_left=fr.gray_left, depth_m=fr.depth_m,
-                gyro_rows=grows, accel_rows=arows,
-                seq=fr.seq, t_s=fr.ts_s, frame_label="IMU frame",
-                imu_calibrated=calibrated)
-            dt = period - (time.perf_counter() - t0)
-            if dt > 0:
-                self._stop.wait(dt)
+        self._imu_calibrated = (self._calib is not None
+                                and not self._calib.is_identity)
+        cam_flow, imu_flow = build_replay_frontend(
+            bus, reader, depth_fast=True,
+            max_frames=int(self._max_frames or 0), calibration=self._calib)
+        sink.start()
+        imu_flow.start()
+        cam_flow.start()
+        try:
+            while not self._stop.is_set() and cam_flow.is_alive():
+                self._stop.wait(0.02)
+            # Drain the graph BEFORE teardown so every frame's triplet reaches the
+            # sink (mirrors ours.app.run_replay's ordering).
+            if not self._stop.is_set():
+                sink.done.wait(timeout=10.0)
+        finally:
+            cam_flow.stop()
+            imu_flow.stop()
+            sink.stop()
 
 
 class LiveTripletWorker(TripletWorker):
-    """Live (image, depth, IMU) from a connected OAK-D -- bench-only.
+    """Drive the live OAK-D acquisition front-end and tap depth + IMU -- bench-only.
 
-    Taps the two RAW cameras + IMU, rectifies the left frame and runs our SGM on
-    the host (no chip StereoDepth), exactly as :func:`ours.tools.synced_view.run_live`
-    does -- so the triplet shown is the real VIO pipeline input. Not exercised in
+    Wires the SAME live ``cam`` + ``imu_cam`` front-end the VIO runs
+    (:func:`ours.app.build_live_frontend`) off one shared device and subscribes
+    ``frame.depth`` + ``imucam.sample``, so the triplet shown is literally the
+    pipeline's output (no second device, no second SGM). It builds NO
+    odometry/backend/slam -- the triplet needs none -- and runs the front-end
+    latest-only so the live view stays fresh (bounded latency). Not exercised in
     CI (needs hardware); confirm on the bench.
     """
 
@@ -183,123 +215,25 @@ class LiveTripletWorker(TripletWorker):
         super().__init__()
         self._w, self._h, self._fps, self._fast = width, height, int(fps), fast
 
-    def _produce(self):
-        import cv2
-        import depthai as dai
+    def _drive(self, bus, sink) -> None:
+        from ..app import build_live_frontend
 
-        from ..lib import SGMStereoMatcher, StereoCalib
-        from ..lib.config.resolution import ResolutionProfile
-
-        left_socket = dai.CameraBoardSocket.CAM_B
-        right_socket = dai.CameraBoardSocket.CAM_C
-        res = ResolutionProfile.for_resolution(self._w, self._h)
-        cfg = res.sgm(fast=self._fast)
-
-        with dai.Pipeline() as p:
-            left = p.create(dai.node.Camera).build(left_socket,
-                                                   sensorFps=self._fps)
-            right = p.create(dai.node.Camera).build(right_socket,
-                                                    sensorFps=self._fps)
-            imu = p.create(dai.node.IMU)
-            imu.enableIMUSensor([dai.IMUSensor.ACCELEROMETER_RAW,
-                                 dai.IMUSensor.GYROSCOPE_RAW], 200)
-            imu.setBatchReportThreshold(1)
-            imu.setMaxBatchReports(10)
-            left_out = left.requestOutput((self._w, self._h))
-            right_out = right.requestOutput((self._w, self._h))
-            q_left = left_out.createOutputQueue(maxSize=4, blocking=False)
-            q_right = right_out.createOutputQueue(maxSize=4, blocking=False)
-            q_imu = imu.out.createOutputQueue(maxSize=50, blocking=False)
-            p.start()
-
-            ch = p.getDefaultDevice().readCalibration()
-
-            def _intr(sock):
-                Ki = np.array(ch.getCameraIntrinsics(sock, self._w, self._h),
-                              dtype=np.float64)
-                dist = list(ch.getDistortionCoefficients(sock))
-                return {"fx": float(Ki[0, 0]), "fy": float(Ki[1, 1]),
-                        "cx": float(Ki[0, 2]), "cy": float(Ki[1, 2]),
-                        "dist": [float(x) for x in dist],
-                        "width": int(self._w), "height": int(self._h)}
-
-            T_lr = np.array(ch.getCameraExtrinsics(left_socket, right_socket),
-                            dtype=np.float64).reshape(4, 4)
-            calib = StereoCalib.from_json({
-                "intrinsics_left": _intr(left_socket),
-                "intrinsics_right": _intr(right_socket),
-                "T_left_right": T_lr.tolist(),
-            })
-            matcher = SGMStereoMatcher.from_calib(calib, cfg, rectify_left=True)
-            dummy = np.zeros((self._h, self._w), np.uint8)
-            matcher.dense_depth(dummy, dummy)          # one-time JIT warmup
-
-            # Load this device's cached IMU calibration (gyro bias + accel
-            # affine) so the synced view shows CALIBRATED IMU -- the same
-            # correction the imucam.sample packet carries. Missing -> raw.
-            from ..lib.imu.imu_calib import ImuCalibration
-            from ..lib.oak_live import _read_device_id
-            imu_calib = ImuCalibration.load(_read_device_id(p))
-            imu_calibrated = not imu_calib.is_identity
-
-            def _as_gray(msg):
-                g = msg.getCvFrame()
-                if g.ndim == 3:
-                    g = cv2.cvtColor(g, cv2.COLOR_BGR2GRAY)
-                return g
-
-            pend_l: dict[int, np.ndarray] = {}
-            pend_r: dict[int, np.ndarray] = {}
-            t0 = time.monotonic()
-            while p.isRunning() and not self._stop.is_set():
-                got = False
-                while True:
-                    m = q_left.tryGet()
-                    if m is None:
-                        break
-                    pend_l[m.getSequenceNum()] = _as_gray(m)
-                    got = True
-                while True:
-                    m = q_right.tryGet()
-                    if m is None:
-                        break
-                    pend_r[m.getSequenceNum()] = _as_gray(m)
-                    got = True
-
-                grows: list = []
-                arows: list = []
-                msg = q_imu.tryGet()
-                while msg is not None:
-                    for pkt in msg.packets:
-                        a, g = pkt.acceleroMeter, pkt.gyroscope
-                        av = [a.x, a.y, a.z]
-                        gv = [g.x, g.y, g.z]
-                        if np.all(np.isfinite(av)):
-                            arows.append(av)
-                        if np.all(np.isfinite(gv)):
-                            grows.append(gv)
-                    msg = q_imu.tryGet()
-
-                common = pend_l.keys() & pend_r.keys()
-                if common:
-                    seq = max(common)
-                    gl, gr = pend_l[seq], pend_r[seq]
-                    pend_l = {k: v for k, v in pend_l.items() if k > seq}
-                    pend_r = {k: v for k, v in pend_r.items() if k > seq}
-                    rect_left, depth = matcher.dense_depth_rectified_left(gl, gr)
-                    g_arr = np.asarray(grows, dtype=np.float64)
-                    a_arr = np.asarray(arows, dtype=np.float64)
-                    if imu_calibrated:
-                        g_arr, a_arr = imu_calib.apply(g_arr, a_arr)
-                    yield TripletSample(
-                        gray_left=np.clip(rect_left, 0, 255).astype(np.uint8),
-                        depth_m=depth,
-                        gyro_rows=g_arr,
-                        accel_rows=a_arr,
-                        seq=int(seq), t_s=time.monotonic() - t0,
-                        frame_label="IMU frame", imu_calibrated=imu_calibrated)
-                if not got:
-                    self._stop.wait(0.002)
+        device, cam_flow, imu_flow, cal = build_live_frontend(
+            bus, width=self._w, height=self._h, fps=self._fps,
+            depth_fast=self._fast, latest_only=True)
+        self._imu_calibrated = not cal.imu_calibration.is_identity
+        sink.start()
+        imu_flow.start()
+        cam_flow.start()
+        try:
+            while not self._stop.is_set() and cam_flow.is_alive():
+                self._stop.wait(0.05)
+        finally:
+            cam_flow.stop()
+            imu_flow.stop()
+            sink.done.wait(timeout=5.0)
+            sink.stop()
+            device.release()
 
 
 WorkerFactory = Callable[[], TripletWorker]

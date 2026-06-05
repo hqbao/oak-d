@@ -63,9 +63,8 @@ class _DeadWorker(TripletWorker):
 
     mode = "LIVE"
 
-    def _produce(self):
+    def _drive(self, bus, sink):
         raise RuntimeError("X_LINK_DEVICE_NOT_FOUND")
-        yield  # pragma: no cover  (makes this a generator)
 
 
 def test_happy_path(app) -> None:

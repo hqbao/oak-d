@@ -117,13 +117,18 @@ One thread per flow; **one Task per file**; a `*_flow.py` only wires the tasks.
 cam ──cam.sync──► imu_cam ──imucam.sample──► odometry ──pose.odom──► ui-collector, ui-render
                           ──frame.depth─────►          ──frame.tracks─► ui-tracks (keypoints view)
                           ──imu.raw───────► (visualiser) ──keyframe──► backend, slam
+                          (imucam.sample + frame.depth ──► ui-triplet, the image|depth|IMU view)
                                                        backend ──pose.refined──► ui-collector
                                                        slam    ──loop.correction──► ui-collector
 ```
 
 Edges above are exactly the `self.on(...)` subscriptions in each `*_flow.py`.
 There is ONE acquisition front-end (`cam` + `imu_cam`) shared by the VIO
-and the camera/IMU visualiser — no separate capture monolith. Things worth
+and the visualisers — no separate capture monolith. The in-app visualiser
+windows are pure Bus **sinks** built on the same flows: the keypoint-depth view
+subscribes `frame.tracks` (`ui-tracks`), the image|depth|IMU triplet subscribes
+`frame.depth` + `imucam.sample` joined by seq (`ui-triplet`), and the camera/IMU
+view subscribes `imucam.sample` — none runs its own device pipeline. Things worth
 noting because the obvious guess is wrong:
 
 - **depth is a task INSIDE the `imu_cam` flow**, not a separate flow: it is just a
@@ -241,7 +246,8 @@ queue that raises if read post-stop).
 - `slam/`: `slam_step.py`, `publish_correction.py`, `slam_flow.py`.
 - `ui/`: `collect_odom.py`, `collect_refined.py`, `collect_correction.py`,
   `collector.py`, `render_pose.py`, `render.py`, `render_tracks.py`, `tracks.py`
-  (the keypoint-depth sink).
+  (the keypoint-depth sink), `stash_imucam.py` + `render_triplet.py` + `triplet.py`
+  (the image|depth|IMU triplet sink: joins `frame.depth` + `imucam.sample` by seq).
 
 ---
 
