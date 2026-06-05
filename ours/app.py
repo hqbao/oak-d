@@ -1,8 +1,8 @@
 """Wire and run the ``ours`` VIO as a graph of flows.
 
-This is the live-pipeline assembler: it creates one :class:`~ours.flows.core.pubsub.Bus`,
+This is the live-pipeline assembler: it creates one :class:`~ours.lib.flow.pubsub.Bus`,
 constructs the six flows (capture, depth, odometry, backend, slam, ui) and starts
-their threads. The flows talk only over the bus (see ``ours.flows.core.topics``).
+their threads. The flows talk only over the bus (see ``ours.lib.flow.topics``).
 
 Run it in **replay mode** over a recorded session -- the offline harness that
 drives the whole graph without a camera, so the flow decomposition can be
@@ -30,7 +30,7 @@ from .flows.ui import UiCollectorFlow
 from .lib.io.reader import SessionReader
 from .lib.odometry.odometry import OdometryConfig
 from .lib.loop.slam import SlamConfig
-from .flows.core.pubsub import Bus
+from .lib.flow.pubsub import Bus
 from .lib.stereo.stereo import SGMConfig, SGMStereoMatcher
 
 

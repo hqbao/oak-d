@@ -6,9 +6,9 @@ topics and one odometry flow serves both.
 """
 from __future__ import annotations
 
-from ..core import topics
-from ..core.messages import ImuInit, ImuPrior, RawFrame
-from ..core.task import Task
+from ...lib.flow import topics
+from ...lib.flow.messages import ImuInit, ImuPrior, RawFrame
+from ...lib.flow.task import Task
 
 
 class PublishCapture(Task):

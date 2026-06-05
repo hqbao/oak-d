@@ -1,8 +1,8 @@
 """``render_pose`` task: hand each ``pose.odom`` to the viewer callback."""
 from __future__ import annotations
 
-from ..core.messages import PoseMsg
-from ..core.task import Task
+from ...lib.flow.messages import PoseMsg
+from ...lib.flow.task import Task
 
 
 class RenderPose(Task):

@@ -8,7 +8,7 @@ own inbox queue, so the real work always runs on the *subscribing* flow's thread
 (actor model) -- the publish call itself stays cheap and non-blocking.
 
 Topics are plain strings. The canonical set used by the live pipeline lives in
-``ours.flows.core.topics``.
+``ours.lib.flow.topics``.
 """
 from __future__ import annotations
 

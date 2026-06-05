@@ -22,7 +22,7 @@ class Task:
     def run(self, ctx: Any, msg: Any) -> Any:
         """Process ``msg`` and return the value for the next task.
 
-        ``ctx`` is the owning flow's :class:`~ours.flows.core.flow.FlowContext`
+        ``ctx`` is the owning flow's :class:`~ours.lib.flow.flow.FlowContext`
         (gives access to the bus and the flow-local ``state`` dict). Return
         ``None`` to halt the chain for this message.
         """

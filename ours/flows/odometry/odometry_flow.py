@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from ..core import Flow, Bus, topics
+from ...lib.flow import Flow, Bus, topics
 from ...lib.odometry.odometry import OdometryConfig, RGBDVisualOdometry
 from .route_imu import RouteImu
 from .process_vo import ProcessVO

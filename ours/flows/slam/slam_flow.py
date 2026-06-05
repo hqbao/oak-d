@@ -9,7 +9,7 @@ Wires the two slam tasks (one file each) into a reactive flow over ``keyframe``:
 """
 from __future__ import annotations
 
-from ..core import Flow, Bus, topics
+from ...lib.flow import Flow, Bus, topics
 from ...lib.loop.slam import SlamConfig, SlamMap
 from .slam_step import SlamStep
 from .publish_correction import PublishCorrection

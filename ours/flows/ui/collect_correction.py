@@ -1,8 +1,8 @@
 """``collect_correction`` task: append each ``loop.correction`` to the buffer."""
 from __future__ import annotations
 
-from ..core.messages import LoopCorrection
-from ..core.task import Task
+from ...lib.flow.messages import LoopCorrection
+from ...lib.flow.task import Task
 
 
 class CollectCorrection(Task):

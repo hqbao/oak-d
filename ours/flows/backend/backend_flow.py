@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from ..core import Flow, Bus, topics
+from ...lib.flow import Flow, Bus, topics
 from ...lib.backend.bundle import BAConfig
 from ...lib.backend.windowed import WindowedBAMap, WindowedConfig
 from .run_ba import RunBA

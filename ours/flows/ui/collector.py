@@ -9,8 +9,8 @@ its message into the flow's public buffers:
 """
 from __future__ import annotations
 
-from ..core import Flow, Bus, topics
-from ..core.messages import LoopCorrection
+from ...lib.flow import Flow, Bus, topics
+from ...lib.flow.messages import LoopCorrection
 from .collect_odom import CollectOdom
 from .collect_refined import CollectRefined
 from .collect_correction import CollectCorrection

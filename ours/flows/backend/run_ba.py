@@ -3,8 +3,8 @@ from __future__ import annotations
 
 import numpy as np
 
-from ..core.messages import Keyframe, PoseMsg
-from ..core.task import Task
+from ...lib.flow.messages import Keyframe, PoseMsg
+from ...lib.flow.task import Task
 from ...lib.backend.windowed import WindowedBAMap
 
 

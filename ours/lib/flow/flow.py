@@ -2,7 +2,7 @@
 
 A Flow owns a single thread. Inside it, tasks run one after another -- the output
 of one task is the input of the next. Flows never call each other directly; they
-communicate only through the :class:`~ours.flows.core.pubsub.Bus`.
+communicate only through the :class:`~ours.lib.flow.pubsub.Bus`.
 
 Two shapes of flow:
 

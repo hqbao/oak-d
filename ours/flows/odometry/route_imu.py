@@ -2,14 +2,14 @@
 
 Routed by message type on ``imu.sample``:
 
-* :class:`~ours.flows.core.messages.ImuInit`  -- the startup gravity-align accel.
-* :class:`~ours.flows.core.messages.ImuPrior` -- this frame's gyro rotation prior,
+* :class:`~ours.lib.flow.messages.ImuInit`  -- the startup gravity-align accel.
+* :class:`~ours.lib.flow.messages.ImuPrior` -- this frame's gyro rotation prior,
   keyed by ``seq`` so the matching depth frame can pick it up.
 """
 from __future__ import annotations
 
-from ..core.messages import ImuInit, ImuPrior
-from ..core.task import Task
+from ...lib.flow.messages import ImuInit, ImuPrior
+from ...lib.flow.task import Task
 
 
 class RouteImu(Task):

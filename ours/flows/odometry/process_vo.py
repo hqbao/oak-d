@@ -1,9 +1,9 @@
 """``process_vo`` task: gravity-align, pull the gyro prior, run RGB-D PnP."""
 from __future__ import annotations
 
-from ..core.messages import DepthFrame, ImuPrior
-from ..core.runtime import NUMBA_PARALLEL_LOCK
-from ..core.task import Task
+from ...lib.flow.messages import DepthFrame, ImuPrior
+from ...lib.flow.runtime import NUMBA_PARALLEL_LOCK
+from ...lib.flow.task import Task
 from ...lib.odometry.odometry import RGBDVisualOdometry
 from .step import Step
 

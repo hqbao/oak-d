@@ -9,7 +9,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from ..core.messages import DepthFrame
+from ...lib.flow.messages import DepthFrame
 
 
 @dataclass

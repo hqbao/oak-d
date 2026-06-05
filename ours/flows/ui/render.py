@@ -10,8 +10,8 @@ from __future__ import annotations
 
 from typing import Callable
 
-from ..core import Flow, Bus, topics
-from ..core.messages import PoseMsg
+from ...lib.flow import Flow, Bus, topics
+from ...lib.flow.messages import PoseMsg
 from .render_pose import RenderPose
 
 

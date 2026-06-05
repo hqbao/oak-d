@@ -1,9 +1,9 @@
 """``compute_depth`` task: run the SGM matcher on a raw stereo pair."""
 from __future__ import annotations
 
-from ..core.messages import DepthFrame, RawFrame
-from ..core.runtime import NUMBA_PARALLEL_LOCK
-from ..core.task import Task
+from ...lib.flow.messages import DepthFrame, RawFrame
+from ...lib.flow.runtime import NUMBA_PARALLEL_LOCK
+from ...lib.flow.task import Task
 from ...lib.stereo.stereo import SGMStereoMatcher
 
 

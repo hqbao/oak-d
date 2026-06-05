@@ -1,8 +1,8 @@
 """``collect_odom`` task: record each ``pose.odom`` position by sequence."""
 from __future__ import annotations
 
-from ..core.messages import PoseMsg
-from ..core.task import Task
+from ...lib.flow.messages import PoseMsg
+from ...lib.flow.task import Task
 
 
 class CollectOdom(Task):

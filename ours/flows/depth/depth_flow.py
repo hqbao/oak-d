@@ -7,7 +7,7 @@ Wires the two depth tasks (one file each) into a reactive flow:
 """
 from __future__ import annotations
 
-from ..core import Flow, Bus, topics
+from ...lib.flow import Flow, Bus, topics
 from ...lib.stereo.stereo import SGMStereoMatcher
 from .compute_depth import ComputeDepth
 from .publish_depth import PublishDepth

@@ -1,6 +1,6 @@
 """Canonical pub/sub topic names for the live ``ours`` pipeline.
 
-Each constant is the string key used on the :class:`~ours.flows.core.pubsub.Bus`.
+Each constant is the string key used on the :class:`~ours.lib.flow.pubsub.Bus`.
 Keeping them in one place documents the data flow between flows:
 
     capture  --frame.raw-->  depth

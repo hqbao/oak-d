@@ -1,8 +1,8 @@
 """``slam_step`` task: add a keyframe to the SLAM map, optimise on loop close."""
 from __future__ import annotations
 
-from ..core.messages import Keyframe, LoopCorrection
-from ..core.task import Task
+from ...lib.flow.messages import Keyframe, LoopCorrection
+from ...lib.flow.task import Task
 from ...lib.loop.slam import SlamMap
 
 

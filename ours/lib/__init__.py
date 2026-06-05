@@ -1,11 +1,11 @@
-"""``ours.lib`` -- the from-scratch VIO library: pure algorithms + shared helpers.
+"""``ours.lib`` -- the from-scratch VIO library: algorithms + shared helpers.
 
-This package holds ONLY *computation* libraries (no threads, no pub/sub): the
-visual front-end, stereo depth, IMU math, odometry, windowed back-end, loop
-closure / pose-graph SLAM, session IO and resolution profiles, plus the small
-shared ``Pose`` / frame / geometry helpers. The flow-architecture framework
-(threads + pub/sub) deliberately lives OUTSIDE this package, in
-``ours.flows.core``.
+This package holds the project's *libraries* -- reusable code with no behaviour
+of its own: the visual front-end, stereo depth, IMU math, odometry, windowed
+back-end, loop closure / pose-graph SLAM, session IO and resolution profiles,
+the small shared ``Pose`` / frame / geometry helpers, AND the flow-architecture
+machinery (``flow/``). The concrete live flows that USE these libraries live in
+``ours.flows``.
 
 Modules are grouped into subpackages for clarity:
 
@@ -18,11 +18,12 @@ Modules are grouped into subpackages for clarity:
     io/        reader, synced                       (session readers)
     config/    resolution                           (resolution profiles)
     misc/      frames, geometry, pose, pngio        (shared helpers)
+    flow/      flow, task, pubsub, messages, ...    (flow framework library)
 
 The flat re-exports below are the stable public API: ``from ours.lib import
-RGBDVisualOdometry, ORB, SessionReader, ...``. Live-pipeline orchestration
-(threads + pub/sub) lives in ``ours.flows`` (framework in ``ours.flows.core``);
-offline tools call this library directly.
+RGBDVisualOdometry, ORB, SessionReader, ...``. The live, threaded pipeline is
+assembled in ``ours.flows`` (each concrete flow uses ``ours.lib.flow`` plus the
+algorithm libraries); offline tools call the algorithm libraries directly.
 """
 from .frontend.frontend import FrontendConfig, KLTFrontend, TrackState
 from .misc.geometry import backproject, valid_mask

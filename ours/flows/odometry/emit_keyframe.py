@@ -6,9 +6,9 @@ keyframe's lateral acceleration would bias the gravity direction).
 """
 from __future__ import annotations
 
-from ..core import topics
-from ..core.messages import Keyframe
-from ..core.task import Task
+from ...lib.flow import topics
+from ...lib.flow.messages import Keyframe
+from ...lib.flow.task import Task
 from ...lib.odometry.odometry import RGBDVisualOdometry
 from .step import Step
 

@@ -1,9 +1,9 @@
 """``publish_refined`` task: emit the BA-refined pose on ``pose.refined``."""
 from __future__ import annotations
 
-from ..core import topics
-from ..core.messages import PoseMsg
-from ..core.task import Task
+from ...lib.flow import topics
+from ...lib.flow.messages import PoseMsg
+from ...lib.flow.task import Task
 
 
 class PublishRefined(Task):
