@@ -26,6 +26,7 @@ TRACE_PATH  = "#7cff5c"   # trajectory line (NVG green)
 AXIS_N      = "#ff3b30"   # North/Forward — red
 AXIS_E      = "#7cff5c"   # East/Right    — green
 AXIS_U      = "#5ce1ff"   # Up            — HUD cyan
+IMU_ACCEL   = "#b388ff"   # accel vector — violet (clear of amber/red/triad)
 
 BTN_BG      = "#1a2010"
 BTN_HOV     = "#2a3320"
@@ -85,6 +86,11 @@ QLabel#ImuCamStatus {{
     color: {TEXT_DIM};
     font-size: 11px;
     padding: 2px 4px;
+}}
+QWidget#Accel3DView, PlotWidget#GyroPlot {{
+    background-color: {PANEL};
+    border: 1px solid {PANEL_EDGE};
+    border-radius: 4px;
 }}
 
 QPushButton {{

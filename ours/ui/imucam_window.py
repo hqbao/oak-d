@@ -8,10 +8,15 @@ acquisition flows -- :class:`~ours.flows.cam_reader.CamReaderFlow` and
 widget. No cv2 window, no subprocess: the synced view lives inside the pose
 viewer application.
 
-The drawing is the same honest renderer the dev tool uses
-(:mod:`ours.lib.viz.imucam_render`) -- nothing is computed in a parallel pipeline
-to fill the panels; each panel is exactly what the packet carries. cv2 is pulled
-only by that renderer (when this window is opened), so the base UI stays cv2-free.
+The layout is three honest panels, each showing exactly what the packet carries
+(no parallel pipeline):
+
+    [ left | right cameras ]              -- cv2 render (ours.lib.viz)
+    [ gyro auto-scaling line chart | accel interactive 3D vector ]  -- pyqtgraph
+
+The gyro chart auto-ranges its Y axis; the accel view is a real OpenGL 3D scene
+the user can orbit with the mouse and snap to BACK / LEFT / TOP. cv2 and pyqtgraph
+are pulled only when this window is opened, so the base UI stays lightweight.
 
 * **Live** (default): ``LiveCamSource`` + ``LiveImuSource`` -- the OAK-D is
   single-client, so the caller must release the VIO device first (the menu does
@@ -28,15 +33,16 @@ from collections.abc import Callable
 import numpy as np
 from PyQt6 import QtCore
 from PyQt6.QtGui import QImage, QPixmap
-from PyQt6.QtWidgets import QLabel, QSizePolicy, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import QLabel, QSizePolicy, QSplitter, QVBoxLayout, QWidget
 
 from ..flows.cam_reader import CamReaderFlow
 from ..flows.cam_reader.sources import CamSource
 from ..flows.imu_reader import ImuReaderFlow
 from ..flows.imu_reader.sources import ImuSource
 from ..lib.flow import Bus, Flow, topics
-from ..lib.viz.imucam_render import GyroChart, compose
+from ..lib.viz.imucam_render import render_cameras
 from . import theme
+from .imu_panels import Accel3DView, GyroPlot
 
 # (cam source, imu source) factory -- injected so the window runs live (default)
 # or off a recorded session (self-test) with identical rendering.
@@ -99,34 +105,50 @@ class ImuCamWindow(QWidget):
 
         self.setWindowTitle("Camera + IMU — synced (live)")
         self.setObjectName("ImuCamWindow")
-        self.resize(1280, 420)
-        # Keep the 4-panel row legible: never let the window collapse to a
-        # sliver (the view is horizontally Ignored, so width is otherwise
-        # unconstrained). A tactical viewer must not shrink telemetry away.
-        self.setMinimumSize(720, 360)
+        self.resize(1280, 760)
+        # Keep the panels legible: never let the window collapse to a sliver.
+        # A tactical viewer must not shrink telemetry away.
+        self.setMinimumSize(820, 540)
         self.setStyleSheet(theme.QSS)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(6, 6, 6, 6)
         root.setSpacing(4)
+
+        # Vertical split: cameras on top, IMU panels below — both resizable.
+        split = QSplitter(QtCore.Qt.Orientation.Vertical)
+        split.setChildrenCollapsible(False)
+
         self._view = QLabel("starting…")
         self._view.setObjectName("ImuCamView")
         self._view.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-        self._view.setMinimumHeight(360)
-        # The frame is drawn by scaling the rendered pixmap to the LABEL's own
-        # size. The label must NOT report that pixmap as its size hint, or the
-        # window grows to fit it, which enlarges the label, which scales the
-        # pixmap bigger… a feedback loop that stretches the window wider every
-        # frame. Ignored size policy breaks the loop: the layout fixes the
-        # label size, the pixmap just fits inside it.
+        self._view.setMinimumHeight(220)
+        # The camera frame is drawn by scaling the rendered pixmap to the
+        # LABEL's own size. The label must NOT report that pixmap as its size
+        # hint, or the window grows to fit it, which enlarges the label, which
+        # scales the pixmap bigger… a feedback loop that stretches the window.
+        # Ignored size policy breaks the loop: the splitter fixes the label
+        # size, the pixmap just fits inside it.
         self._view.setSizePolicy(QSizePolicy.Policy.Ignored,
                                  QSizePolicy.Policy.Ignored)
+        split.addWidget(self._view)
+
+        # IMU row: auto-scaling gyro line chart | interactive 3D accel vector.
+        imu_row = QSplitter(QtCore.Qt.Orientation.Horizontal)
+        imu_row.setChildrenCollapsible(False)
+        self._gyro = GyroPlot()
+        self._accel = Accel3DView()
+        imu_row.addWidget(self._gyro)
+        imu_row.addWidget(self._accel)
+        imu_row.setSizes([640, 640])
+        split.addWidget(imu_row)
+        split.setSizes([400, 360])
+
         self._status = QLabel("—")
         self._status.setObjectName("ImuCamStatus")
-        root.addWidget(self._view, stretch=1)
+        root.addWidget(split, stretch=1)
         root.addWidget(self._status, stretch=0)
 
-        self._chart = GyroChart()
         self._queue: "queue.Queue" = queue.Queue(maxsize=8)
         self._bus: Bus | None = None
         self._cam: CamReaderFlow | None = None
@@ -166,6 +188,7 @@ class ImuCamWindow(QWidget):
         if self._running:
             return
         self._clear_queue()                  # drop any stale END sentinel
+        self._gyro.clear_history()
         cam_src, imu_src = self._make_sources()
         self._bus = Bus()
         self._sink = _QueueSink(self._bus, self._queue)
@@ -216,8 +239,9 @@ class ImuCamWindow(QWidget):
             self._maybe_report_no_frame()
             return
         self._first_seen = True
-        row = compose(packet, self._chart)               # BGR uint8 (H, W, 3)
-        self._show(row)
+        self._show(render_cameras(packet.gray_left, packet.gray_right))
+        self._gyro.add(packet.gyro)
+        self._accel.set_accel(packet.accel)
         self._set_status(
             f"seq={packet.seq}   imu samples={packet.imu_ts.size}   "
             f"left {packet.gray_left.shape[1]}×{packet.gray_left.shape[0]}",

@@ -123,9 +123,17 @@ primary START/STOP):
   access, so the live VIO pipeline is released first.
   - **Camera + IMU (synced, live)** — opens an *in-app* window (no subprocess)
     that runs the split `cam_reader` + `imu_reader` flows live and draws every
-    synchronised `ImuCamPacket`: `left | right | gyro line chart (deg/s) |
-    accel 3D vector`. Each panel is exactly what the packet carries (no parallel
-    pipeline). This is the view for verifying the camera↔IMU time-sync.
+    synchronised `ImuCamPacket` in three honest panels (each is exactly what the
+    packet carries, no parallel pipeline):
+    - **cameras** — `left | right` stereo pair;
+    - **gyro** — an **auto-scaling** scrolling line chart (deg/s); the Y axis
+      tracks the signal with a minimum span + expand-fast/shrink-slow
+      hysteresis, so a still IMU doesn't strobe;
+    - **accel** — a **real interactive 3D** vector view (OpenGL): orbit it with
+      the mouse and snap to **BACK / LEFT / TOP**; 1 G reference rings and an
+      X/Y/Z body-axis triad make the magnitude and direction readable.
+
+    This is the view for verifying the camera↔IMU time-sync.
   - **Camera + Depth + IMU** triplet (`synced_view --live`) and **Stereo Depth**
     (`stereo_view --live`) launch the proven cv2 viewers in their own process.
 

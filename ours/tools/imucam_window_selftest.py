@@ -21,6 +21,8 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+import numpy as np                                              # noqa: E402
+
 from PyQt6.QtWidgets import QApplication                            # noqa: E402
 
 from ours.flows.cam_reader.sources import ReplayCamSource           # noqa: E402
@@ -93,10 +95,20 @@ def test_happy_path(app, reader: SessionReader) -> None:
 
     pix = win._view.pixmap()
     _check(pix is not None and not pix.isNull(), "widget shows a rendered pixmap")
-    _check(pix.width() > 360 * 3 and pix.height() >= 1,
-           "pixmap spans the cameras + gyro + accel row")
+    _check(pix.width() > 700 and pix.height() >= 1,
+           "camera pixmap spans the stereo pair")
     _check(len(seqs) >= 1, f"status reported rendered packets (saw seq {seqs[:5]})")
     _check(seqs == sorted(seqs), "rendered packets arrive in frame order")
+    # The interactive IMU panels must actually receive the packet data.
+    _check(win._gyro.sample_count >= 1,
+           f"gyro chart fed real samples (n={win._gyro.sample_count})")
+    _check(float(np.linalg.norm(win._accel.accel)) > 0.0,
+           f"accel 3D view fed a real vector (|a|={np.linalg.norm(win._accel.accel):.2f})")
+    # The accel view exposes the three canonical viewpoints (back/left/top).
+    for _name in ("BACK", "LEFT", "TOP"):
+        win._accel.set_view(_name)
+    _check(win._accel._buttons["TOP"].isChecked(),
+           "accel 3D view honours BACK/LEFT/TOP presets")
     # Regression: the window must NOT keep widening frame after frame (the
     # earlier size-feedback loop stretched it horizontally without bound).
     if len(widths) >= 5:
