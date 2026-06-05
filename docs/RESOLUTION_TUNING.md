@@ -110,4 +110,4 @@ Notes:
   lighter than 640×400 while still tracking well. **96×60** is the edge if you
   need maximum lightness.
 - Preview any size live first (matches the VIO depth path exactly):
-  `python ours/tools/stereo_view.py --live --fast --width 160 --height 100`.
+  `python ours/tools/synced_view.py --live --fast --width 160 --height 100`.

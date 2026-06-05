@@ -85,8 +85,8 @@ def test_mainwindow_menus(app):
     assert "Clear Trail" in view
     assert any("Gyroscope" in a for a in cal), cal
     assert any("Accelerometer" in a for a in cal), cal
+    assert any("synced" in a.lower() for a in vis), vis
     assert any("triplet" in a.lower() for a in vis), vis
-    assert any("stereo" in a.lower() for a in vis), vis
 
     # The fake source has no clear_slam_map -> no Clear Keyframes entry.
     assert not any("Keyframe" in a for a in view), view

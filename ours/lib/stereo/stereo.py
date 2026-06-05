@@ -314,8 +314,8 @@ class SGMConfig:
         (``downscale=2`` -> 1/4 the pixels and half the disparity range), 4
         cardinal paths instead of 8, and a smaller census window. Measured to
         keep the depth quality close to the full preset while fitting the live
-        per-frame budget (see ``ours/tools/stereo_view.py --fast``). The full default
-        config stays the offline/accuracy reference.
+        per-frame budget. The full default config stays the offline/accuracy
+        reference.
         """
         return cls(census_radius=2, num_disparities=96, num_paths=4,
                    downscale=2)

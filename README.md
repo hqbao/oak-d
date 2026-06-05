@@ -32,7 +32,6 @@ oak-d/
       vio_run.py         offline scoring of ours f2f/ba/slam/vio vs Basalt
       live_replay.py     replay a recorded session through the live ours pipeline
       synced_view.py     inspect the synced (image, depth, IMU) triplet
-      stereo_view.py     inspect our SGM depth (replay + --live)
       imucam_view.py     cv2 view of the split cam/IMU front-end (left|right|gyro|accel)
       *_selftest.py      regression guards (klt, ba, posegraph, imu_preint, vio_ba, imucam_*)
   baseline/              DepthAI library pipeline (BasaltVIO + RTABMapSLAM)
@@ -141,8 +140,7 @@ primary START/STOP):
     fixed-range TURBO depth colormap (+ scale bar, `valid %`). The IMU shown is
     **calibrated** (`gyro − bias`, accel affine) when a per-device calibration is
     cached — the panel title reads `IMU · CALIBRATED` vs `IMU · RAW`. Live off the
-    OAK-D (host SGM) or a recorded session. **Stereo Depth** (`stereo_view --live`)
-    launches the proven cv2 viewer in its own process.
+    OAK-D (host SGM) or a recorded session.
 
 The same synced split front-end can be inspected **without the GUI** — a cv2
 window over a recorded session or the live device:

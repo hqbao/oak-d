@@ -241,7 +241,7 @@ Do these on the `vio` path (`vio_window.py`) so production `ours` stays safe.
 
 # Our from-scratch depth vs the chip depth (oracle)
 .venv/bin/python ours/tools/stereo_selftest.py               # match rate + rel err on gold
-.venv/bin/python ours/tools/stereo_view.py --session sessions/gold/<name>  # eyeball replay
+.venv/bin/python ours/tools/synced_view.py --session sessions/gold/<name>  # eyeball replay (image|depth|IMU)
 
 # Live-path replay without a device (reproduces the display pipeline frame-for-frame)
 .venv/bin/python ours/tools/live_replay.py --session sessions/gold/<name> \

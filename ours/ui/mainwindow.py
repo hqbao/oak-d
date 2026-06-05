@@ -1,11 +1,7 @@
 """Top-level QMainWindow: header bar, view-preset toolbar, viewport, side panel."""
 from __future__ import annotations
 
-import os
-import subprocess
-import sys
 from collections.abc import Callable
-from pathlib import Path
 
 from PyQt6 import QtCore
 from PyQt6.QtGui import QAction
@@ -19,8 +15,6 @@ from .source import PoseSource
 from . import theme
 from .panels import TelemetryPanel
 from .viewer3d import VIEW_PRESETS, Viewer3D
-
-_REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 def _header(title: str, subtitle: str) -> QWidget:
@@ -147,9 +141,6 @@ class MainWindow(QMainWindow):
         triplet_act = QAction("Camera + Depth + IMU (triplet)…", self)
         triplet_act.triggered.connect(self._launch_triplet)
         vis_menu.addAction(triplet_act)
-        stereo_act = QAction("Stereo Depth…", self)
-        stereo_act.triggered.connect(self._launch_stereo)
-        vis_menu.addAction(stereo_act)
 
     def _release_device(self, reason: str) -> bool:
         """Stop the live source so a calibration/visualize tool can open the device.
@@ -221,25 +212,6 @@ class MainWindow(QMainWindow):
         win.activateWindow()
         win.ensure_started()
         self.statusBar().showMessage("Camera + Depth + IMU triplet opened.", 2500)
-
-    def _launch_stereo(self) -> None:
-        self._launch_tool(["-m", "ours.tools.stereo_view", "--live", "--fast"],
-                          "Stereo depth")
-
-    def _launch_tool(self, args: list[str], label: str) -> None:
-        """Launch a proven live viewer tool in its own process (real data)."""
-        if not self._release_device(f"{label} viewer"):
-            return
-        env = dict(os.environ)
-        env["PYTHONPATH"] = (str(_REPO_ROOT) + os.pathsep
-                             + env.get("PYTHONPATH", ""))
-        try:
-            subprocess.Popen([sys.executable, *args], cwd=str(_REPO_ROOT),
-                             env=env)
-            self.statusBar().showMessage(f"Launched {label} viewer.", 2500)
-        except OSError as e:
-            QMessageBox.warning(self, "Launch failed",
-                                f"Could not start {label}:\n{e}")
 
     # ----------------------------------------------------------------------
 
