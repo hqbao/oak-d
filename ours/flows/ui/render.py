@@ -3,25 +3,16 @@
 Where :class:`~ours.flows.ui.collector.UiCollectorFlow` records poses for offline
 scoring, this sink hands each ``pose.odom`` message to an ``on_pose`` callback --
 the bridge that drives the Qt 3D viewer
-(:class:`~ours.ui.live_source.FlowPoseSource`).
+(:class:`~ours.ui.live_source.FlowPoseSource`). The single task lives in
+:mod:`ours.flows.ui.render_pose`.
 """
 from __future__ import annotations
 
 from typing import Callable
 
-from ...lib.flow import topics
-from ...lib.flow import Flow
-from ...lib.flow.messages import PoseMsg
-from ...lib.flow.pubsub import Bus
-from ...lib.flow.task import Task
-
-
-class _Render(Task):
-    name = "render"
-
-    def run(self, ctx, msg: PoseMsg):
-        ctx.state["on_pose"](msg)
-        return None
+from ..core import Flow, Bus, topics
+from ..core.messages import PoseMsg
+from .render_pose import RenderPose
 
 
 class UiRenderFlow(Flow):
@@ -31,4 +22,4 @@ class UiRenderFlow(Flow):
         super().__init__("ui", bus)
         self.ctx.state["on_pose"] = on_pose
         self.expected_ends = 1                       # only pose.odom carries END
-        self.on(topics.POSE_ODOM, [_Render()])
+        self.on(topics.POSE_ODOM, [RenderPose()])

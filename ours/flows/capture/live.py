@@ -5,10 +5,10 @@ cameras (no VPU StereoDepth) plus the IMU and publishes the SAME topics, so the
 depth / odometry / backend / slam / ui flows are byte-for-byte identical live or
 offline:
 
-* one :class:`~ours.lib.flow.messages.ImuInit` (startup gravity-align accel), then
-* per matched stereo pair, one :class:`~ours.lib.flow.messages.ImuPrior` (the gyro
+* one :class:`~ours.flows.core.messages.ImuInit` (startup gravity-align accel), then
+* per matched stereo pair, one :class:`~ours.flows.core.messages.ImuPrior` (the gyro
   rotation prior integrated since the previous frame) followed by one
-  :class:`~ours.lib.flow.messages.RawFrame` carrying the RAW left + RAW right frames
+  :class:`~ours.flows.core.messages.RawFrame` carrying the RAW left + RAW right frames
   (the depth flow rectifies both).
 
 Only the *capture* concern lives here -- depth, odometry, BA and SLAM are other
@@ -31,9 +31,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from ...lib.flow import topics
+from ..core import SourceFlow, Bus, topics
 from ...lib.config.resolution import ResolutionProfile
-from ...lib.flow import SourceFlow
 from ...lib.imu.accel_calib import AccelCalibration
 from ...lib.imu.calib_store import (
     load_accel_calib,
@@ -42,9 +41,8 @@ from ...lib.imu.calib_store import (
 )
 from ...lib.imu.imu import so3_exp
 from ...lib.io.reader import StereoCalib
-from ...lib.flow.messages import ImuInit, ImuPrior, RawFrame
-from ...lib.flow.pubsub import Bus
-from ...lib.flow.task import Task
+from ..core.messages import ImuInit, ImuPrior, RawFrame
+from .publish_capture import PublishCapture
 
 # Accel leveling only runs when the camera is at rest, detected from the residual
 # of the raw accelerometer against its EMA (recent motion energy, m/s^2). Mirrors
@@ -71,24 +69,11 @@ class LiveCalib:
     accel_align: np.ndarray | None
 
 
-class _PublishCapture(Task):
-    """Route a produced message to its topic by type."""
-
-    name = "publish_capture"
-
-    def run(self, ctx, msg):
-        if isinstance(msg, (ImuInit, ImuPrior)):
-            ctx.bus.publish(topics.IMU_SAMPLE, msg)
-        elif isinstance(msg, RawFrame):
-            ctx.bus.publish(topics.FRAME_RAW, msg)
-        return None
-
-
 class LiveCaptureFlow(SourceFlow):
     def __init__(self, bus: Bus, width: int = 640, height: int = 400,
                  fps: int = 20, depth_fast: bool = True,
                  use_gyro: bool = True, recalibrate_bias: bool = False) -> None:
-        super().__init__("capture", bus, [_PublishCapture()])
+        super().__init__("capture", bus, [PublishCapture()])
         self.width = int(width)
         self.height = int(height)
         self.fps = int(fps)

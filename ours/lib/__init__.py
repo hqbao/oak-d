@@ -1,9 +1,11 @@
 """``ours.lib`` -- the from-scratch VIO library: pure algorithms + shared helpers.
 
-This package holds everything that is *logic* (no threads, no pub/sub): the
+This package holds ONLY *computation* libraries (no threads, no pub/sub): the
 visual front-end, stereo depth, IMU math, odometry, windowed back-end, loop
-closure / pose-graph SLAM, session IO and resolution profiles, plus the core
-``Pose`` / frame helpers.
+closure / pose-graph SLAM, session IO and resolution profiles, plus the small
+shared ``Pose`` / frame / geometry helpers. The flow-architecture framework
+(threads + pub/sub) deliberately lives OUTSIDE this package, in
+``ours.flows.core``.
 
 Modules are grouped into subpackages for clarity:
 
@@ -16,11 +18,10 @@ Modules are grouped into subpackages for clarity:
     io/        reader, synced                       (session readers)
     config/    resolution                           (resolution profiles)
     misc/      frames, geometry, pose, pngio        (shared helpers)
-    flow/      flow, task, pubsub, messages, ...     (flow architecture)
 
 The flat re-exports below are the stable public API: ``from ours.lib import
 RGBDVisualOdometry, ORB, SessionReader, ...``. Live-pipeline orchestration
-(threads + pub/sub) lives in ``ours.lib.flow`` and the ``ours.flows`` package;
+(threads + pub/sub) lives in ``ours.flows`` (framework in ``ours.flows.core``);
 offline tools call this library directly.
 """
 from .frontend.frontend import FrontendConfig, KLTFrontend, TrackState

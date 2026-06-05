@@ -1,10 +1,12 @@
-"""backend flow implementation: windowed bundle adjustment.
+"""backend flow: windowed bundle adjustment.
 
-Tasks (per ``keyframe``):
+Wires the two backend tasks (one file each) into a reactive flow over
+``keyframe``:
 
-1. ``_RunBA`` -- add the keyframe's track snapshot to the sliding window and run
-   BA; if it produced a refined pose, forward it.
-2. ``_PublishRefined`` -- publish the refined pose on ``pose.refined``.
+1. :class:`~ours.flows.backend.run_ba.RunBA` -- add the keyframe's track
+   snapshot to the sliding window and run BA; forward any refined pose.
+2. :class:`~ours.flows.backend.publish_refined.PublishRefined` -- emit it on
+   ``pose.refined``.
 
 The keyframe pose ``T_world_cam`` is inverted to the ``T_cw`` the BA map expects
 (it keeps the map in the raw f2f world frame, exactly like the live worker).
@@ -13,37 +15,11 @@ from __future__ import annotations
 
 import numpy as np
 
-from ...lib.flow import topics
+from ..core import Flow, Bus, topics
 from ...lib.backend.bundle import BAConfig
 from ...lib.backend.windowed import WindowedBAMap, WindowedConfig
-from ...lib.flow import Flow
-from ...lib.flow.messages import Keyframe, PoseMsg
-from ...lib.flow.pubsub import Bus
-from ...lib.flow.task import Task
-
-
-class _RunBA(Task):
-    name = "run_ba"
-
-    def run(self, ctx, kf: Keyframe):
-        if kf.track_ids is None or kf.track_px is None:
-            return None
-        ba: WindowedBAMap = ctx.state["ba"]
-        T_cw = np.linalg.inv(kf.T_world_cam)
-        ba.add_keyframe(T_cw, kf.track_ids, kf.track_px, kf.depth_m,
-                        accel_cam=kf.accel)
-        post = ba.run_ba()                       # refined latest T_cw, or None
-        if post is None:
-            return None
-        return PoseMsg(kf.seq, 0, np.linalg.inv(post), {"refined": True})
-
-
-class _PublishRefined(Task):
-    name = "publish_refined"
-
-    def run(self, ctx, msg: PoseMsg):
-        ctx.bus.publish(topics.POSE_REFINED, msg)
-        return None
+from .run_ba import RunBA
+from .publish_refined import PublishRefined
 
 
 class BackendFlow(Flow):
@@ -53,5 +29,5 @@ class BackendFlow(Flow):
         cfg = WindowedConfig(window=window, kf_every=kf_every,
                              ba=BAConfig(max_iters=iters))
         self.ctx.state["ba"] = WindowedBAMap(K, cfg)
-        self.on(topics.KEYFRAME, [_RunBA(), _PublishRefined()])
+        self.on(topics.KEYFRAME, [RunBA(), PublishRefined()])
         self.forwards_to(topics.POSE_REFINED)

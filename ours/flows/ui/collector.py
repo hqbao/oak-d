@@ -1,43 +1,19 @@
-"""ui collector flow implementation.
+"""ui collector flow: record the streamed trajectory for offline scoring.
 
-Records the trajectory streamed by the pipeline. Three tiny tasks, one per
-subscribed topic, each stash their message into the flow's public buffers:
+Wires three tiny tasks (one file each), one per subscribed topic, each stashing
+its message into the flow's public buffers:
 
-* ``odom``        -- ``{seq: position}`` from ``pose.odom``
-* ``refined``     -- ``{seq: position}`` from ``pose.refined``
-* ``corrections`` -- list of :class:`~ours.lib.flow.messages.LoopCorrection`
+* :class:`~ours.flows.ui.collect_odom.CollectOdom`             -- ``pose.odom``
+* :class:`~ours.flows.ui.collect_refined.CollectRefined`       -- ``pose.refined``
+* :class:`~ours.flows.ui.collect_correction.CollectCorrection` -- ``loop.correction``
 """
 from __future__ import annotations
 
-from ...lib.flow import topics
-from ...lib.flow import Flow
-from ...lib.flow.messages import LoopCorrection, PoseMsg
-from ...lib.flow.pubsub import Bus
-from ...lib.flow.task import Task
-
-
-class _CollectOdom(Task):
-    name = "collect_odom"
-
-    def run(self, ctx, msg: PoseMsg):
-        ctx.state["odom"][msg.seq] = msg.T_world_cam[:3, 3].copy()
-        return None
-
-
-class _CollectRefined(Task):
-    name = "collect_refined"
-
-    def run(self, ctx, msg: PoseMsg):
-        ctx.state["refined"][msg.seq] = msg.T_world_cam[:3, 3].copy()
-        return None
-
-
-class _CollectCorrection(Task):
-    name = "collect_correction"
-
-    def run(self, ctx, msg: LoopCorrection):
-        ctx.state["corrections"].append(msg)
-        return None
+from ..core import Flow, Bus, topics
+from ..core.messages import LoopCorrection
+from .collect_odom import CollectOdom
+from .collect_refined import CollectRefined
+from .collect_correction import CollectCorrection
 
 
 class UiCollectorFlow(Flow):
@@ -52,6 +28,6 @@ class UiCollectorFlow(Flow):
         self.ctx.state["refined"] = self.refined
         self.ctx.state["corrections"] = self.corrections
         self.expected_ends = 3       # pose.odom + pose.refined + loop.correction
-        self.on(topics.POSE_ODOM, [_CollectOdom()])
-        self.on(topics.POSE_REFINED, [_CollectRefined()])
-        self.on(topics.LOOP_CORRECTION, [_CollectCorrection()])
+        self.on(topics.POSE_ODOM, [CollectOdom()])
+        self.on(topics.POSE_REFINED, [CollectRefined()])
+        self.on(topics.LOOP_CORRECTION, [CollectCorrection()])

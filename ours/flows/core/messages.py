@@ -1,6 +1,6 @@
 """Message types passed between flows over the pub/sub bus.
 
-These are plain immutable carriers -- one per topic in ``ours.lib.flow.topics``. Keeping
+These are plain immutable carriers -- one per topic in ``ours.flows.core.topics``. Keeping
 them here documents exactly what each flow consumes and produces, and keeps the
 flows themselves free of ad-hoc dicts.
 

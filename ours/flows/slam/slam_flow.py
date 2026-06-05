@@ -1,49 +1,25 @@
-"""slam flow implementation: loop closure SLAM.
+"""slam flow: loop closure SLAM.
 
-Tasks (per ``keyframe``):
+Wires the two slam tasks (one file each) into a reactive flow over ``keyframe``:
 
-1. ``_SlamStep`` -- add the keyframe to the SLAM map; if it confirmed a loop,
-   optimise the pose graph and forward the rewritten keyframe poses.
-2. ``_PublishCorrection`` -- publish the correction on ``loop.correction``.
+1. :class:`~ours.flows.slam.slam_step.SlamStep` -- add the keyframe; on a
+   confirmed loop, optimise the pose graph and forward the rewritten poses.
+2. :class:`~ours.flows.slam.publish_correction.PublishCorrection` -- emit it on
+   ``loop.correction``.
 """
 from __future__ import annotations
 
-from ...lib.flow import topics
-from ...lib.flow import Flow
+from ..core import Flow, Bus, topics
 from ...lib.loop.slam import SlamConfig, SlamMap
-from ...lib.flow.messages import Keyframe, LoopCorrection
-from ...lib.flow.pubsub import Bus
-from ...lib.flow.task import Task
-
-
-class _SlamStep(Task):
-    name = "slam_step"
-
-    def run(self, ctx, kf: Keyframe):
-        slam: SlamMap = ctx.state["slam"]
-        events = slam.add_keyframe(kf.T_world_cam, kf.gray_left, kf.depth_m,
-                                   seq=kf.seq)
-        if not events:
-            return None
-        slam.optimize()
-        kf_poses = {int(slam.kf_seq[i]): slam.kf_pose[i].copy()
-                    for i in range(len(slam.kf_pose))}
-        return LoopCorrection(kf.seq, kf_poses, len(slam.loop_events))
-
-
-class _PublishCorrection(Task):
-    name = "publish_correction"
-
-    def run(self, ctx, msg: LoopCorrection):
-        ctx.bus.publish(topics.LOOP_CORRECTION, msg)
-        return None
+from .slam_step import SlamStep
+from .publish_correction import PublishCorrection
 
 
 class SlamFlow(Flow):
     def __init__(self, bus: Bus, K, cfg: SlamConfig | None = None) -> None:
         super().__init__("slam", bus)
         self.ctx.state["slam"] = SlamMap(K, cfg or SlamConfig())
-        self.on(topics.KEYFRAME, [_SlamStep(), _PublishCorrection()])
+        self.on(topics.KEYFRAME, [SlamStep(), PublishCorrection()])
         self.forwards_to(topics.LOOP_CORRECTION)
 
     @property
