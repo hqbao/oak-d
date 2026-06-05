@@ -6,7 +6,7 @@ compare each stage's output against the baseline for debugging and accuracy
 measurement.
 
 **Created**: 2026-05-29 (rewrite, principle: "only show real data")
-**Reference pipeline**: `oakd/sources/depthai_slam.py` (live) + `depthai_vio.py` (VIO-only)
+**Reference pipeline**: `baseline/depthai_slam.py` (live) + `depthai_vio.py` (VIO-only)
 **Comparison target**: `skyslam/` (not written yet — detailed plan in `docs/SKYSLAM_RESEARCH.md`)
 
 ---
@@ -114,7 +114,7 @@ be comparing against your own previous fake → meaningless).
 | C1 | Input: IMU sample | ✅ live | `IMU.out` | 200 Hz |
 | C2 | VIO pose (Basalt) | ✅ live | `BasaltVIO.transform` | FLU world |
 | C3 | SLAM pose (RTABMap, loop-corrected) | ✅ live | `RTABMapSLAM.transform` | FLU world |
-| C4 | Keyframe selected | ✅ offline | `rtabmap.db` SQLite (`Node` table) | `tools/extract_kf_from_db.py` — auto-runs after record |
+| C4 | Keyframe selected | ✅ offline | `rtabmap.db` SQLite (`Node` table) | `baseline/tools/extract_kf_from_db.py` — auto-runs after record |
 | C4+ | Loop closure links (rich) | ✅ offline | `rtabmap.db` SQLite (`Link` types 1/2/3) | same tool → `kf_loops.jsonl` |
 | C5 | Loop closure detected (derived) | ⚠️ derived | jump > thr in `odomCorrection` stream | precision OK, no live BoW score |
 | C6 | Tracking lost/recovered | ⚠️ derived | gap > thr in SLAM pose stream | enough to draw a timeline |
@@ -233,7 +233,7 @@ Same schema as C2, with `source = rtabmap_slam` or `sky_slam`.
 - Source: SQLite `rtabmap.db` table `Node`; the pose is a 48-byte BLOB
   (3x4 float32 row-major `[R|t]`), with timestamp in seconds from device
   boot.
-- Extract tool: `tools/extract_kf_from_db.py` — auto-runs at the end of
+- Extract tool: `baseline/tools/extract_kf_from_db.py` — auto-runs at the end of
   `record_session.py` (see the last log line: `kf: N keyframes, M loop
   links`).
 - Auxiliary loop links (C4+) are written in parallel to `kf_loops.jsonl`
@@ -266,7 +266,7 @@ Same schema as C2, with `source = rtabmap_slam` or `sky_slam`.
   noisy correction while the map is still initialising (causes dozens of
   false positives).
 - The BoW schema (`kf_query`, `score`, `inliers`) is only available via
-  SQLite — `tools/extract_kf_from_db.py` already extracts the `Link` table
+  SQLite — `baseline/tools/extract_kf_from_db.py` already extracts the `Link` table
   (loop edges with transform + type) into `kf_loops.jsonl`. The score +
   inlier count are present in the `Link.information` column but are not
   parsed yet (TODO if needed).
@@ -466,11 +466,11 @@ When skyslam reaches each phase, replay these 5 sessions → compute metrics
 Pre-skyslam infra ✅ DONE:
 
 - [x] `oakd/recorder.py` — fan-out tap on every queue
-- [x] `tools/record_session.py` — CLI with `--duration`, `--no-pcl`, `-f`
-- [x] `tools/compare_sessions.py` — ATE/RPE between two pose streams
+- [x] `baseline/tools/record_session.py` — CLI with `--duration`, `--no-pcl`, `-f`
+- [x] `baseline/tools/compare_sessions.py` — ATE/RPE between two pose streams
 - [x] Recorded 6 gold sessions (see `docs/GOLD_SESSIONS.md`)
-- [x] `tools/extract_kf_from_db.py` — extract KF + loops from rtabmap.db
-- [x] `tools/baseline_report.py` — emit Markdown baseline
+- [x] `baseline/tools/extract_kf_from_db.py` — extract KF + loops from rtabmap.db
+- [x] `baseline/tools/baseline_report.py` — emit Markdown baseline
 - [x] Frozen baseline (`docs/GOLD_BASELINE.md`)
 
 Skyslam work — see **`docs/SKYSLAM_RESEARCH.md`** Part 3 for plan v3
@@ -483,8 +483,8 @@ Skyslam work — see **`docs/SKYSLAM_RESEARCH.md`** Part 3 for plan v3
 - **Skyslam plan v3 (research-backed)**: `docs/SKYSLAM_RESEARCH.md`
 - Gold regression suite: `docs/GOLD_SESSIONS.md` + `docs/GOLD_BASELINE.md`
 - Long-term hardware/FC vision: `docs/SKYSLAM_ROADMAP.md`
-- Current SLAM source: `oakd/sources/depthai_slam.py`
-- Current VIO source: `oakd/sources/depthai_vio.py`
+- Current SLAM source: `baseline/depthai_slam.py`
+- Current VIO source: `baseline/depthai_vio.py`
 - Pose data structure: `oakd/pose.py`
 
 ---

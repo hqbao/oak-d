@@ -1,8 +1,8 @@
 """Live RGB-D VIO from the OAK-D using *our* from-scratch odometry.
 
-Unlike :mod:`oakd.sources.depthai_vio` (which reads poses out of DepthAI's
+Unlike :mod:`baseline.depthai_vio` (which reads poses out of DepthAI's
 built-in ``BasaltVIO`` node), this source runs **our own** frame-to-frame
-RGB-D PnP odometry (:class:`oakd.vio.RGBDVisualOdometry`) with depth from our
+RGB-D PnP odometry (:class:`ours.vio.RGBDVisualOdometry`) with depth from our
 **own** SGM stereo matcher. It exists so we can watch our VIO drive the 3D
 viewer in real time and eyeball its quality against Basalt *before* we add
 sliding-window bundle adjustment.

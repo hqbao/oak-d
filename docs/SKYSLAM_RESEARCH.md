@@ -191,7 +191,7 @@ Huber threshold 1.0, LM solver, QR-based square-root marginalization.
 | `Info` | key, value | Build/version metadata. |
 | `Admin` | id, version, key, value | Params used during recording. |
 
-**Action item for future**: extend `tools/extract_kf_from_db.py` to dump `Feature` and `Statistics` tables too. Free data we've been ignoring.
+**Action item for future**: extend `baseline/tools/extract_kf_from_db.py` to dump `Feature` and `Statistics` tables too. Free data we've been ignoring.
 
 #### Link types (full enum)
 
@@ -465,7 +465,7 @@ Each phase has hard **acceptance gate** before moving on. No upgrades to a modul
 2. **Install gtsam python**: `pip install gtsam`. Verify `import gtsam; gtsam.Pose3()` works. If it fails on macOS: fallback to a pure-python Gauss-Newton (300 LOC).
 3. **Download ORB-SLAM3 vocabulary**: ~150 MB `ORBvoc.txt` from UZ-SLAMLab/ORB_SLAM3/Vocabulary → `assets/ORBvoc.txt`. Gitignore. Verify load with pyDBoW3.
 4. **Install pyDBoW3**: `pip install pyDBoW3` (may need to build from source if no wheel). If fails: use minimal in-house BoW (~500 LOC, slower but works).
-5. **Extend rtabmap extractor for new tables**: `tools/extract_kf_from_db.py` add dumps for `Feature` (per-KF ORB) + `Statistics` (per-frame metrics) + `Link type=0` (neighbor edges).
+5. **Extend rtabmap extractor for new tables**: `baseline/tools/extract_kf_from_db.py` add dumps for `Feature` (per-KF ORB) + `Statistics` (per-frame metrics) + `Link type=0` (neighbor edges).
 6. **Add baseline session #7** if needed: `corridor_with_imu_init` — 60s session that includes 3s static start + walk + return. Ensures we can validate IMU init.
 
 **Acceptance gate**: All 6 tasks pass. If raw stereo missing or gtsam install impossible → halt, replan.
@@ -870,7 +870,7 @@ If cutting Phase 8: M3 → ~40 days, M4 → ~55 days. Recommended cut if calenda
 - [ ] **Install pyDBoW3**: `pip install pyDBoW3 && python -c "import pyDBoW3"`.
 - [ ] **Download ORB vocab** to `assets/ORBvoc.txt`.
 - [ ] **Re-read Part 2** (decisions matrix) — confirm decisions still valid.
-- [ ] **Confirm quaternion convention** in existing codebase (`oakd/recorder.py`, `tools/compare_sessions.py`) is Hamilton scalar-first. Document in `skyslam/types.py`.
+- [ ] **Confirm quaternion convention** in existing codebase (`oakd/recorder.py`, `baseline/tools/compare_sessions.py`) is Hamilton scalar-first. Document in `skyslam/types.py`.
 - [ ] **Extend `extract_kf_from_db.py`** to dump `Feature` + `Statistics` tables (gives free comparison data).
 - [ ] **Allan variance script** for IMU noise calibration on `lab_static_10s`.
 - [ ] **Decide cut scope**: full plan (9 weeks) vs Phase-8-skipped (7 weeks)?

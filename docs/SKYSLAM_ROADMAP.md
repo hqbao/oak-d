@@ -247,8 +247,8 @@ typedef struct {
 
 **PROTOTYPED in the from-scratch VIO (2026-06-03, commits `7312e50` + `7e74b7a`)** —
 both the pyramidal Lucas-Kanade tracker AND the Shi-Tomasi corner detector are
-already implemented library-free in pure NumPy (`oakd/vio/klt.py` Bouguet KLT with
-active-set masking; `oakd/vio/corners.py` Sobel gradients + integral-image box
+already implemented library-free in pure NumPy (`ours/vio/klt.py` Bouguet KLT with
+active-set masking; `ours/vio/corners.py` Sobel gradients + integral-image box
 sum + smaller-eigenvalue response + NMS + occupancy-grid min-distance). They are
 drop-ins for `cv2.calcOpticalFlowPyrLK` / `cv2.goodFeaturesToTrack`, agree with
 them closely (lab_loop: KLT adjacent-frame mean 0.025 px; corners same 173 points,
@@ -257,8 +257,8 @@ ONLY frontend now -- the cv2 fallback was removed, so the live `ours`/`ours-ba`
 path and offline f2f/ba scoring carry no cv2 (Numba JITs the KLT inner loop to
 ~15 ms/frame live; without Numba a lighter `live_own` preset keeps it real time).
 These are the reference to port to NEON-optimised `fast_detector.c` /
-`klt_tracker.c`. PnP is also our own (`oakd/vio/pnp.py`) and frame IO uses a
-pure-Python PNG codec (`oakd/vio/pngio.py`), so no cv2 call remains in the
+`klt_tracker.c`. PnP is also our own (`ours/vio/pnp.py`) and frame IO uses a
+pure-Python PNG codec (`oakd/pngio.py`), so no cv2 call remains in the
 `ours`/`ours-ba` path; cv2 is only used by ORB loop closure (`ours-slam`) and the
 dev-only PnP A/B oracle.
 
@@ -324,16 +324,16 @@ dev-only PnP A/B oracle.
 **PROTOTYPED in the from-scratch VIO (2026-06-03, "Phase 5", commit `ec080a7`)** —
 a pure-NumPy offline version of the loop-closure stack now exists and measurably
 cuts drift on the gold sessions:
-- `oakd/vio/posegraph.py`: SE(3) pose graph (`se3_log` / `se3_adjoint` / `se3_inv`,
+- `ours/vio/posegraph.py`: SE(3) pose graph (`se3_log` / `se3_adjoint` / `se3_inv`,
   Gauss-Newton + LM, Grisetti linearisation `J_r^{-1} ≈ I`, anchor node pinned).
   A Huber robust kernel down-weights **loop** edges only.
-- `oakd/vio/loopclosure.py`: ORB (no trained vocabulary yet — brute-force match
+- `ours/vio/loopclosure.py`: ORB (no trained vocabulary yet — brute-force match
   against earlier keyframes) + Lowe ratio → **fundamental-matrix RANSAC
   pre-filter** → PnP-RANSAC geometric verification using the old keyframe's
   metric depth, yielding the relative `T_cur_old` loop constraint.
-- `oakd/vio/slam.py`: `SlamMap` orchestrator — keyframes, odometry edges from the
+- `ours/vio/slam.py`: `SlamMap` orchestrator — keyframes, odometry edges from the
   VO relative motion, top-3 loop edges per keyframe, PGO, pose correction.
-- `tools/vio_run.py --backend slam` scores it; `tools/posegraph_selftest.py`
+- `ours/tools/vio_run.py --backend slam` scores it; `ours/tools/posegraph_selftest.py`
   validates the Lie helpers + loop-closure drift reduction + the Huber kernel.
 
   **Results** (ATE %path, BA → SLAM; end-start drift cm pre → post): corridor
@@ -353,7 +353,7 @@ cuts drift on the gold sessions:
   front-end (geometry), do not rely on a robust kernel.** (Also: `cv2.findFundamentalMat`
   needs a `≥ 8`-point and non-degenerate guard or it crashes on static scenes.)
 
-  Still **offline-scored** in `tools/vio_run.py --backend slam`, and now also
+  Still **offline-scored** in `ours/tools/vio_run.py --backend slam`, and now also
   wired **live** as `--source ours-slam` (commit `5d93e66`): the read loop runs
   fast f2f VO for the display while a background thread owns the persistent
   `SlamMap` (fed the *raw* f2f poses so its odometry edges stay self-consistent),
@@ -409,9 +409,9 @@ different axes — they never compete**, because each owns only what it can obse
   (the real corridor failure mode): plain reprojection BA leaves 16.1° tilt
   while fitting at 0.24 px (reprojection is blind to absolute tilt); the gravity
   prior pulls it to 2.4° while keeping reprojection at 0.28 px. Default off, so
-  the offline path stays byte-identical. Code: `oakd/vio/bundle.py`
+  the offline path stays byte-identical. Code: `ours/vio/bundle.py`
   (`BAConfig.use_gravity`, `optimize(grav_meas, grav_world, grav_gref)`),
-  `oakd/vio/windowed.py` (`add_keyframe(accel_cam=…)`).
+  `ours/vio/windowed.py` (`add_keyframe(accel_cam=…)`).
 - **Reduced form** (also live in the prototype, on the DISPLAY pose): a one-axis
   complementary filter (`level_attitude`) corrects only roll/pitch toward gravity
   and leaves yaw untouched. It is gravity's marginal of the proper fusion above.

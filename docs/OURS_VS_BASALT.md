@@ -6,9 +6,9 @@ to close the gap (or to deliberately keep a difference) has a concrete basis and
 does not have to re-derive it.
 
 **Last updated**: 2026-06-05
-**Our code**: `oakd/sources/depthai_ours_vio.py` (live) + `oakd/vio/*`
-**Basalt (reference)**: `dai.node.BasaltVIO` consumed in `oakd/sources/depthai_vio.py`
-**Scoring**: `tools/vio_run.py` (offline, vs recorded Basalt poses) + `tools/live_replay.py`
+**Our code**: `ours/depthai_ours_vio.py` (live) + `ours/vio/*`
+**Basalt (reference)**: `dai.node.BasaltVIO` consumed in `baseline/depthai_vio.py`
+**Scoring**: `ours/tools/vio_run.py` (offline, vs recorded Basalt poses) + `ours/tools/live_replay.py`
 
 > TL;DR. Basalt is a **tight-coupled stereo-inertial sliding-window optimiser**.
 > Ours is a **loosely-coupled RGB-D + gyro frontend**: the gyro owns rotation,
@@ -28,7 +28,7 @@ does not have to re-derive it.
 | Visual input | Raw **stereo** (left+right), multi-view triangulation | **RGB-D**: left gray + the chip's stereo **depth map** (SGBM blob output) |
 | Scale source | IMU (metric) + stereo baseline, jointly | **Depth map** per-frame (blur-biased on fast motion) |
 | Rotation | Joint with everything | **Gyro preintegration** owns it; vision corrects, weighted by inlier confidence + a gyro-disagreement gate |
-| Translation | Joint, IMU-constrained | Frame-to-frame **own PnP** (`oakd/vio/pnp.py`: RANSAC DLT + LM, library-free, default) with depth → metric `t`; smoothed by `InertialTranslationFilter` |
+| Translation | Joint, IMU-constrained | Frame-to-frame **own PnP** (`ours/vio/pnp.py`: RANSAC DLT + LM, library-free, default) with depth → metric `t`; smoothed by `InertialTranslationFilter` |
 | Accelerometer | Constrains velocity/position/scale (preint factor) | **Tilt leveling only** (complementary filter at rest); feed-forward to position is **OFF** by default |
 | Optimiser | Sliding-window **bundle adjustment + marginalisation prior** | Production `ours`: **none** (pure f2f). `ours-ba`: analytic Schur BA window. `ours-slam`: + ORB loop + SE(3) pose graph |
 | Bias estimation | Online gyro+accel bias in the window | Gyro bias from a startup static window only (no online accel bias on the production path) |
@@ -37,24 +37,24 @@ does not have to re-derive it.
 
 ### Code map (ours)
 - Transparent time-synced input (`image, depth, IMU`) building block:
-  `oakd/vio/synced.py` (`iter_synced`, `SyncedSample`, `slice_imu`) — groups the
+  `ours/vio/synced.py` (`iter_synced`, `SyncedSample`, `slice_imu`) — groups the
   IMU samples that fall in each frame interval `(t_prev, t_cur]` on the one
-  recorder `ts_ns` clock; the inspector `tools/synced_view.py` shows the triplet
+  recorder `ts_ns` clock; the inspector `ours/tools/synced_view.py` shows the triplet
   (replay + `--live`): image | depth | gyro angular-velocity line chart + 3D
   accel vector. Honest-only: every panel traces to a real recorded stream.
 - Frontend (own pure-NumPy KLT + Shi-Tomasi, forward-backward check):
-  `oakd/vio/frontend.py`, `klt.py`, `klt_numba.py`, `corners.py`
-- Frame-to-frame RGB-D PnP + gyro fusion: `oakd/vio/odometry.py`
+  `ours/vio/frontend.py`, `klt.py`, `klt_numba.py`, `corners.py`
+- Frame-to-frame RGB-D PnP + gyro fusion: `ours/vio/odometry.py`
   (`RGBDVisualOdometry`, `OdometryConfig`); own library-free PnP solver in
-  `oakd/vio/pnp.py` (RANSAC DLT + robust-LM seed rescue + LM refine, default;
+  `ours/vio/pnp.py` (RANSAC DLT + robust-LM seed rescue + LM refine, default;
   `OAKD_OWN_PNP=0` switches to the cv2 oracle for the dev A/B only)
-- Position smoother: `oakd/vio/inertial_filter.py`
+- Position smoother: `ours/vio/inertial_filter.py`
   (`InertialTranslationFilter`, `use_accel_prediction=False`)
-- IMU preintegration (Forster): `oakd/vio/imu.py`
-- Windowed BA (depth-anchored, analytic Schur): `oakd/vio/bundle.py`, `windowed.py`
-- **Experimental tight-coupled window** (the Basalt-style path): `oakd/vio/vio_window.py`
+- IMU preintegration (Forster): `ours/vio/imu.py`
+- Windowed BA (depth-anchored, analytic Schur): `ours/vio/bundle.py`, `windowed.py`
+- **Experimental tight-coupled window** (the Basalt-style path): `ours/vio/vio_window.py`
   (`optimize_vio`, `WindowedVIOMap`, `VioConfig`) — see §4
-- Loop closure + pose graph: `oakd/vio/loopclosure.py`, `posegraph.py`, `slam.py`
+- Loop closure + pose graph: `ours/vio/loopclosure.py`, `posegraph.py`, `slam.py`
 
 ---
 
@@ -124,7 +124,7 @@ discriminator is **`n_inliers`** (white-wall median 0 vs real motion ≥ ~33).
 
 ## 4. The Basalt-style path we already have: `--backend vio`
 
-`oakd/vio/vio_window.py` is the **tight-coupled** experiment — the seed for
+`ours/vio/vio_window.py` is the **tight-coupled** experiment — the seed for
 parity. It folds IMU preint (rotation + velocity + position increments) and
 visual reprojection + depth into ONE window solve for pose + velocity +
 gyro/accel bias + landmarks (true Basalt style).
@@ -141,23 +141,23 @@ motion** (push_fwdback scale ~0.35). Why:
 **4 DoF (3 translation + yaw about world-vertical)** instead of 6; roll/pitch
 are held to the accel-levelled gravity. This stops gravity leaking into a
 horizontal translation and tightened the IMU vel/pos sigmas (0.15→0.03). Verified
-by `tools/vio_ba_selftest.py` scenario C (tilt-locked yaw+pos recovery) and
-`tools/vio_scale_probe.py --measure-b`. **`vio` is still opt-in / experimental
+by `ours/tools/vio_ba_selftest.py` scenario C (tilt-locked yaw+pos recovery) and
+`ours/tools/vio_scale_probe.py --measure-b`. **`vio` is still opt-in / experimental
 and touches no production path.**
 
 ### 4.1 Live `--source ours-vio`: VPU-free depth + a real-time background solve
 
-`oakd/sources/depthai_ours_vio.py` runs the tight-coupled window **live** with
+`ours/depthai_ours_vio.py` runs the tight-coupled window **live** with
 two deliberate properties, both **measured** (no device-only guesses):
 
 1. **Fully portable depth (no VPU / no `StereoDepth`).** The source taps the two
    **RAW** mono cameras and does *everything* itself: our own `LeftRectifier` +
    `RightRectifier` (library-free, verified to ~1e-7 vs `cv2.stereoRectify`) →
-   our own dense **SGM** matcher (`oakd/vio/stereo.py`, census + N-path
+   our own dense **SGM** matcher (`ours/vio/stereo.py`, census + N-path
    Hirschmüller, numba-accelerated) → metric depth. The chip stereo/depth
    engine is never used, so this front-end ports unchanged to any 2-camera +
    CPU target. The chip depth survives **only** as the offline oracle
-   (`tools/stereo_selftest.py`, `tools/vio_run.py --depth chip`).
+   (`ours/tools/stereo_selftest.py`, `ours/tools/vio_run.py --depth chip`).
    - **Grid invariant (bug fixed 2026-06-04):** depth is defined on the
      RECTIFIED-left grid, so tracking MUST run on the rectified left too.
      `dense_depth_rectified_left()` returns `(rectified_left, depth)` and the
@@ -234,28 +234,28 @@ Do these on the `vio` path (`vio_window.py`) so production `ours` stays safe.
 ./run.sh --source ours-vio                 # watch the sgm=/vo=/loop= split + drop=0
 
 # Offline scoring vs Basalt
-.venv/bin/python tools/vio_run.py --all --backend f2f    # production frontend
-.venv/bin/python tools/vio_run.py --all --backend ba     # + windowed BA
-.venv/bin/python tools/vio_run.py --all --backend vio    # tight-coupled (experimental)
-.venv/bin/python tools/vio_run.py --all --backend vio --depth ours --depth-fast  # + our SGM depth
+.venv/bin/python ours/tools/vio_run.py --all --backend f2f    # production frontend
+.venv/bin/python ours/tools/vio_run.py --all --backend ba     # + windowed BA
+.venv/bin/python ours/tools/vio_run.py --all --backend vio    # tight-coupled (experimental)
+.venv/bin/python ours/tools/vio_run.py --all --backend vio --depth ours --depth-fast  # + our SGM depth
 
 # Our from-scratch depth vs the chip depth (oracle)
-.venv/bin/python tools/stereo_selftest.py               # match rate + rel err on gold
-.venv/bin/python tools/stereo_view.py --session sessions/gold/<name>  # eyeball replay
+.venv/bin/python ours/tools/stereo_selftest.py               # match rate + rel err on gold
+.venv/bin/python ours/tools/stereo_view.py --session sessions/gold/<name>  # eyeball replay
 
 # Live-path replay without a device (reproduces the display pipeline frame-for-frame)
-.venv/bin/python tools/live_replay.py --session sessions/gold/<name> \
+.venv/bin/python ours/tools/live_replay.py --session sessions/gold/<name> \
     --clamp 4 --min-inliers 12
 
 # Tight-coupled diagnostics
-.venv/bin/python tools/vio_scale_probe.py --measure-b   # OLD(loose,6DoF) vs NEW(tight,lock_tilt)
+.venv/bin/python ours/tools/vio_scale_probe.py --measure-b   # OLD(loose,6DoF) vs NEW(tight,lock_tilt)
 
 # Self-tests (must pass before/after touching VIO)
-.venv/bin/python tools/imu_preint_selftest.py
-.venv/bin/python tools/vio_ba_selftest.py               # incl. scenario C (tilt-lock)
+.venv/bin/python ours/tools/imu_preint_selftest.py
+.venv/bin/python ours/tools/vio_ba_selftest.py               # incl. scenario C (tilt-lock)
 ```
 
 Record a new gold session (textureless wall, fast push, etc.):
 ```bash
-.venv/bin/python tools/record_session.py sessions/gold/<name> --duration 15 --fps 20
+.venv/bin/python baseline/tools/record_session.py sessions/gold/<name> --duration 15 --fps 20
 ```

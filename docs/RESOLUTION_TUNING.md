@@ -7,7 +7,7 @@ threshold in the pipeline — corner spacing, the KLT window, the PnP
 reprojection gate, the stereo disparity range, the ORB budget — so the baseline
 numbers become too coarse and feature tracking / depth / pose quality degrade.
 
-`oakd/vio/resolution.py` (`ResolutionProfile`) is the single place that scales
+`ours/vio/resolution.py` (`ResolutionProfile`) is the single place that scales
 those parameters from the baseline to the live `(width, height)`. Every
 ours-\* source builds one from `--width/--height` and auto-scales; any knob can
 be overridden at runtime for the co-tuning workflow below.
@@ -110,4 +110,4 @@ Notes:
   lighter than 640×400 while still tracking well. **96×60** is the edge if you
   need maximum lightness.
 - Preview any size live first (matches the VIO depth path exactly):
-  `python tools/stereo_view.py --live --fast --width 160 --height 100`.
+  `python ours/tools/stereo_view.py --live --fast --width 160 --height 100`.

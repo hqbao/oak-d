@@ -103,13 +103,13 @@
         <mxCell id="db" value="&lt;b&gt;rtabmap.db (SQLite)&lt;/b&gt;&#10;persisted at session close (setSaveDatabaseOnClose)&#10;tables: Node, Link, Data, Word, Statistics, GlobalDescriptor, Info" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;fillColor=#3a3a70;strokeColor=#ffffff;fontColor=#ffffff;align=center;" vertex="1" parent="1">
           <mxGeometry x="1860" y="690" width="460" height="160" as="geometry" />
         </mxCell>
-        <mxCell id="ext" value="&lt;b&gt;tools/extract_kf_from_db.py&lt;/b&gt;&#10;runs automatically at end of record_session.py&#10;Node 3x4 float32 BLOB to (pos, quat_wxyz)&#10;Link types 1=global, 2=local_space, 3=local_time to loops&#10;Shepperd rotation to quaternion" style="html=1;rounded=1;fillColor=#3a3a70;strokeColor=#ffffff;fontColor=#ffffff;align=left;whiteSpace=wrap;" vertex="1" parent="1">
+        <mxCell id="ext" value="&lt;b&gt;baseline/tools/extract_kf_from_db.py&lt;/b&gt;&#10;runs automatically at end of record_session.py&#10;Node 3x4 float32 BLOB to (pos, quat_wxyz)&#10;Link types 1=global, 2=local_space, 3=local_time to loops&#10;Shepperd rotation to quaternion" style="html=1;rounded=1;fillColor=#3a3a70;strokeColor=#ffffff;fontColor=#ffffff;align=left;whiteSpace=wrap;" vertex="1" parent="1">
           <mxGeometry x="1860" y="880" width="460" height="140" as="geometry" />
         </mxCell>
         <mxCell id="kfjl" value="&lt;b&gt;kf_events.jsonl (C4)&lt;/b&gt; - keyframes&#10;&lt;b&gt;kf_loops.jsonl (C4+)&lt;/b&gt; - loop edges with transform" style="html=1;rounded=1;fillColor=#a04074;strokeColor=#ffffff;fontColor=#ffffff;align=center;whiteSpace=wrap;fontStyle=1;" vertex="1" parent="1">
           <mxGeometry x="1860" y="1050" width="460" height="80" as="geometry" />
         </mxCell>
-        <mxCell id="viz" value="&lt;b&gt;tools/viz_session.py&lt;/b&gt;&#10;offline replay viewer:&#10;Pose 3D overlays VIO (blue) + SLAM (red)&#10;+ KF (yellow dots) + loop edges (yellow lines)" style="html=1;rounded=1;fillColor=#3a3a70;strokeColor=#ffffff;fontColor=#ffffff;align=left;whiteSpace=wrap;" vertex="1" parent="1">
+        <mxCell id="viz" value="&lt;b&gt;baseline/tools/viz_session.py&lt;/b&gt;&#10;offline replay viewer:&#10;Pose 3D overlays VIO (blue) + SLAM (red)&#10;+ KF (yellow dots) + loop edges (yellow lines)" style="html=1;rounded=1;fillColor=#3a3a70;strokeColor=#ffffff;fontColor=#ffffff;align=left;whiteSpace=wrap;" vertex="1" parent="1">
           <mxGeometry x="1860" y="1160" width="460" height="100" as="geometry" />
         </mxCell>
         <mxCell id="e1" style="endArrow=block;html=1;strokeColor=#5fa8d3;strokeWidth=2;" edge="1" parent="1" source="caml" target="isp"><mxGeometry relative="1" as="geometry" /></mxCell>
