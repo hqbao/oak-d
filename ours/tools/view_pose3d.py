@@ -147,6 +147,10 @@ def main() -> int:
     history = PoseHistory(capacity=8192)
     source = _build_source(args.source, args)
 
+    # Core-profile GL context (macOS needs it for pyqtgraph's shaded-mesh items
+    # in the accel 3D view) -- must be set before the QApplication.
+    from ours.ui import theme
+    theme.ensure_gl_format()
     app = QApplication(sys.argv)
     # Live device sources show best top-down (drone seen from above); the
     # synthetic figure-8 reads better in the default iso view.

@@ -7,6 +7,25 @@ skydev tool family.
 from __future__ import annotations
 
 
+def ensure_gl_format() -> None:
+    """Request a Core-profile OpenGL 4.1 context for pyqtgraph's GL widgets.
+
+    Must be called BEFORE the ``QApplication`` is created. pyqtgraph 0.13+ draws
+    every GL item (incl. ``GLMeshItem(shader="shaded")``) with modern GLSL that
+    needs a core-profile context. On macOS the default context is a legacy 2.1
+    compatibility profile, so the shaded-mesh shader fails to link and paint
+    raises ``GLError(1281, glGetAttribLocation)``. Core 4.1 is the newest macOS
+    exposes and is universally available, so we request it on every platform.
+    Idempotent: safe to call more than once.
+    """
+    from PyQt6.QtGui import QSurfaceFormat
+
+    fmt = QSurfaceFormat()
+    fmt.setProfile(QSurfaceFormat.OpenGLContextProfile.CoreProfile)
+    fmt.setVersion(4, 1)
+    QSurfaceFormat.setDefaultFormat(fmt)
+
+
 # ---- palette ---------------------------------------------------------------
 
 BG          = "#0d1117"   # GitHub dark — pure neutral dark
