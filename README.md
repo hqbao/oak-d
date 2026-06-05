@@ -103,6 +103,11 @@ available as `--source ours-legacy`. For a device run with no GUI:
 .venv/bin/python -m ours.app --live          # headless: stream the OAK-D, print pose/loops
 ```
 
+At START the live path measures only the **gravity-align level** (which depends
+on how the camera is held); the **gyro bias** is a sensor constant, so it is
+calibrated once, saved per device under `.cache/imu_bias.json`, and reused on
+later runs. Force a fresh bias measurement with `--recalibrate-bias`.
+
 Both `ours-ba` and `ours-slam` run their heavy optimisation on a background
 thread, so the display stays smooth. The accelerometer levels roll/pitch to
 gravity at rest, while the **gyroscope** drives the inter-frame rotation prior:

@@ -34,6 +34,7 @@ import numpy as np
 from ...lib import topics
 from ...lib.config.resolution import ResolutionProfile
 from ...lib.flow import SourceFlow
+from ...lib.imu.bias_store import load_gyro_bias, save_gyro_bias
 from ...lib.imu.imu import so3_exp
 from ...lib.io.reader import StereoCalib
 from ...lib.messages import ImuInit, ImuPrior, RawFrame
@@ -81,13 +82,15 @@ class _PublishCapture(Task):
 class LiveCaptureFlow(SourceFlow):
     def __init__(self, bus: Bus, width: int = 640, height: int = 400,
                  fps: int = 20, depth_fast: bool = True,
-                 use_gyro: bool = True) -> None:
+                 use_gyro: bool = True, recalibrate_bias: bool = False) -> None:
         super().__init__("capture", bus, [_PublishCapture()])
         self.width = int(width)
         self.height = int(height)
         self.fps = int(fps)
         self.depth_fast = bool(depth_fast)
         self.use_gyro = bool(use_gyro)
+        # When True, ignore any cached gyro bias and re-measure it (then save).
+        self.recalibrate_bias = bool(recalibrate_bias)
         self.res = ResolutionProfile.for_resolution(self.width, self.height)
         self.forwards_to(topics.FRAME_RAW)
 
@@ -103,7 +106,13 @@ class LiveCaptureFlow(SourceFlow):
 
     # ------------------------------------------------------------------ #
     def open(self) -> LiveCalib:
-        """Open the device, read calibration, collect the startup accel/bias."""
+        """Open the device, read calibration, load/measure the startup IMU refs.
+
+        The gyro bias is loaded from the per-device cache (calibrated once); only
+        the gravity-align level is measured here each run (it depends on the
+        current orientation). Pass ``recalibrate_bias=True`` to force a fresh
+        bias measurement (and re-save it).
+        """
         import depthai as dai
 
         self._dai = dai
@@ -157,25 +166,63 @@ class LiveCaptureFlow(SourceFlow):
             self._R_imu_cam = np.eye(3)
 
         if self.use_gyro:
-            self._accel_align = self._collect_startup()
+            # Gyro bias is a sensor constant -> calibrate ONCE per device and
+            # cache it; only the gravity-align level (orientation-dependent) is
+            # re-measured each START. Load the cached bias unless asked to redo.
+            dev_id = self._device_id(p)
+            cached = (None if self.recalibrate_bias
+                      else load_gyro_bias(dev_id))
+            if cached is not None:
+                self._gyro_bias = cached
+                print(f"[live] gyro bias loaded from cache (device {dev_id}): "
+                      f"{cached.round(5).tolist()} rad/s. Pass "
+                      "recalibrate_bias=True to re-measure.", file=sys.stderr)
+            # Always read gravity-align (and the bias too when not cached).
+            self._accel_align = self._collect_startup(
+                estimate_bias=cached is None, device_id=dev_id)
 
         sgm_cfg = self.res.sgm(fast=self.depth_fast)
         return LiveCalib(K=K, calib=calib, sgm_cfg=sgm_cfg, res=self.res,
                          accel_align=self._accel_align)
 
-    def _collect_startup(self, window_s: float = 0.4,
-                         timeout_s: float = 6.0) -> np.ndarray | None:
-        """Mean startup accel (cam frame) + gyro bias over a STILL window.
+    @staticmethod
+    def _device_id(pipeline) -> str:
+        """Best-effort unique id of the open device (for the bias cache key)."""
+        try:
+            dev = pipeline.getDefaultDevice()
+        except Exception:
+            return "default"
+        for attr in ("getDeviceId", "getMxId", "getDeviceName"):
+            fn = getattr(dev, attr, None)
+            if callable(fn):
+                try:
+                    val = fn()
+                    if val:
+                        return str(val)
+                except Exception:
+                    pass
+        return "default"
 
-        The bias is the mean gyro and the gravity reference is the mean accel,
-        so the window must be motion-free: a sample is accepted only while the
-        device is at rest (``|gyro| < _STILL_GYRO`` and the accel stays within
-        ``_STILL_ACCEL`` of the window mean). Any motion clears the buffer and
-        restarts the window -- so shaking the camera right after START no longer
-        bakes the shake into the gyro bias / level. We wait up to ``timeout_s``
-        for a clean ``window_s`` still span; if the camera never settles we fall
-        back to whatever was seen and warn (bias left at zero rather than
-        poisoned), so the run still starts but the user knows to hold still.
+    def _collect_startup(self, window_s: float = 0.4, timeout_s: float = 6.0,
+                         estimate_bias: bool = True,
+                         device_id: str = "default") -> np.ndarray | None:
+        """Mean startup accel (gravity-align, cam frame) over a STILL window.
+
+        The gravity reference is the mean accel, so the window must be motion
+        free: a sample is accepted only while the device is at rest
+        (``|gyro| < _STILL_GYRO`` and the accel stays within ``_STILL_ACCEL`` of
+        the window mean). Any motion clears the buffer and restarts the window,
+        so shaking the camera right after START no longer poisons the level.
+
+        When ``estimate_bias`` is True (no cached bias for this device) the gyro
+        bias is also measured from the same still window and SAVED, so later runs
+        reuse it instead of recalibrating. When False the cached bias is kept and
+        only the (orientation-dependent) level is taken here.
+
+        We wait up to ``timeout_s`` for a clean ``window_s`` still span; if the
+        camera never settles we fall back to the running accel mean for a rough
+        level and (when estimating) leave the bias unset rather than poisoned,
+        warning the user to hold still and restart.
         """
         accel: list[np.ndarray] = []
         gyro: list[np.ndarray] = []
@@ -212,17 +259,28 @@ class LiveCaptureFlow(SourceFlow):
                 if win_start is None:
                     win_start = now
                 elif now - win_start >= window_s and len(gyro) >= 10:
-                    self._gyro_bias = np.mean(gyro, axis=0)
+                    if estimate_bias:
+                        self._gyro_bias = np.mean(gyro, axis=0)
+                        try:
+                            p = save_gyro_bias(device_id, self._gyro_bias,
+                                               len(gyro))
+                            print("[live] gyro bias calibrated "
+                                  f"{self._gyro_bias.round(5).tolist()} rad/s "
+                                  f"-> saved to {p}", file=sys.stderr)
+                        except OSError as e:
+                            print(f"[live] WARNING: could not save gyro bias: "
+                                  f"{e}", file=sys.stderr)
                     if moved:
                         print("[live] startup: settled after initial motion "
-                              "-> calibrated at rest.", file=sys.stderr)
+                              "-> leveled at rest.", file=sys.stderr)
                     return self._R_imu_cam @ np.mean(accel, axis=0)
         # Timed out without a clean still window. Use the accel mean for a rough
-        # level but leave the gyro bias at zero -- a biased estimate from motion
-        # is worse than none. Warn so the user holds still and re-presses START.
-        print("[live] WARNING: camera kept moving during startup calibration; "
-              "gyro bias not estimated. Hold the camera still and restart for "
-              "a stable VIO.", file=sys.stderr)
+        # level; when estimating, leave the gyro bias unset (a motion-biased
+        # estimate is worse than none). Warn so the user holds still + restarts.
+        if estimate_bias:
+            print("[live] WARNING: camera kept moving during startup "
+                  "calibration; gyro bias not estimated. Hold the camera still "
+                  "and restart for a stable VIO.", file=sys.stderr)
         if not accel:
             return None
         return self._R_imu_cam @ np.mean(accel, axis=0)

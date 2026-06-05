@@ -73,6 +73,7 @@ def build_replay(bus: Bus, reader: SessionReader, *, kf_every: int = 5,
 
 def build_live(bus: Bus, *, width: int = 640, height: int = 400, fps: int = 20,
                kf_every: int = 5, use_gyro: bool = True, depth_fast: bool = True,
+               recalibrate_bias: bool = False,
                ui=None, slam_cfg: SlamConfig | None = None):
     """Construct the live OAK-D graph. Opens the device to read calibration.
 
@@ -83,7 +84,8 @@ def build_live(bus: Bus, *, width: int = 640, height: int = 400, fps: int = 20,
     from .flows.capture import LiveCaptureFlow
 
     capture = LiveCaptureFlow(bus, width=width, height=height, fps=fps,
-                              depth_fast=depth_fast, use_gyro=use_gyro)
+                              depth_fast=depth_fast, use_gyro=use_gyro,
+                              recalibrate_bias=recalibrate_bias)
     calib = capture.open()                         # opens device, reads calib
     matcher = SGMStereoMatcher.from_calib(calib.calib, calib.sgm_cfg,
                                           rectify_left=True)
@@ -118,12 +120,13 @@ def run_replay(session: str, *, kf_every: int = 5, use_gyro: bool = True,
 
 def run_live(*, width: int = 640, height: int = 400, fps: int = 20,
              kf_every: int = 5, use_gyro: bool = True,
-             depth_fast: bool = True) -> int:
+             depth_fast: bool = True, recalibrate_bias: bool = False) -> int:
     """Headless live run: stream the OAK-D through the graph until Ctrl-C."""
     bus = Bus()
     capture, flows, ui = build_live(
         bus, width=width, height=height, fps=fps, kf_every=kf_every,
-        use_gyro=use_gyro, depth_fast=depth_fast)
+        use_gyro=use_gyro, depth_fast=depth_fast,
+        recalibrate_bias=recalibrate_bias)
     for f in flows:
         f.start()
     capture.start()
@@ -157,12 +160,18 @@ def main() -> int:
     ap.add_argument("--fps", type=int, default=20, help="live camera fps")
     ap.add_argument("--width", type=int, default=640)
     ap.add_argument("--height", type=int, default=400)
+    ap.add_argument("--recalibrate-bias", action="store_true",
+                    dest="recalibrate_bias",
+                    help="live: ignore the cached gyro bias and re-measure it "
+                         "(saved per device); otherwise it is calibrated once "
+                         "and reused")
     args = ap.parse_args()
 
     if args.live:
         return run_live(width=args.width, height=args.height, fps=args.fps,
                         kf_every=args.kf_every, use_gyro=not args.no_gyro,
-                        depth_fast=True)  # full-res SGM is too slow live
+                        depth_fast=True,  # full-res SGM is too slow live
+                        recalibrate_bias=args.recalibrate_bias)
 
     ui, reader, elapsed = run_replay(
         args.session, kf_every=args.kf_every, use_gyro=not args.no_gyro,

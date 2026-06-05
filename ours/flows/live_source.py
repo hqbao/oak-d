@@ -40,7 +40,8 @@ _P_OPT_TO_FRD = np.array([[0.0, 1.0, 0.0],
 class FlowPoseSource(PoseSource):
     def __init__(self, width: int = 640, height: int = 400, fps: int = 20,
                  kf_every: int = 5, use_gyro: bool = True,
-                 depth_fast: bool = True) -> None:
+                 depth_fast: bool = True,
+                 recalibrate_bias: bool = False) -> None:
         super().__init__()
         self.width = int(width)
         self.height = int(height)
@@ -48,6 +49,7 @@ class FlowPoseSource(PoseSource):
         self.kf_every = int(kf_every)
         self.use_gyro = bool(use_gyro)
         self.depth_fast = bool(depth_fast)
+        self.recalibrate_bias = bool(recalibrate_bias)
         self._t0 = 0.0
         self._prev_pos: np.ndarray | None = None
         self._prev_t: float | None = None
@@ -92,7 +94,8 @@ class FlowPoseSource(PoseSource):
             capture, flows, _ = build_live(
                 bus, width=self.width, height=self.height, fps=self.cam_fps,
                 kf_every=self.kf_every, use_gyro=self.use_gyro,
-                depth_fast=self.depth_fast, ui=ui)
+                depth_fast=self.depth_fast,
+                recalibrate_bias=self.recalibrate_bias, ui=ui)
         except Exception as e:                                    # noqa: BLE001
             self._fail(f"device open failed: {e}")
             return

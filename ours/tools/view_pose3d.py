@@ -42,7 +42,8 @@ def _build_source(name: str, args):
         # trajectory; backend + SLAM flows run alongside.
         from ours.flows.live_source import FlowPoseSource
         return FlowPoseSource(width=args.width, height=args.height,
-                              fps=args.fps)
+                              fps=args.fps,
+                              recalibrate_bias=args.recalibrate_bias)
     if name == "ours-legacy":
         from ours.depthai_ours_vio import OakOursVioSource
         return OakOursVioSource(fps=args.fps, backend="f2f", **res_kw)
@@ -80,6 +81,11 @@ def main() -> int:
                          "ours-vio = tight-coupled visual+IMU VIO)")
     ap.add_argument("--fps", type=int, default=20,
                     help="camera frame rate (ours/ours-ba/ours-slam) [20]")
+    ap.add_argument("--recalibrate-bias", action="store_true",
+                    dest="recalibrate_bias",
+                    help="live (--source ours): ignore the cached gyro bias and "
+                         "re-measure it (saved per device); otherwise it is "
+                         "calibrated once and reused across runs")
     # Frame resolution (any ours-* source). Lower = lighter on CPU; the pipeline
     # auto-scales its pixel-unit vision thresholds from the 640x400 baseline, and
     # the per-resolution overrides below let us co-tune (docs/RESOLUTION_TUNING.md).
