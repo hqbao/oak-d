@@ -6,7 +6,10 @@ from collections.abc import Callable
 from ...lib.flow import Bus, Flow, topics
 from ...lib.imu.imu_calib import ImuCalibration
 from ...lib.imu.timed_buffer import TimedImuBuffer
+from .admission import Admission, AdmitAll
+from .admit_frame import AdmitFrame
 from .apply_calibration import ApplyCalibration
+from .complete_admission import CompleteAdmission
 from .pack_imucam import PackImuCam
 from .publish_imu_raw import PublishImuRaw
 from .publish_imucam import PublishImuCam
@@ -29,6 +32,16 @@ class ImuReaderFlow(Flow):
     only after the device opens) supplies the per-device correction; with none,
     the calibrated packet equals the raw one.
 
+    ``admission`` is the realtime backpressure gate (see
+    :mod:`~ours.flows.imu_reader.admission`). The default
+    :class:`~ours.flows.imu_reader.admission.AdmitAll` admits every frame (replay
+    determinism); the live path injects a
+    :class:`~ours.flows.imu_reader.admission.BudgetAdmission` so at most ``N``
+    frames are in flight. The gate is the FIRST task in the camera chain (it runs
+    before the IMU is drained, so a skip folds that interval into the next frame),
+    and ``topics.FRAME_DONE`` frees a credit when the odometry tail reports a
+    frame finished.
+
     Note on threads: the *flow* owns one thread (it drains the inbox and runs the
     pack/publish chain). The injected ``source`` runs the continuous high-rate
     IMU read on its OWN I/O thread -- a hardware producer, not a flow, the same
@@ -40,17 +53,23 @@ class ImuReaderFlow(Flow):
                  buffer_capacity: int = 8192, wait_timeout: float = 0.5,
                  calibration: ImuCalibration | None = None,
                  calibration_provider:
-                     Callable[[], ImuCalibration | None] | None = None) -> None:
+                     Callable[[], ImuCalibration | None] | None = None,
+                 admission: Admission | None = None) -> None:
         super().__init__("imu-reader", bus)
         self.source = source
         self.buffer = TimedImuBuffer(capacity=buffer_capacity)
+        self.admission = admission or AdmitAll()
         self.forwards_to(topics.IMU_RAW, topics.IMUCAM_SAMPLE)
         self.on(topics.CAM_SYNC, [
+            AdmitFrame(self.admission),
             PackImuCam(self.buffer, wait_timeout),
             PublishImuRaw(),
             ApplyCalibration(calibration, provider=calibration_provider),
             PublishImuCam(),
         ])
+        # Backpressure control: free a credit per finished frame. Not END-bearing
+        # (odometry never forwards END here), so it does not affect drain.
+        self.on(topics.FRAME_DONE, [CompleteAdmission(self.admission)])
 
     def run(self) -> None:
         # Continuous IMU read on the source's own I/O thread; close the buffer

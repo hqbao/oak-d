@@ -128,14 +128,15 @@ def build_replay(bus: Bus, reader: SessionReader, *, kf_every: int = 5,
 
 def build_live(bus: Bus, *, width: int = 640, height: int = 400, fps: int = 20,
                kf_every: int = 5, use_gyro: bool = True, depth_fast: bool = True,
-               recalibrate_bias: bool = False,
+               recalibrate_bias: bool = False, live_budget: int = 2,
                ui=None, slam_cfg: SlamConfig | None = None):
     """Construct the live OAK-D graph off ONE shared device.
 
     Opens the device to read calibration + startup IMU references, then wires the
     SAME front-end the replay path uses (camera-reader + imu-reader) onto the live
     sources. The depth matcher rectifies BOTH cameras (``rectify_left=True``)
-    since the raw left is unrectified. Returns
+    since the raw left is unrectified. ``live_budget`` caps the realtime frames in
+    flight (backpressure). Returns
     ``(device, (cam_flow, imu_flow), reactive_flows, ui)``; the caller starts the
     threads and releases ``device`` when the run ends.
 
@@ -145,6 +146,7 @@ def build_live(bus: Bus, *, width: int = 640, height: int = 400, fps: int = 20,
     from .lib.live_calib import read_live_calibration
     from .flows.cam_reader.sources import LiveCamSource
     from .flows.imu_reader.sources import LiveImuSource
+    from .flows.imu_reader.admission import BudgetAdmission
 
     device = SharedLiveDevice(width=width, height=height, fps=fps)
     cal = read_live_calibration(device, width=width, height=height,
@@ -153,8 +155,12 @@ def build_live(bus: Bus, *, width: int = 640, height: int = 400, fps: int = 20,
     matcher = SGMStereoMatcher.from_calib(cal.calib, cal.sgm_cfg,
                                           rectify_left=True)
 
+    # Realtime backpressure: the camera streams at ``fps`` but the VIO sustains
+    # less; cap frames in flight so the host backlog stays bounded (else memory
+    # pressure starves the depthai link and the device firmware watchdog fires).
     imu_flow = ImuReaderFlow(bus, LiveImuSource(device),
-                             calibration=cal.imu_calibration)
+                             calibration=cal.imu_calibration,
+                             admission=BudgetAdmission(live_budget))
     cam_flow = CamReaderFlow(bus, LiveCamSource(device), fps=fps, realtime=True)
 
     ui = ui if ui is not None else UiCollectorFlow(bus)

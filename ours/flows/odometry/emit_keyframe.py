@@ -3,6 +3,9 @@
 The keyframe carries the pose, image, depth, the current track snapshot and --
 only when the camera was at rest -- the gravity accel for the back-end (a moving
 keyframe's lateral acceleration would bias the gravity direction).
+
+Returns the :class:`Step` unchanged so a tail task (``SignalDone``) can run after
+it; it is no longer the last task in the chain.
 """
 from __future__ import annotations
 
@@ -20,7 +23,7 @@ class EmitKeyframe(Task):
         n = ctx.state.get("kf_count", 0) + 1
         if n < ctx.state["kf_every"]:
             ctx.state["kf_count"] = n
-            return None
+            return step
         ctx.state["kf_count"] = 0
         vo: RGBDVisualOdometry = ctx.state["vo"]
         tr = vo.frontend.tracks
@@ -31,4 +34,4 @@ class EmitKeyframe(Task):
                         Keyframe(step.frame.seq, step.pose,
                                  step.frame.gray_left, step.frame.depth_m,
                                  track_ids=ids, track_px=px, accel=accel))
-        return None
+        return step
