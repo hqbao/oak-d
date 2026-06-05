@@ -15,8 +15,8 @@ import pyqtgraph.opengl as gl
 from PyQt6 import QtCore, QtGui
 from PyQt6.QtGui import QColor
 
-from .. import frames
-from ..pose import Pose, PoseHistory
+from ..lib import frames
+from ..lib.pose import Pose, PoseHistory
 from . import theme
 
 

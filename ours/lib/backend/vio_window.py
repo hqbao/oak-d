@@ -45,9 +45,9 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from .frontend import FrontendConfig, KLTFrontend
-from .imu import ImuPreintegration, preintegrate_imu, so3_exp, so3_log
-from .odometry import OdometryConfig, RGBDVisualOdometry
+from ..frontend.frontend import FrontendConfig, KLTFrontend
+from ..imu.imu import ImuPreintegration, preintegrate_imu, so3_exp, so3_log
+from ..odometry.odometry import OdometryConfig, RGBDVisualOdometry
 
 
 def _skew(w: np.ndarray) -> np.ndarray:

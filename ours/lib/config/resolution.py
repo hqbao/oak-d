@@ -29,10 +29,10 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, replace
 
-from .frontend import FrontendConfig
-from .loopclosure import LoopConfig
-from .odometry import OdometryConfig
-from .stereo import SGMConfig
+from ..frontend.frontend import FrontendConfig
+from ..loop.loopclosure import LoopConfig
+from ..odometry.odometry import OdometryConfig
+from ..stereo.stereo import SGMConfig
 
 # The resolution every baseline threshold in the pipeline was tuned at.
 BASELINE_W = 640

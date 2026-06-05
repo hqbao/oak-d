@@ -10,7 +10,7 @@ from PyQt6.QtWidgets import (
     QToolBar, QVBoxLayout, QWidget,
 )
 
-from ..pose import PoseHistory
+from ..lib.pose import PoseHistory
 from ..sources.base import PoseSource
 from . import theme
 from .panels import TelemetryPanel

@@ -38,14 +38,14 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from ours.vio import (  # noqa: E402
+from ours.lib import (  # noqa: E402
     InertialFilterConfig,
     InertialTranslationFilter,
     OdometryConfig,
     RGBDVisualOdometry,
     SessionReader,
 )
-from ours.vio.imu import so3_exp, so3_log  # noqa: E402
+from ours.lib.imu.imu import so3_exp, so3_log  # noqa: E402
 from ours.tools.vio_run import load_basalt_positions, umeyama  # noqa: E402
 
 

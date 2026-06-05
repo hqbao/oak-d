@@ -50,8 +50,8 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from .bundle import BAConfig, optimize
-from .frontend import FrontendConfig, KLTFrontend
-from .odometry import OdometryConfig, RGBDVisualOdometry
+from ..frontend.frontend import FrontendConfig, KLTFrontend
+from ..odometry.odometry import OdometryConfig, RGBDVisualOdometry
 
 
 @dataclass

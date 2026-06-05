@@ -23,7 +23,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from ours.vio import SessionReader, backproject, valid_mask  # noqa: E402
+from ours.lib import SessionReader, backproject, valid_mask  # noqa: E402
 
 
 def describe_frame(reader: SessionReader, index: int) -> np.ndarray:

@@ -23,13 +23,13 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from ours.vio import (  # noqa: E402
+from ours.lib import (  # noqa: E402
     GyroPreintegrator,
     OdometryConfig,
     SessionReader,
     WindowedVIORGBDOdometry,
 )
-from ours.vio.vio_window import VioConfig, WindowedVIOConfig  # noqa: E402
+from ours.lib.backend.vio_window import VioConfig, WindowedVIOConfig  # noqa: E402
 from ours.tools.vio_run import ate, load_basalt_positions  # noqa: E402
 
 

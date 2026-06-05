@@ -31,7 +31,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from .orb import (ORB, OrbConfig, find_fundamental_ransac, match_ratio_mutual)
-from .pnp import solve_pnp_ransac
+from ..odometry.pnp import solve_pnp_ransac
 
 
 @dataclass

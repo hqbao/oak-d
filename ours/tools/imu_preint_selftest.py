@@ -34,7 +34,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from ours.vio.imu import (  # noqa: E402
+from ours.lib.imu.imu import (  # noqa: E402
     ImuPreintegration,
     preintegrate_imu,
     so3_exp,

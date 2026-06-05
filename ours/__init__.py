@@ -3,12 +3,19 @@
 This root package holds everything we implement ourselves while replacing the
 DepthAI BasaltVIO + RTABMap black boxes one module at a time:
 
-  * ``ours.vio``                 — the algorithm library (KLT, corners, PnP, IMU
-                                   preintegration, stereo SGM, windowed BA, pose
-                                   graph + loop closure, the synced-input bundle)
-  * ``ours.depthai_ours_vio``    — the live OAK-D source driving ``ours.vio``
+  * ``ours.lib``                 — the algorithm library + runtime infrastructure.
+                                   Pure logic grouped into subpackages (frontend,
+                                   stereo, imu, odometry, backend, loop, io,
+                                   config) plus the core ``pose`` / ``frames`` /
+                                   ``pngio`` helpers and the flow/task/pubsub
+                                   building blocks for the live pipeline.
+  * ``ours.flows``               — live-pipeline orchestration: one directory per
+                                   flow (capture, depth, odometry, backend, slam,
+                                   ui), each a thread of sequential tasks that
+                                   talk over the pub/sub bus.
+  * ``ours.depthai_ours_vio``    — the live OAK-D source driving ``ours.lib``
   * ``ours.tools``               — offline scoring, self-tests and inspectors
-  * ``ours.{pose,frames,pngio}`` — our own pose types, frames math, PNG codec
+                                   (these call ``ours.lib`` directly, not the flows)
   * ``ours.sources`` / ``ours.ui`` — our own pose-source base + Qt 3D viewer
 
 This package is fully self-contained: it imports nothing from ``oakd`` (the

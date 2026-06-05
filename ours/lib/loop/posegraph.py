@@ -35,7 +35,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from .bundle import se3_exp, skew
+from ..backend.bundle import se3_exp, skew
 
 
 # --------------------------------------------------------------------------- #

@@ -37,8 +37,8 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from ours.frames import quat_to_rpy  # noqa: E402
-from ours.vio.imu import gravity_aligned_R0  # noqa: E402
+from ours.lib.frames import quat_to_rpy  # noqa: E402
+from ours.lib.imu.imu import gravity_aligned_R0  # noqa: E402
 
 
 def _quat_to_rot(qw, qx, qy, qz):

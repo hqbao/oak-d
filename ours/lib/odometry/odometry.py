@@ -22,8 +22,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from .frontend import FrontendConfig, KLTFrontend
-from .imu import so3_exp, so3_log
+from ..frontend.frontend import FrontendConfig, KLTFrontend
+from ..imu.imu import so3_exp, so3_log
 from .pnp import solve_pnp_ransac
 
 
@@ -330,7 +330,7 @@ class RGBDVisualOdometry:
         tilt -- the trajectory is otherwise unchanged (ATE is Umeyama-aligned, so
         a global rotation of the world frame does not affect it).
         """
-        from .imu import gravity_aligned_R0
+        from ..imu.imu import gravity_aligned_R0
         self.pose = np.eye(4)
         self.pose[:3, :3] = gravity_aligned_R0(accel_cam)
         self._g_ref = float(np.linalg.norm(accel_cam))

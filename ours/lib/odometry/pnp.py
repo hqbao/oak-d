@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from .imu import so3_exp
+from ..imu.imu import so3_exp
 
 
 def _skew(w: np.ndarray) -> np.ndarray:

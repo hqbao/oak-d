@@ -17,7 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from PyQt6.QtWidgets import QApplication       # noqa: E402
 
-from ours.pose import PoseHistory              # noqa: E402
+from ours.lib.pose import PoseHistory              # noqa: E402
 from ours.sources import FakePoseSource        # noqa: E402
 from ours.ui.mainwindow import MainWindow      # noqa: E402
 

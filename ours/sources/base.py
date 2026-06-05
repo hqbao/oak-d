@@ -5,7 +5,7 @@ import threading
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 
-from ..pose import Pose
+from ..lib.pose import Pose
 
 
 PoseCallback = Callable[[Pose], None]
