@@ -16,6 +16,7 @@ Run::
 from __future__ import annotations
 
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -155,12 +156,75 @@ def test_cam_read_pairs_by_seq() -> None:
     _check(not dev.is_running(), "device closed on cam.close()")
 
 
+class _MutexQueue:
+    """Fake output queue that raises if read AFTER its pipeline was stopped.
+
+    Emulates depthai's ``mutex lock failed: Invalid argument`` -- ``tryGet`` on a
+    queue whose pipeline (and its C++ queue mutex) was destroyed by a concurrent
+    ``release``. A correct :meth:`SharedLiveDevice.poll` (read + teardown under
+    one lock) must NEVER call ``tryGet`` once the handle is stopped.
+    """
+
+    def __init__(self, handle) -> None:
+        self._handle = handle
+
+    def tryGet(self):
+        if self._handle.stopped:
+            raise RuntimeError("mutex lock failed: Invalid argument")
+        return None
+
+
+def test_poll_is_teardown_race_safe() -> None:
+    print(" queue reads never touch a destroyed pipeline (teardown race)")
+
+    box: dict[str, object] = {}
+
+    def _opener(dev):
+        h = _FakeHandle()
+        box["h"] = h
+        q = _MutexQueue(h)
+        return h, q, q, q
+
+    dev = SharedLiveDevice(opener=_opener)
+    dev.acquire()                                    # cam ref
+    dev.acquire()                                    # imu ref
+
+    errors: list[Exception] = []
+    stop = threading.Event()
+
+    def hammer() -> None:
+        try:
+            while not stop.is_set():
+                dev.poll("imu")
+                dev.poll("left")
+                dev.poll("right")
+        except Exception as e:                       # noqa: BLE001
+            errors.append(e)
+
+    threads = [threading.Thread(target=hammer) for _ in range(3)]
+    for t in threads:
+        t.start()
+    time.sleep(0.05)                                 # let the readers spin
+    dev.release()                                    # refs 2 -> 1 (no destroy)
+    dev.release()                                    # refs 1 -> 0 -> destroy
+    time.sleep(0.05)                                 # readers race the teardown
+    stop.set()
+    for t in threads:
+        t.join(timeout=2.0)
+
+    _check(box["h"].stopped, "pipeline was destroyed by the last release")
+    _check(not errors,
+           f"no reader hit a destroyed queue mutex ({errors[:1]})")
+    _check(dev.poll("imu") is None, "poll returns None once the device is closed")
+
+
 def main() -> int:
     print("oak_live_selftest")
     test_refcount_single_open()
     test_failed_open_is_safe()
     test_single_client_shared()
     test_cam_read_pairs_by_seq()
+    test_poll_is_teardown_race_safe()
     _check("depthai" not in sys.modules,
            "fake-opener path never imported depthai (stays lazy)")
     print("ALL PASS")

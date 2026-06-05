@@ -89,20 +89,17 @@ class LiveCamSource(CamSource):
 
     def read(self):
         dev = self.device
-        ql, qr = dev.q_left, dev.q_right
-        if ql is None or qr is None:
-            return None
         while dev.is_running():
-            ld = ql.tryGet()
+            ld = dev.poll("left")
             while True:
-                nxt = ql.tryGet()
+                nxt = dev.poll("left")
                 if nxt is None:
                     break
                 ld = nxt
             if ld is not None:
                 self._pend_l[self._seq(ld)] = ld
             while True:
-                nxt = qr.tryGet()
+                nxt = dev.poll("right")
                 if nxt is None:
                     break
                 self._pend_r[self._seq(nxt)] = nxt

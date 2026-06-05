@@ -138,9 +138,8 @@ class LiveImuSource(ImuSource):
             self.error = f"device open failed: {e}"
             return
         try:
-            q = self.device.q_imu
             while not self._stop.is_set() and self.device.is_running():
-                msg = q.tryGet() if q is not None else None
+                msg = self.device.poll("imu")
                 if msg is None:
                     time.sleep(0.002)
                     continue

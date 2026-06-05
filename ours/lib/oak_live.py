@@ -79,13 +79,38 @@ class SharedLiveDevice:
                 self.q_left = self.q_right = self.q_imu = None
 
     def is_running(self) -> bool:
-        handle = self._handle
-        if handle is None:
-            return False
-        try:
-            return bool(handle.isRunning())
-        except Exception:
-            return False
+        with self._lock:
+            if self._handle is None:
+                return False
+            try:
+                return bool(self._handle.isRunning())
+            except Exception:
+                return False
+
+    def poll(self, which: str):
+        """Thread-safe non-blocking read of one output queue.
+
+        ``which`` is ``"left"`` / ``"right"`` / ``"imu"``; returns the next
+        depthai message, or ``None`` if nothing is queued, the device is closed,
+        or the queue raised. The read shares ``self._lock`` with
+        :meth:`release`'s pipeline teardown, so a reader thread can NEVER call
+        ``tryGet`` on a queue whose pipeline another thread is destroying -- the
+        lifetime race that aborted the host with ``mutex lock failed: Invalid
+        argument`` (which then starved the XLink and tripped the device
+        watchdog). It also serialises the camera and IMU reads, so the two never
+        enter depthai's per-device link concurrently.
+        """
+        with self._lock:
+            if self._handle is None:
+                return None
+            q = {"left": self.q_left, "right": self.q_right,
+                 "imu": self.q_imu}.get(which)
+            if q is None:
+                return None
+            try:
+                return q.tryGet()
+            except Exception:
+                return None
 
     def read_calibration(self):
         """Return the depthai ``CalibrationHandler`` of the open device.
