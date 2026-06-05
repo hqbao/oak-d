@@ -33,7 +33,8 @@ oak-d/
       live_replay.py     replay a recorded session through the live ours pipeline
       synced_view.py     inspect the synced (image, depth, IMU) triplet
       stereo_view.py     inspect our SGM depth (replay + --live)
-      *_selftest.py      regression guards (klt, ba, posegraph, imu_preint, vio_ba)
+      imucam_view.py     cv2 view of the split cam/IMU front-end (left|right|gyro|accel)
+      *_selftest.py      regression guards (klt, ba, posegraph, imu_preint, vio_ba, imucam_*)
   baseline/              DepthAI library pipeline (BasaltVIO + RTABMapSLAM)
     oakd/                baseline-only core (its Pose/frames/pngio/sources/ui)
       frames.py          camera <-> body (FRD) <-> world (NED) transforms
@@ -118,10 +119,30 @@ primary START/STOP):
   each face up/down; solves bias + scale + misalignment as the affine
   `a_cal = T·(a_raw − b)`). Both persist per device into `.cache/imu_calib.json`
   and the live path applies the accel calibration automatically on the next run.
-- **Visualize** — launches the proven live viewers in their own process:
-  **Camera + Depth + IMU** triplet (`synced_view --live`) and **Stereo Depth**
-  (`stereo_view --live`). These need exclusive device access, so the live
-  pipeline is released first.
+- **Visualize** — inspect the raw sensor streams. These need exclusive device
+  access, so the live VIO pipeline is released first.
+  - **Camera + IMU (synced, live)** — opens an *in-app* window (no subprocess)
+    that runs the split `cam_reader` + `imu_reader` flows live and draws every
+    synchronised `ImuCamPacket`: `left | right | gyro line chart (deg/s) |
+    accel 3D vector`. Each panel is exactly what the packet carries (no parallel
+    pipeline). This is the view for verifying the camera↔IMU time-sync.
+  - **Camera + Depth + IMU** triplet (`synced_view --live`) and **Stereo Depth**
+    (`stereo_view --live`) launch the proven cv2 viewers in their own process.
+
+The same synced split front-end can be inspected **without the GUI** — a cv2
+window over a recorded session or the live device:
+
+```bash
+.venv/bin/python -m ours.tools.imucam_view --session sessions/gold/lab_loop_30s   # replay
+.venv/bin/python -m ours.tools.imucam_view --live                                 # OAK-D
+```
+
+To self-verify the front-end with numbers instead of eyeballs (no device):
+
+```bash
+.venv/bin/python -m ours.tools.imucam_sync_selftest --session sessions/gold/lab_loop_30s
+QT_QPA_PLATFORM=offscreen .venv/bin/python -m ours.tools.imucam_window_selftest
+```
 
 The calibration math and capture state machines live in `ours/lib/imu/`
 (`accel_calib.py`, `calib_collect.py`, `calib_store.py`) and are covered by
@@ -244,6 +265,8 @@ Self-tests (run before/after touching the from-scratch VIO):
 .venv/bin/python ours/tools/posegraph_selftest.py  # SE(3) pose-graph + loop closure
 .venv/bin/python ours/tools/imu_preint_selftest.py # IMU preintegration vs closed form
 .venv/bin/python ours/tools/vio_ba_selftest.py     # tight-coupled VIO joint solve
+.venv/bin/python -m ours.tools.imucam_sync_selftest  # split cam/IMU sync contract (1 pkt/frame, samples in (prev,ts])
+QT_QPA_PLATFORM=offscreen .venv/bin/python -m ours.tools.imucam_window_selftest  # in-app synced view renders (offscreen Qt)
 ```
 
 `klt_selftest.py` is the regression guard for the library-free frontend: it
