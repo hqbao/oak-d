@@ -2,7 +2,7 @@
 
 Both dialogs drive the *tested* state machines from
 :mod:`ours.lib.imu.calib_collect` (the stillness gate + six-face collector) with
-live IMU samples from :class:`ours.flows.imu_stream.ImuStream`, and persist the
+live IMU samples from :class:`ours.flows.capture.imu_stream.ImuStream`, and persist the
 result through :mod:`ours.lib.imu.calib_store`.
 
 Threading: the IMU stream calls :meth:`_feed_sample` on its background thread,
@@ -23,7 +23,7 @@ from PyQt6.QtWidgets import (
     QPushButton, QDialog, QVBoxLayout, QWidget,
 )
 
-from ..flows.imu_stream import ImuStream
+from ..flows.capture.imu_stream import ImuStream
 from ..lib.imu.calib_collect import (
     SixFaceCollector,
     StaticCollector,

@@ -5,6 +5,11 @@ is identical live or offline:
 
 * :class:`ReplayCaptureFlow` -- replays a recorded session (offline validation).
 * :class:`LiveCaptureFlow`   -- the OAK-D device (live; validated on hardware).
+
+The device tier also hosts one non-flow helper: :mod:`.imu_stream` exposes
+:class:`~ours.flows.capture.imu_stream.ImuStream`, a lightweight IMU-only device
+reader (no bus, callback per sample) used by the calibration wizards. It lives
+here because it is raw depthai device access, the same concern as live capture.
 """
 from .replay import ReplayCaptureFlow
 

@@ -12,7 +12,7 @@ Two implementations live here:
 * :class:`FakePoseSource` -- a procedural figure-8 trajectory for UI bring-up
   without a camera.
 
-The real live source is :class:`ours.flows.live_source.FlowPoseSource`, which runs
+The real live source is :class:`ours.ui.live_source.FlowPoseSource`, which runs
 the flow pipeline and bridges its poses to this contract.
 """
 from __future__ import annotations

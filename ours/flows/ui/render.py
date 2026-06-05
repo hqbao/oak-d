@@ -3,7 +3,7 @@
 Where :class:`~ours.flows.ui.collector.UiCollectorFlow` records poses for offline
 scoring, this sink hands each ``pose.odom`` message to an ``on_pose`` callback --
 the bridge that drives the Qt 3D viewer
-(:class:`~ours.flows.live_source.FlowPoseSource`).
+(:class:`~ours.ui.live_source.FlowPoseSource`).
 """
 from __future__ import annotations
 

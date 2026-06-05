@@ -40,7 +40,7 @@ def _build_source(name: str, args):
         # Default live source = the new flow pipeline (capture/depth/odometry/
         # backend/slam/ui flows over a pub/sub bus). Displays the real-time f2f
         # trajectory; backend + SLAM flows run alongside.
-        from ours.flows.live_source import FlowPoseSource
+        from ours.ui.live_source import FlowPoseSource
         return FlowPoseSource(width=args.width, height=args.height,
                               fps=args.fps,
                               recalibrate_bias=args.recalibrate_bias)

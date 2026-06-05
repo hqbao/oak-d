@@ -24,7 +24,7 @@ from ..lib.frames import rot_to_quat
 from ..lib.messages import PoseMsg
 from ..lib.pose import Pose
 from ..lib.pubsub import Bus
-from ..ui.source import PoseSource
+from .source import PoseSource
 
 # Camera optical (x right, y down, z forward) -> world NED, and the column
 # reorder that maps the optical attitude columns to the body [forward, right,
