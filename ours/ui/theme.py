@@ -75,6 +75,18 @@ QLabel#HeaderSub {{
     letter-spacing: 1px;
 }}
 
+QWidget#ImuCamWindow {{ background-color: {PANEL}; }}
+QLabel#ImuCamView {{
+    background-color: #000000;
+    border: 1px solid {PANEL_EDGE};
+    border-radius: 4px;
+}}
+QLabel#ImuCamStatus {{
+    color: {TEXT_DIM};
+    font-size: 11px;
+    padding: 2px 4px;
+}}
+
 QPushButton {{
     background-color: {BTN_BG};
     color: {TEXT};

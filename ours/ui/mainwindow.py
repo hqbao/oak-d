@@ -141,6 +141,9 @@ class MainWindow(QMainWindow):
         cal_menu.addAction(accel_act)
 
         vis_menu = mbar.addMenu("Visualize")
+        imucam_act = QAction("Camera + IMU (synced, live)…", self)
+        imucam_act.triggered.connect(self._open_imucam)
+        vis_menu.addAction(imucam_act)
         triplet_act = QAction("Camera + Depth + IMU (triplet)…", self)
         triplet_act.triggered.connect(self._launch_triplet)
         vis_menu.addAction(triplet_act)
@@ -184,6 +187,22 @@ class MainWindow(QMainWindow):
             return
         from .calib_dialogs import AccelCalibDialog
         AccelCalibDialog(self).exec()
+
+    def _open_imucam(self) -> None:
+        """Open the synced camera/IMU view inside the app (live, our own UI)."""
+        if not self._release_device("Synced camera + IMU view"):
+            return
+        from .imucam_window import ImuCamWindow
+        # A member ref keeps the window alive; reuse one instance so repeated
+        # opens don't stack streams on the single-client device.
+        win = getattr(self, "_imucam_win", None)
+        if win is None:
+            win = ImuCamWindow(parent=self)
+            self._imucam_win = win
+        win.show()
+        win.raise_()
+        win.activateWindow()
+        self.statusBar().showMessage("Synced camera + IMU view opened.", 2500)
 
     def _launch_triplet(self) -> None:
         self._launch_tool(["-m", "ours.tools.synced_view", "--live"],
