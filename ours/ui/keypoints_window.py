@@ -92,8 +92,11 @@ class KeypointWorker(threading.Thread):
         self._stop.set()
 
     def run(self) -> None:                                          # noqa: D401
+        from ..lib.flow.runtime import NUMBA_PARALLEL_LOCK
         from ..lib.frontend.frontend import FrontendConfig, KLTFrontend
-        from ..lib.viz.keypoint_overlay import TrackTrails, draw_overlay
+        from ..lib.viz.keypoint_overlay import (
+            TrackTrails, draw_overlay, sample_depths,
+        )
 
         frontend = KLTFrontend(FrontendConfig())
         trails = TrackTrails()
@@ -101,11 +104,15 @@ class KeypointWorker(threading.Thread):
             for seq, t_s, gray, depth_m in self._frames():
                 if self._stop.is_set():
                     break
-                state = frontend.process(gray)
+                # KLT uses numba parallel=True, which is not threadsafe across
+                # Python threads -- serialize it like the odometry flow's
+                # ProcessVO does so concurrent frontends (e.g. two windows, or a
+                # window + the VIO source) can't abort the numba runtime.
+                with NUMBA_PARALLEL_LOCK:
+                    state = frontend.process(gray)
                 ids = np.asarray(state.ids, dtype=np.int64).reshape(-1)
                 pts = np.asarray(state.points, dtype=np.float32).reshape(-1, 2)
                 trails.update(ids, pts)
-                from ..lib.viz.keypoint_overlay import sample_depths
                 depths = sample_depths(depth_m, pts)
                 rgb = draw_overlay(gray, depth_m, ids, pts, trails)
                 sample = KeypointSample(

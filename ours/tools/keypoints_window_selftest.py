@@ -35,7 +35,7 @@ from ours.lib.viz.depth_render import (                             # noqa: E402
     colorize_depth, turbo_bgr, turbo_bgr_array,
 )
 from ours.lib.viz.keypoint_overlay import (                         # noqa: E402
-    TRAIL_LEN, TrackTrails, draw_overlay, sample_depths,
+    TRAIL_LEN, TrackTrails, draw_overlay, marker_sizes, sample_depths,
 )
 from ours.ui.keypoints_window import (                              # noqa: E402
     KeypointTrackWindow, KeypointWorker, ReplayKeypointWorker,
@@ -108,6 +108,20 @@ def test_trails() -> None:
     _check(tr.new_count == 0, "no new tracks on a steady frame")
     tr.update(np.array([7, 99], np.int64), np.array([[29, 0], [1, 1]], np.float32))
     _check(tr.new_count == 1, "brand-new id counted in new_count")
+
+
+def test_marker_scaling() -> None:
+    print(" marker radii scale with frame size (small frame -> small dots)")
+    big = marker_sizes((800, 1280))
+    ref = marker_sizes((400, 640))
+    small = marker_sizes((200, 320))
+    _check(big[0] > ref[0] > small[0],
+           f"dot radius scales with frame size ({small[0]}<{ref[0]}<{big[0]})")
+    _check(ref[0] == 3, f"reference 640x400 keeps the tuned dot r=3 (got {ref[0]})")
+    _check(all(v >= 1 for v in small),
+           f"tiny frame still draws visible markers (>=1px) {small}")
+    _check(big[1] > big[0] and big[2] > big[0],
+           "halo + fresh-ring stay larger than the dot at any scale")
 
 
 def test_draw_overlay() -> None:
@@ -239,6 +253,7 @@ def main() -> int:
     test_depth_color_matches_panel()
     test_sample_depths()
     test_trails()
+    test_marker_scaling()
     test_draw_overlay()
     test_window_happy_path(app)
     test_window_frontend_continuity(app)

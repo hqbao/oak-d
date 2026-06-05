@@ -24,12 +24,38 @@ from .depth_render import turbo_bgr_array
 #: How many past positions of one track to keep / draw (the user's N).
 TRAIL_LEN = 20
 
+#: Reference shorter-side (px) the base marker radii are tuned for (the gold
+#: sessions + default live capture are 640x400, so 400). Marker/trail sizes
+#: scale linearly with the frame's shorter side off this reference, so they look
+#: the same on a 1280x800 or a 320x200 capture instead of ballooning when a
+#: small native frame is stretched up to fill the panel.
+_REF_SHORT = 400.0
+
 # Neutral markers/colours pulled from theme.py (BGR, since we draw on a BGR
 # frame): TEXT_DIM #8b949e for invalid-depth points, WARN #ffb000 for fresh
 # tracks, pure black for the legibility halo under every dot.
 _INVALID_BGR = (158, 148, 139)   # #8b949e
 _FRESH_BGR = (0, 176, 255)       # #ffb000
 _HALO_BGR = (0, 0, 0)
+
+
+def marker_sizes(shape: tuple[int, int]) -> tuple[int, int, int, int]:
+    """Marker geometry scaled to the frame size: ``(dot_r, halo_r, fresh_r, line_w)``.
+
+    All in native-frame pixels, derived from the frame's shorter side relative to
+    :data:`_REF_SHORT` so a given keypoint occupies the same *fraction* of the
+    image at any capture resolution (the overlay is drawn at native res then
+    scaled to the panel, so fixed pixel radii would otherwise blow up on small
+    frames).
+    """
+    short = min(int(shape[0]), int(shape[1]))
+    s = short / _REF_SHORT
+    dot_r = max(2, int(round(3.0 * s)))
+    halo_r = dot_r + max(1, int(round(s)))
+    fresh_r = dot_r + max(2, int(round(2.0 * s)))
+    line_w = max(1, int(round(1.5 * s)))
+    return dot_r, halo_r, fresh_r, line_w
+
 
 
 def sample_depths(depth_m: np.ndarray, points: np.ndarray) -> np.ndarray:
@@ -130,6 +156,7 @@ def draw_overlay(gray: np.ndarray, depth_m: np.ndarray,
     z = sample_depths(depth_m, pts)
     valid = z > 1e-6
     colors = turbo_bgr_array(z)                       # (M, 3) uint8 BGR
+    dot_r, halo_r, fresh_r, line_w = marker_sizes(bg.shape[:2])
 
     if draw_trails:
         layer = bg.copy()
@@ -139,18 +166,18 @@ def draw_overlay(gray: np.ndarray, depth_m: np.ndarray,
                 continue
             col = (int(c[0]), int(c[1]), int(c[2])) if vv else _INVALID_BGR
             poly = np.asarray(tr, dtype=np.int32).reshape(-1, 1, 2)
-            cv2.polylines(layer, [poly], False, col, 1, cv2.LINE_AA)
+            cv2.polylines(layer, [poly], False, col, line_w, cv2.LINE_AA)
         bg = cv2.addWeighted(layer, 0.4, bg, 0.6, 0.0)
 
     for (x, y), c, vv, tid in zip(pts, colors, valid, ids):
         ix, iy = int(round(x)), int(round(y))
-        cv2.circle(bg, (ix, iy), 4, _HALO_BGR, -1, cv2.LINE_AA)
+        cv2.circle(bg, (ix, iy), halo_r, _HALO_BGR, -1, cv2.LINE_AA)
         if vv:
-            cv2.circle(bg, (ix, iy), 3, (int(c[0]), int(c[1]), int(c[2])),
+            cv2.circle(bg, (ix, iy), dot_r, (int(c[0]), int(c[1]), int(c[2])),
                        -1, cv2.LINE_AA)
         else:
-            cv2.circle(bg, (ix, iy), 3, _INVALID_BGR, 1, cv2.LINE_AA)
+            cv2.circle(bg, (ix, iy), dot_r, _INVALID_BGR, 1, cv2.LINE_AA)
         if trails.age(int(tid)) < fresh_age:
-            cv2.circle(bg, (ix, iy), 5, _FRESH_BGR, 1, cv2.LINE_AA)
+            cv2.circle(bg, (ix, iy), fresh_r, _FRESH_BGR, 1, cv2.LINE_AA)
 
     return np.ascontiguousarray(bg[:, :, ::-1])
