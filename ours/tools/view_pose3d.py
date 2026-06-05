@@ -152,7 +152,9 @@ def main() -> int:
     # synthetic figure-8 reads better in the default iso view.
     default_view = "ISO" if args.source.lower() == "fake" else "TOP"
     win = MainWindow(history, source, source_name=args.source,
-                     default_view=default_view)
+                     default_view=default_view,
+                     cap_width=args.width, cap_height=args.height,
+                     cap_fps=args.fps)
     win.show()
     return app.exec()
 

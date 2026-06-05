@@ -95,6 +95,30 @@ def test_mainwindow_menus(app):
           f"(View={len(view)}, Calibration={len(cal)}, Visualize={len(vis)})")
 
 
+def test_capture_resolution_plumbing(app):
+    """run.sh --width/--height/--fps must reach the Visualize windows' live
+    sources, not the hard-coded 640x400."""
+    from ..lib.misc.pose import PoseHistory
+    from ..ui.imucam_window import live_source_factory
+    from ..ui.synced_window import live_worker_factory
+
+    win = MainWindow(PoseHistory(capacity=100), FakePoseSource(),
+                     source_name="fake", cap_width=320, cap_height=200,
+                     cap_fps=15)
+    assert (win._cap_width, win._cap_height, win._cap_fps) == (320, 200, 15)
+    win.close()
+
+    # The live factories must honour the requested resolution (these build the
+    # source/worker objects WITHOUT opening the device).
+    cam_src, _imu_src = live_source_factory(width=320, height=200, fps=15)()
+    dev = cam_src.device
+    assert (dev.width, dev.height) == (320, 200), (dev.width, dev.height)
+
+    worker = live_worker_factory(width=320, height=200, fps=15)()
+    assert (worker._w, worker._h) == (320, 200), (worker._w, worker._h)
+    print("[ui] capture-resolution plumbing OK (320x200@15 -> live factories)")
+
+
 def test_gyro_dialog(app):
     bias = np.array([0.012, -0.004, 0.008])
     dlg = GyroCalibDialog(stream=_FakeStream())
@@ -158,6 +182,7 @@ def test_accel_dialog(app):
 def main() -> int:
     app = QApplication.instance() or QApplication(sys.argv)
     test_mainwindow_menus(app)
+    test_capture_resolution_plumbing(app)
     test_gyro_dialog(app)
     test_accel_dialog(app)
     print("\nALL UI CALIB SELFTESTS PASSED")

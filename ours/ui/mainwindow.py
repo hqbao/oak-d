@@ -40,10 +40,21 @@ class MainWindow(QMainWindow):
         source: PoseSource,
         source_name: str = "fake",
         default_view: str = "ISO",
+        *,
+        cap_width: int = 640,
+        cap_height: int = 400,
+        cap_fps: int = 20,
     ) -> None:
         super().__init__()
         self.history = history
         self.source = source
+        # Capture resolution / rate the operator asked for on the command line
+        # (run.sh --width/--height/--fps). The Visualize windows open the OAK-D
+        # at THIS resolution instead of the hard-coded 640x400, so what they show
+        # matches the pipeline the rest of the app runs.
+        self._cap_width = int(cap_width)
+        self._cap_height = int(cap_height)
+        self._cap_fps = int(cap_fps)
 
         self.setWindowTitle(f"OAK-D Pose Viewer  ·  source: {source_name}")
         self.resize(1400, 860)
@@ -188,7 +199,11 @@ class MainWindow(QMainWindow):
         # opens don't stack streams on the single-client device.
         win = getattr(self, "_imucam_win", None)
         if win is None:
-            win = ImuCamWindow(parent=self)
+            from .imucam_window import live_source_factory
+            factory = live_source_factory(width=self._cap_width,
+                                          height=self._cap_height,
+                                          fps=self._cap_fps)
+            win = ImuCamWindow(factory, fps=self._cap_fps, parent=self)
             self._imucam_win = win
         win.show()
         win.raise_()
@@ -200,12 +215,15 @@ class MainWindow(QMainWindow):
         """Open the synced image+depth+IMU triplet inside the app (our own UI)."""
         if not self._release_device("Camera + Depth + IMU triplet view"):
             return
-        from .synced_window import SyncedViewWindow
+        from .synced_window import SyncedViewWindow, live_worker_factory
         # Reuse one instance so repeated opens don't stack streams on the
         # single-client device (mirrors _open_imucam).
         win = getattr(self, "_triplet_win", None)
         if win is None:
-            win = SyncedViewWindow(parent=self)
+            factory = live_worker_factory(width=self._cap_width,
+                                          height=self._cap_height,
+                                          fps=self._cap_fps)
+            win = SyncedViewWindow(factory, fps=self._cap_fps, parent=self)
             self._triplet_win = win
         win.show()
         win.raise_()

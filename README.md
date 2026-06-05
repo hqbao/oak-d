@@ -244,6 +244,9 @@ Tuning knobs (all optional, shown with their defaults):
 ./run.sh --source ours --width 320 --height 200    # half res, auto-scaled
 ./run.sh --source ours --width 320 --height 200 --max-corners 240 --klt-win 13
 
+# --width/--height also set the capture resolution of the Visualize windows
+# (Camera + IMU, Camera + Depth + IMU), so what they show matches the pipeline.
+
 # Optical flow tracking AND corner detection have our own pure-NumPy
 # implementations (pyramidal Lucas-Kanade + Shi-Tomasi, no library). The KLT
 # inner loop is JIT-compiled with Numba (optional dep) so our own frontend runs
