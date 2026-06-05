@@ -109,3 +109,48 @@ class LoopCorrection:
     seq: int
     kf_poses: dict[int, np.ndarray]
     n_loops: int
+
+
+@dataclass(frozen=True)
+class CamSync:
+    """A stereo pair the camera-reader flow publishes as a sync trigger.
+
+    Published on ``topics.CAM_SYNC`` by :class:`~ours.flows.capture.cam_reader.CamReaderFlow`
+    once per scheduled frame. It carries the frames *and* their device timestamp
+    so the IMU-reader flow can both (a) drain its buffer up to ``ts_ns`` and
+    (b) pack the very same frames into the combined packet -- no second lookup,
+    no shared state between the two flows beyond this message.
+
+    ``ts_ns`` is the frame device timestamp (left camera), the cut used to select
+    the inertial samples that belong to this frame's interval.
+    """
+
+    seq: int
+    ts_ns: int
+    gray_left: np.ndarray
+    gray_right: np.ndarray | None
+
+
+@dataclass(frozen=True)
+class ImuCamPacket:
+    """A camera frame bundled with all IMU samples up to its timestamp.
+
+    Published on ``topics.IMUCAM_SAMPLE`` by
+    :class:`~ours.flows.capture.imu_reader.ImuReaderFlow` in response to each
+    :class:`CamSync`. This is the synchronised unit downstream consumers (state
+    estimation, visualiser) work on: a stereo pair plus exactly the inertial
+    measurements that fall in this frame's interval ``(prev_frame_ts, ts_ns]``,
+    selected by device timestamp (the only clock the IMU shares with the camera).
+
+    * ``imu_ts`` -- ``(M,)`` device timestamps (ns) of the samples, time-ordered.
+    * ``gyro`` / ``accel`` -- ``(M, 3)`` angular rate (rad/s) and specific force
+      (m/s^2). ``M`` may be 0 (e.g. the first frame, or a dropped IMU interval).
+    """
+
+    seq: int
+    ts_ns: int
+    gray_left: np.ndarray
+    gray_right: np.ndarray | None
+    imu_ts: np.ndarray
+    gyro: np.ndarray
+    accel: np.ndarray

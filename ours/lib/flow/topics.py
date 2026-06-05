@@ -17,6 +17,16 @@ Note: the back-end and SLAM flows both trigger off ``keyframe`` (NOT
 UI collector -- it is not yet fed back into odometry (no closed loop on the live
 pose path). Wire an odometry ``self.on(LOOP_CORRECTION, ...)`` when that
 feedback is added.
+
+Split-acquisition front-end (camera + IMU as two flows) adds two edges, parallel
+to the monolithic capture above and not wired into it::
+
+    cam-reader --cam.sync------> imu-reader      (trigger: stereo pair + ts)
+    imu-reader --imucam.sample-> downstream      (frames + IMU up to that ts)
+
+``cam.sync`` carries the frames so the IMU flow packs them with the inertial
+samples it drains up to the frame timestamp; ``imucam.sample`` is the combined,
+time-synced unit consumers (state estimation, visualiser) subscribe to.
 """
 from __future__ import annotations
 
@@ -27,3 +37,7 @@ POSE_ODOM = "pose.odom"
 KEYFRAME = "keyframe"
 POSE_REFINED = "pose.refined"
 LOOP_CORRECTION = "loop.correction"
+
+# Split-acquisition front-end (camera-reader <-> imu-reader).
+CAM_SYNC = "cam.sync"
+IMUCAM_SAMPLE = "imucam.sample"
