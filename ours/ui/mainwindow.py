@@ -206,8 +206,21 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("Synced camera + IMU view opened.", 2500)
 
     def _launch_triplet(self) -> None:
-        self._launch_tool(["-m", "ours.tools.synced_view", "--live"],
-                          "Camera + Depth + IMU triplet")
+        """Open the synced image+depth+IMU triplet inside the app (our own UI)."""
+        if not self._release_device("Camera + Depth + IMU triplet view"):
+            return
+        from .synced_window import SyncedViewWindow
+        # Reuse one instance so repeated opens don't stack streams on the
+        # single-client device (mirrors _open_imucam).
+        win = getattr(self, "_triplet_win", None)
+        if win is None:
+            win = SyncedViewWindow(parent=self)
+            self._triplet_win = win
+        win.show()
+        win.raise_()
+        win.activateWindow()
+        win.ensure_started()
+        self.statusBar().showMessage("Camera + Depth + IMU triplet opened.", 2500)
 
     def _launch_stereo(self) -> None:
         self._launch_tool(["-m", "ours.tools.stereo_view", "--live", "--fast"],

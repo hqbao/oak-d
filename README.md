@@ -135,8 +135,12 @@ primary START/STOP):
       an X/Y/Z body-axis triad make the magnitude and direction readable.
 
     This is the view for verifying the camera↔IMU time-sync.
-  - **Camera + Depth + IMU** triplet (`synced_view --live`) and **Stereo Depth**
-    (`stereo_view --live`) launch the proven cv2 viewers in their own process.
+  - **Camera + Depth + IMU** triplet opens an in-app Qt window
+    (`ours/ui/synced_window.py`): themed `image | depth | IMU` panels reusing the
+    same gyro chart + interactive 3D accel view, with a fixed-range TURBO depth
+    colormap (+ scale bar, `valid %`) — live off the OAK-D (host SGM) or a
+    recorded session. **Stereo Depth** (`stereo_view --live`) launches the proven
+    cv2 viewer in its own process.
 
 The same synced split front-end can be inspected **without the GUI** — a cv2
 window over a recorded session or the live device:
@@ -152,6 +156,7 @@ To self-verify the front-end with numbers instead of eyeballs (no device):
 .venv/bin/python -m ours.tools.imucam_sync_selftest --session sessions/gold/lab_loop_30s
 .venv/bin/python -m ours.tools.imu_calib_selftest    # raw IMU on imu.raw, calibrated IMU in imucam.sample
 QT_QPA_PLATFORM=offscreen .venv/bin/python -m ours.tools.imucam_window_selftest
+QT_QPA_PLATFORM=offscreen .venv/bin/python -m ours.tools.synced_window_selftest   # image|depth|IMU triplet window
 ```
 
 The imu-reader publishes the **raw** IMU for every frame interval on `imu.raw`
@@ -286,6 +291,7 @@ Self-tests (run before/after touching the from-scratch VIO):
 .venv/bin/python -m ours.tools.imucam_sync_selftest  # split cam/IMU sync contract (1 pkt/frame, samples in (prev,ts])
 .venv/bin/python -m ours.tools.oak_live_selftest     # single-client shared OAK-D (cam+IMU open the device once)
 QT_QPA_PLATFORM=offscreen .venv/bin/python -m ours.tools.imucam_window_selftest  # in-app synced view renders (offscreen Qt)
+QT_QPA_PLATFORM=offscreen .venv/bin/python -m ours.tools.synced_window_selftest  # image|depth|IMU triplet window renders (offscreen Qt)
 ```
 
 `klt_selftest.py` is the regression guard for the library-free frontend: it

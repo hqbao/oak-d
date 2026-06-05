@@ -58,25 +58,9 @@ from ours.lib import (  # noqa: E402
     SessionReader, SGMConfig, SGMStereoMatcher, StereoCalib, slice_imu,
 )
 from ours.lib.config.resolution import ResolutionProfile  # noqa: E402
+from ours.lib.viz.depth_render import colorize_depth  # noqa: E402,F401
 
-# Fixed depth range (metres) for the colormap so colours are stable across
-# frames (a per-frame autoscale makes the scene "breathe" and hides drift).
-_D_MIN = 0.3
-_D_MAX = 8.0
 _G = 9.80665  # m/s^2, only used to scale the accel arrow to ~unit at rest
-
-
-def colorize_depth(depth_m: np.ndarray) -> np.ndarray:
-    """Metric depth (m, 0 == invalid) -> BGR turbo image (near = red)."""
-    valid = depth_m > 1e-6
-    norm = np.zeros(depth_m.shape, dtype=np.uint8)
-    if valid.any():
-        z = np.clip(depth_m, _D_MIN, _D_MAX)
-        t = 1.0 - (z - _D_MIN) / (_D_MAX - _D_MIN)  # near = hot
-        norm[valid] = (t[valid] * 255.0).astype(np.uint8)
-    colored = cv2.applyColorMap(norm, cv2.COLORMAP_TURBO)
-    colored[~valid] = 0
-    return colored
 
 
 def _label(img: np.ndarray, text: str, y: int = 22) -> np.ndarray:

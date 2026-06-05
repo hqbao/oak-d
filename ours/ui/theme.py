@@ -87,6 +87,11 @@ QLabel#ImuCamStatus {{
     font-size: 11px;
     padding: 2px 4px;
 }}
+QLabel#ScaleTick {{
+    color: {TEXT_DIM};
+    font-size: 9px;
+    padding: 0px 2px;
+}}
 QWidget#Accel3DView, PlotWidget#GyroPlot {{
     background-color: {PANEL};
     border: 1px solid {PANEL_EDGE};
