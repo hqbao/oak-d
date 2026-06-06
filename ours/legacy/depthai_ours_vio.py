@@ -121,6 +121,25 @@ _VIO_CORR_MAX_T = 0.25           # m; reject corrections larger than this
 _CORR_MAX_STEP_T = 0.015                 # m per frame   (~0.3 m/s @ 20 fps)
 _CORR_MAX_STEP_R = float(np.deg2rad(0.5))  # rad per frame (~10 deg/s @ 20 fps)
 
+# Speed gate for the loose BA / loop-closure correction slew. The live BA map
+# can diverge from the frame-to-frame filter pose; slewing that (large)
+# correction onto the displayed tip WHILE the camera is pushing fast drags the
+# marker backward -- measured on device as ``disp/filt`` falling to 0.70-0.84
+# during a fast push (the "đẩy nhanh rồi ì lại" stall), even though the filter
+# pose itself tracks the motion faithfully (``filt/vo ~ 1.0``). So we FREEZE the
+# correction (no slew) whenever the filter speed is above this threshold: a
+# frozen correction is a rigid transform, which preserves the path length of the
+# live motion (``disp/filt = 1`` -> full-distance tracking, like ``ours``). Below
+# the threshold (slow / looping) the correction slews normally so BA drift and
+# SLAM loop closures still fold in. 1.0 m/s is chosen from the gold + fast_push
+# Basalt speed profiles: a loop / gentle motion stays almost entirely below it
+# (lab_loop p90=0.80 m/s -> the loop-closure correction is untouched, ATE
+# identical offline), while a fast hand push spends ~36% of its time above it
+# (fast_push p90=2.2 m/s) -> the fastest part of the push always freezes and
+# tracks the full distance. Verified offline: freeze@1.0 leaves every gold
+# session's Sim3 scale/ATE unchanged (the correction there is already small).
+_CORR_FREEZE_SPEED = 1.0                 # m/s; above this, freeze the loose corr
+
 # Column reorder optical (right, down, fwd) -> body FRD (fwd, right, down).
 # The viewer triad expects the attitude columns to be [forward, right, down],
 # but our VO's rotation columns are the optical axes [right, down, fwd]. The
@@ -619,6 +638,8 @@ class OakOursVioSource(PoseSource):
             diag_prev_disp = None
             diag_vo_fail = 0       # frames where f2f VO did not solve motion
             diag_vo_n = 0          # frames counted for the fail rate
+            diag_corr_frz = 0      # frames the loose correction was FROZEN (fast)
+            diag_corr_mag = 0.0    # latest |C_applied translation| (m)
             accel_n = 0
             accel_used = 0
             last_tilt_log = t0
@@ -932,8 +953,17 @@ class OakOursVioSource(PoseSource):
                         C_target = newC
                     # Ease toward the target so the correction never snaps, and
                     # rate-limit the step so a big BA jump cannot yank the marker.
-                    C_applied = _ease_se3(C_applied, C_target, 0.15,
+                    # Speed-gate the slew: freeze the correction while pushing fast
+                    # so the marker rides the rigid correction and tracks the full
+                    # distance (disp/filt=1), and only fold in BA drift when slow
+                    # (see _CORR_FREEZE_SPEED).
+                    slew = (0.15 if float(np.linalg.norm(tfilt.v))
+                            < _CORR_FREEZE_SPEED else 0.0)
+                    if slew == 0.0:
+                        diag_corr_frz += 1
+                    C_applied = _ease_se3(C_applied, C_target, slew,
                                           _CORR_MAX_STEP_T, _CORR_MAX_STEP_R)
+                    diag_corr_mag = float(np.linalg.norm(C_applied[:3, 3]))
                     pose = C_applied @ pose
 
                 if vio_state is not None:
@@ -1006,7 +1036,9 @@ class OakOursVioSource(PoseSource):
                     if newC is not None:
                         C_target = newC
                     C_prev = C_applied
-                    C_applied = _ease_se3(C_applied, C_target, 0.15,
+                    slew = (0.15 if float(np.linalg.norm(tfilt.v))
+                            < _CORR_FREEZE_SPEED else 0.0)
+                    C_applied = _ease_se3(C_applied, C_target, slew,
                                           _CORR_MAX_STEP_T, _CORR_MAX_STEP_R)
                     # Teleport displacement = how far THIS pose moves purely from
                     # the correction slewing (same vo pose, only the correction
@@ -1234,7 +1266,9 @@ class OakOursVioSource(PoseSource):
                           f"|v|={np.linalg.norm(tfilt.v):.2f}m/s "
                           f"klt={fe_cfg.win_size}/{fe_cfg.max_level}"
                           f"{'+jit' if HAVE_NUMBA else ''} "
-                          f"vofail={100*diag_vo_fail/max(diag_vo_n,1):2.0f}%")
+                          f"vofail={100*diag_vo_fail/max(diag_vo_n,1):2.0f}% "
+                          f"corr={diag_corr_mag*1000:4.0f}mm "
+                          f"frz={100*diag_corr_frz/max(diag_iter,1):2.0f}%")
                     frames = 0
                     last_fps_t = now
                     diag_backlog_sum = diag_recv = 0
@@ -1242,6 +1276,7 @@ class OakOursVioSource(PoseSource):
                     diag_iter = 0
                     diag_vo_path = diag_filt_path = diag_disp_path = 0.0
                     diag_vo_fail = diag_vo_n = 0
+                    diag_corr_frz = 0
 
             if ba_state is not None:
                 ba_state["stop"].set()

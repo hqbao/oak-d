@@ -212,7 +212,13 @@ mostly pure-Python and held the GIL ~17–30% of the time — measured 43 ms mea
 74 ms peak every 250 ms — which starved the read loop on a fast push so it
 dropped frames and the displayed path "đẩy nhanh rồi ì lại" / undershot. Moving
 it out-of-process removes that contention; the corrections are bit-identical, see
-`ours/tools/ba_worker_proc_selftest.py`.) The accelerometer levels roll/pitch to
+`ours/tools/ba_worker_proc_selftest.py`.) The BA/loop correction is also
+**speed-gated**: while the camera pushes fast (filter speed > 1 m/s) the
+correction is frozen so the live marker rides it as a rigid transform and tracks
+the full distance (like `ours`); it only slews in BA drift / loop closures when
+slow. This kills the residual "đẩy nhanh rồi ì lại" drag (the live BA map can
+diverge from the f2f filter pose, and slewing that large correction during a
+fast push dragged the marker back). The accelerometer levels roll/pitch to
 gravity at rest, while the **gyroscope** drives the inter-frame rotation prior:
 vision (PnP) corrects that rotation weighted by its inlier confidence, *and* by
 how far it disagrees with the gyro — so when a fast yaw makes the KLT tracker

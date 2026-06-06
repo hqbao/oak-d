@@ -57,7 +57,8 @@ def replay(session_dir: Path, max_frames: int = 0, verbose: bool = False,
            vel_damp: float = 0.9, resolve_disagree: bool = False,
            clamp_speed: float = 0.0, min_inliers: int = 0,
            ba: bool = False, ba_latency: int = 4, rate_limit: bool = True,
-           live_tip_raw: bool = False, klt_win: int = 0, klt_level: int = -1):
+           live_tip_raw: bool = False, klt_win: int = 0, klt_level: int = -1,
+           freeze_corr: bool = False, freeze_speed: float = 1.0):
     reader = SessionReader(session_dir)
     K = reader.K
     imu = reader.load_imu()
@@ -227,11 +228,16 @@ def replay(session_dir: Path, max_frames: int = 0, verbose: bool = False,
                         busy_until = n_proc + ba_latency
             while pending and pending[0][0] <= n_proc:
                 C_target = pending.pop(0)[1]
+            # Speed-gate the correction slew exactly like the live source: freeze
+            # the correction while the camera moves fast (the marker then rides
+            # the rigid correction and tracks the full push), slew only when slow.
+            slew = 0.15 if (not freeze_corr or float(np.linalg.norm(tfilt.v))
+                            < freeze_speed) else 0.0
             if rate_limit:
-                C_applied = _ease_se3(C_applied, C_target, 0.15,
+                C_applied = _ease_se3(C_applied, C_target, slew,
                                       _CORR_MAX_STEP_T, _CORR_MAX_STEP_R)
             else:
-                C_applied = _ease_se3(C_applied, C_target, 0.15)
+                C_applied = _ease_se3(C_applied, C_target, slew)
             if not live_tip_raw:
                 pos = (C_applied @ pose4)[:3, 3]      # BA-corrected display tip
             # live_tip_raw=True: tip stays raw (BA would only nudge history)
@@ -337,6 +343,13 @@ def main():
     ap.add_argument("--klt-level", type=int, default=-1, dest="klt_level",
                     help="override KLT pyramid max_level (-1=full default 3; "
                          "live-light preset uses 2 -> ~half trackable motion)")
+    ap.add_argument("--freeze-corr", action="store_true", dest="freeze_corr",
+                    help="with --ba, freeze the correction slew while moving "
+                         "fast (the live-source fix: marker rides the rigid "
+                         "correction -> full-distance tracking)")
+    ap.add_argument("--freeze-speed", type=float, default=1.0, dest="freeze_speed",
+                    help="filter speed (m/s) above which the correction freezes "
+                         "(default 1.0)")
     args = ap.parse_args()
 
     if args.all:
@@ -358,7 +371,9 @@ def main():
                             ba=args.ba, ba_latency=args.ba_latency,
                             rate_limit=not args.no_rate_limit,
                             live_tip_raw=args.live_tip_raw,
-                            klt_win=args.klt_win, klt_level=args.klt_level)
+                            klt_win=args.klt_win, klt_level=args.klt_level,
+                            freeze_corr=args.freeze_corr,
+                            freeze_speed=args.freeze_speed)
         score(sd, positions)
         print()
     return 0
