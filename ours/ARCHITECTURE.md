@@ -264,7 +264,7 @@ the maths lives in the engine, picked by one `worker` flag:
   process and reads the result back asynchronously. The BA Jacobian assembly / ORB
   / pose-graph solve is mostly pure-Python and would otherwise hold ~17-30 % of the
   read-loop's GIL → dropped frames → the frame-to-frame PnP under-measures fast
-  translation → the displayed path "ì lại" (undershoots). Out-of-process removes
+  translation → the displayed path stalls / undershoots. Out-of-process removes
   that contention entirely, so the live `ours-ba`/`ours-slam` **marker stays the
   responsive `pose.odom` tip — full distance, exactly like bare `ours`**.
 

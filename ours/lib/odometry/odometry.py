@@ -224,7 +224,7 @@ class OdometryConfig:
     # tracks are low-parallax and PnP turns the rotational image flow into a
     # spurious translation -- a per-frame "jump" much larger than any real hand
     # motion. Integrated, these jumps make the displayed path wobble like a
-    # roller-coaster even though the net stays put (the "đi tàu lượn" symptom).
+    # roller-coaster even though the net stays put (the roller-coaster symptom).
     # There is no vision-only signal that separates a phantom jump from a real
     # one (their magnitudes overlap), but a PHYSICAL upper bound does exist: a
     # hand cannot translate a camera faster than a few m/s. When this is > 0 and
@@ -490,7 +490,7 @@ class RGBDVisualOdometry:
                     # ``imu_moving`` vetoes the freeze: a motion-blurred shake
                     # ALSO starves PnP of inliers, but there the camera IS moving
                     # and freezing would pin the marker through real motion (the
-                    # "move + shake -> ours-ba/slam đứng ì" symptom). The
+                    # "move + shake -> ours-ba/slam freezes in place" symptom). The
                     # accelerometer is the honest discriminator -- at rest the
                     # sparse inliers mean a blank wall (freeze), under motion they
                     # mean blur (keep the vision translation we did solve). Only

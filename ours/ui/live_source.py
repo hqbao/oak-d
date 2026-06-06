@@ -20,8 +20,8 @@ map behind that marker:
 
 Crucially the marker is **decoupled** from the heavy flow: the BA/SLAM output
 (``pose.refined`` / ``loop.correction``) feeds the map overlay, never the marker,
-so an async correction can never drag or stall the live tip -- the "ì lại"
-(undershoot) failure mode under fast / shaky motion. Offline-verified:
+so an async correction can never drag or stall the live tip -- the stall /
+undershoot failure mode under fast / shaky motion. Offline-verified:
 ``pose.odom`` is byte-identical with and without BA running.
 
 The graph is built **realtime-bounded**: the heavy flow is ``latest_only=True``
@@ -34,7 +34,7 @@ already-stable keypoint-depth live view.
 Crucially the heavy flow also runs ``worker=True``: the BA / SLAM solve executes
 **out-of-process** (see :mod:`ours.lib.engine.subprocess`), so its mostly-pure-Python
 work never holds the camera read loop's GIL. That is the actual fix for the
-fast-push "ì lại" undershoot -- a marker that is merely *data*-decoupled from the
+fast-push stall / undershoot -- a marker that is merely *data*-decoupled from the
 correction still lagged because an in-thread solve starved the read loop and
 dropped frames; out-of-process removes that contention entirely.
 
@@ -86,7 +86,7 @@ class FlowPoseSource(PoseSource):
         #   "slam" -> SlamFlow (loop closure). The heavy flow is built latest-only
         # so it can never backlog the marker. Its refined output (pose.refined /
         # loop.correction) feeds the map overlay, NOT the marker -- so the marker
-        # can never be dragged/stalled by an async correction (the earlier "ì lại"
+        # can never be dragged/stalled by an async correction (the earlier stall /
         # undershoot failure mode).
         if mode not in ("odom", "ba", "slam"):
             raise ValueError(f"FlowPoseSource mode must be odom|ba|slam, got {mode!r}")

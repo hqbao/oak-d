@@ -12,7 +12,7 @@ never care *where* the solve runs:
 * :class:`~ours.lib.engine.subprocess.SubprocessEngine` -- ships each keyframe to
   a separate process and reads the result back asynchronously. Used by the LIVE
   path so the mostly-pure-Python solve never holds the GIL of the camera read
-  loop (the cause of the fast-push "ì lại" undershoot -- see
+  loop (the cause of the fast-push stall / undershoot -- see
   ``ours/lib/engine/subprocess.py``).
 
 Both implement the same four methods, so a flow picks one with a single ``worker``

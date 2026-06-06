@@ -8,7 +8,7 @@ thread they steal ~17-30 % of the GIL from the device frame-read loop (measured 
 ``fast_push_15s``); a starved read loop drains its camera queues to the latest
 frame and drops the backlog, so each surviving frame spans a larger motion, the
 frame-to-frame PnP under-measures the translation, and the displayed path
-"đẩy nhanh rồi ì lại" (undershoots). Bare ``ours`` has no backend thread and never
+stalls / undershoots. Bare ``ours`` has no backend thread and never
 shows this. A separate process removes the GIL contention entirely: the read loop
 owns its interpreter and keeps full frame rate under solve load.
 

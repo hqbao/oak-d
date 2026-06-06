@@ -211,7 +211,7 @@ Both `ours-ba` and `ours-slam` run their heavy optimisation **out-of-process**
 from the camera read loop. (Run in-thread the solve is mostly pure-Python and held
 the GIL ~17–30% of the time — measured 43 ms mean / 74 ms peak every 250 ms — which
 starved the read loop on a fast push so it dropped frames and the displayed path
-"đẩy nhanh rồi ì lại" / undershot. A separate process removes that contention
+stalled / undershot. A separate process removes that contention
 entirely; the corrections are bit-identical, see
 `ours/tools/engine_parity_selftest.py`.) The live **marker is always the responsive
 `pose.odom` tip** — it is never touched by the correction, so it tracks the full
@@ -242,7 +242,7 @@ gold sessions, not guessed:
 - **`max_translation_speed`** (live 4.0 m/s) — under a hard shake or very fast
   yaw the surviving KLT tracks are low-parallax and PnP reads the rotational
   image flow as a per-frame translation *jump* far larger than any real hand
-  motion; integrated, the path wobbles ("đi tàu lượn"). A hand cannot move the
+  motion; integrated, the path wobbles (roller-coaster). A hand cannot move the
   camera faster than a few m/s, so the per-frame translation is clamped to that
   physical bound (needs the per-frame `dt_s`) — caps only the non-physical
   spikes, real in-budget motion is untouched.
@@ -259,8 +259,8 @@ gold sessions, not guessed:
   one frame is correct anyway (measured white-wall path-jitter 4.3 → 2.0,
   fast-push ATE 2.14% → 1.82%). **IMU-gated** (`imu_moving`): a motion-blurred
   shake *also* starves PnP of inliers, but there the camera is genuinely moving
-  and freezing would pin the marker through real motion (the "linear move + rung
-  lắc → `ours-ba`/`ours-slam` đứng ì một chỗ while `ours` tracks full" symptom —
+  and freezing would pin the marker through real motion (the "linear move +
+  shake → `ours-ba`/`ours-slam` freezes in place while `ours` tracks full" symptom —
   the freeze fired on the shaky frames, which carry 2× the gyro/accel of the
   rest). The accelerometer residual vs its EMA is the honest discriminator, so
   the freeze fires **only when still** (`> _REST_MOTION_THRESH` vetoes it).

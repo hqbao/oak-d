@@ -13,7 +13,7 @@
 
 ---
 
-## 0. Why this matters for the "đẩy nhanh rồi ì lại" bug
+## 0. Why this matters for the fast-push stall / undershoot bug
 
 Measured on our gold suite (offline, `--depth ours`, post VO‑prior fix):
 

@@ -125,7 +125,7 @@ guessing:
 
 | Guard | Live value | What it fixes | Measured |
 |---|---|---|---|
-| `max_translation_speed` | 4.0 m/s | Phantom per-frame jumps under shake/yaw ("đi tàu lượn" wobble) — clamps to a physical hand-speed bound | decimate=3 fast-push jitter 36.7→26.9, scale preserved; full-rate ~no-op |
+| `max_translation_speed` | 4.0 m/s | Phantom per-frame jumps under shake/yaw (roller-coaster wobble) — clamps to a physical hand-speed bound | decimate=3 fast-push jitter 36.7→26.9, scale preserved; full-rate ~no-op |
 | `min_inliers_for_translation` | 12 | White-wall garbage: KLT fills 400 corners but PnP keeps ~0–11 inliers → freeze translation (gyro still turns) | white-wall path-jitter 4.3→2.0; fast-push ATE 2.14%→1.82% (unharmed; p25=33 inliers) |
 | `resolve_translation_on_disagree` | **off** | (kept available) re-solve t with gyro rotation locked when vision disagrees | **ineffective** on `push_shake_20s` (fires ~8% frames, never zeroed t) → left off |
 
