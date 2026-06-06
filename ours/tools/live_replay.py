@@ -58,9 +58,22 @@ def replay(session_dir: Path, max_frames: int = 0, verbose: bool = False,
            clamp_speed: float = 0.0, min_inliers: int = 0,
            ba: bool = False, ba_latency: int = 4, rate_limit: bool = True,
            live_tip_raw: bool = False, klt_win: int = 0, klt_level: int = -1,
-           freeze_corr: bool = False, freeze_speed: float = 1.0):
+           freeze_corr: bool = False, freeze_speed: float = 1.0,
+           sgm_depth: bool = False):
     reader = SessionReader(session_dir)
     K = reader.K
+    # Depth source. The live ours-ba/slam source computes OUR SGM depth every
+    # frame (matcher.dense_depth_rectified_left) from the rectified-left + raw
+    # right stereo pair. Under shake the stereo pair is motion-blurred so the SGM
+    # disparity is noisy -> noisy landmark depth -> the BA/SLAM map can diverge.
+    # The recorded chip depth (fr.depth_m) is the hardware ISP map and is much
+    # cleaner, so using it would NOT reproduce the live divergence. sgm_depth=True
+    # rebuilds depth exactly as the device does, making this the faithful repro.
+    matcher = None
+    if sgm_depth:
+        from ours.lib.stereo.stereo import SGMConfig, SGMStereoMatcher
+        matcher = SGMStereoMatcher.from_calib(reader.calib, SGMConfig.live(),
+                                              rectify_left=True)
     imu = reader.load_imu()
     imu_ts = imu["ts_ns"]
     imu_gyro = imu["gyro"]
@@ -139,9 +152,12 @@ def replay(session_dir: Path, max_frames: int = 0, verbose: bool = False,
     n_proc = 0
 
     for i in idx_proc:
-        fr = reader.load_frame(i)
+        fr = reader.load_frame(i, load_right=(matcher is not None))
         gray = fr.gray_left
         depth = fr.depth_m
+        if matcher is not None:
+            # Faithful live path: SGM from the (possibly blurred) stereo pair.
+            gray, depth = matcher.dense_depth_rectified_left(gray, fr.gray_right)
 
         # Accumulate IMU samples spanning (prev_frame_ts, fr.ts_ns]: integrate
         # the gyro into an inter-frame rotation, average the accel.
@@ -173,7 +189,15 @@ def replay(session_dir: Path, max_frames: int = 0, verbose: bool = False,
                 if prev_frame_ts is not None else 1.0 / 20.0)
         prev_frame_ts = fr.ts_ns
 
-        vo.process(gray, depth, R_prior=R_prior, dt_s=dt_f)
+        # IMU motion gate for the low-inlier translation freeze (mirror the live
+        # source): a motion-blurred shake also starves PnP of inliers, but only a
+        # still textureless wall should freeze. Computed from the previous
+        # frame's accel EMA, exactly as depthai_ours_vio.py does.
+        imu_moving = bool(
+            accel_raw is not None and accel_ema is not None
+            and float(np.linalg.norm(accel_raw - accel_ema)) > _REST_MOTION_THRESH)
+
+        vo.process(gray, depth, R_prior=R_prior, dt_s=dt_f, imu_moving=imu_moving)
         n_proc += 1
         if not bool(vo.last_info.get("ok", False)):
             n_fail += 1
@@ -350,6 +374,10 @@ def main():
     ap.add_argument("--freeze-speed", type=float, default=1.0, dest="freeze_speed",
                     help="filter speed (m/s) above which the correction freezes "
                          "(default 1.0)")
+    ap.add_argument("--sgm-depth", action="store_true", dest="sgm_depth",
+                    help="compute OUR SGM depth every frame from the recorded "
+                         "stereo pair (faithful live path) instead of the clean "
+                         "recorded chip depth -- needed to repro shake divergence")
     args = ap.parse_args()
 
     if args.all:
@@ -373,7 +401,8 @@ def main():
                             live_tip_raw=args.live_tip_raw,
                             klt_win=args.klt_win, klt_level=args.klt_level,
                             freeze_corr=args.freeze_corr,
-                            freeze_speed=args.freeze_speed)
+                            freeze_speed=args.freeze_speed,
+                            sgm_depth=args.sgm_depth)
         score(sd, positions)
         print()
     return 0

@@ -371,7 +371,8 @@ class RGBDVisualOdometry:
 
     def process(self, gray: np.ndarray, depth_m: np.ndarray,
                 R_prior: np.ndarray | None = None,
-                dt_s: float | None = None) -> np.ndarray:
+                dt_s: float | None = None,
+                imu_moving: bool = False) -> np.ndarray:
         """Advance odometry by one frame; returns the current 4x4 world pose.
 
         Thin wrapper: :meth:`track` then :meth:`estimate`. Kept so every existing
@@ -387,12 +388,17 @@ class RGBDVisualOdometry:
         seconds; when given together with ``max_translation_speed`` it bounds the
         per-frame translation to a physically plausible hand speed (clamps the
         non-physical phantom jumps that make the path wobble under shake/yaw).
+
+        ``imu_moving`` (optional) tells the low-inlier translation freeze that the
+        IMU sees real motion this frame, so a sparse-inlier solve is motion blur
+        (keep translating) NOT a textureless wall (freeze). See :meth:`estimate`.
         """
-        return self.estimate(self.track(gray), depth_m, R_prior, dt_s)
+        return self.estimate(self.track(gray), depth_m, R_prior, dt_s, imu_moving)
 
     def estimate(self, cur_obs: dict[int, np.ndarray], depth_m: np.ndarray,
                  R_prior: np.ndarray | None = None,
-                 dt_s: float | None = None) -> np.ndarray:
+                 dt_s: float | None = None,
+                 imu_moving: bool = False) -> np.ndarray:
         """Estimate motion from already-tracked features; returns the world pose.
 
         ``cur_obs`` is the live ``{track_id: current_pixel}`` produced by
@@ -481,8 +487,18 @@ class RGBDVisualOdometry:
                     # inliers -> textureless / white wall). Advance rotation by
                     # the gyro but hold the position put; do NOT coast (no real
                     # motion to coast on a blank wall). Off when the gate is 0.
+                    #
+                    # ``imu_moving`` vetoes the freeze: a motion-blurred shake
+                    # ALSO starves PnP of inliers, but there the camera IS moving
+                    # and freezing would pin the marker through real motion (the
+                    # "move + shake -> ours-ba/slam đứng ì" symptom). The
+                    # accelerometer is the honest discriminator -- at rest the
+                    # sparse inliers mean a blank wall (freeze), under motion they
+                    # mean blur (keep the vision translation we did solve). Only
+                    # the still+textureless case freezes.
                     if (self.cfg.min_inliers_for_translation > 0
-                            and ninl < self.cfg.min_inliers_for_translation):
+                            and ninl < self.cfg.min_inliers_for_translation
+                            and not imu_moving):
                         info["n_inliers"] = ninl
                         info["reason"] = "low_inliers_frozen"
                         if self.cfg.gyro_fuse and R_prior is not None:

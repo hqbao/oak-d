@@ -846,9 +846,22 @@ class OakOursVioSource(PoseSource):
                         if prev_frame_ts is not None else 1.0 / 30.0)
                 prev_frame_ts = frame_ts
 
+                # IMU motion gate for the odometry's low-inlier translation
+                # freeze. A textureless wall and a motion-blurred shake both
+                # starve PnP of inliers, but only the wall should freeze (a shake
+                # is REAL motion -- freezing it pins ours-ba/slam in place while
+                # ours keeps moving, the user's "rung lắc -> đứng ì" symptom). The
+                # accelerometer residual vs its EMA separates them: ~0 at rest
+                # (wall), large under shake. Computed from the PREVIOUS frame's
+                # EMA (updated post-pose below); fine since the EMA is slow.
+                imu_moving = bool(
+                    accel_raw is not None and accel_ema is not None
+                    and float(np.linalg.norm(accel_raw - accel_ema))
+                    > _REST_MOTION_THRESH)
+
                 _vo_t0 = time.monotonic()
                 vo.process(gray, depth_m, R_prior=R_prior,  # camera-optical world
-                           dt_s=dt_f)
+                           dt_s=dt_f, imu_moving=imu_moving)
                 diag_vo_ms += (time.monotonic() - _vo_t0) * 1e3
 
 

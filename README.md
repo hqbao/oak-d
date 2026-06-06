@@ -254,7 +254,16 @@ gold sessions, not guessed:
   any real motion (fast-push p25 = 33 inliers), so normal use is untouched; the
   few fast-push frames that dip below it genuinely lost tracking, where freezing
   one frame is correct anyway (measured white-wall path-jitter 4.3 → 2.0,
-  fast-push ATE 2.14% → 1.82%).
+  fast-push ATE 2.14% → 1.82%). **IMU-gated** (`imu_moving`): a motion-blurred
+  shake *also* starves PnP of inliers, but there the camera is genuinely moving
+  and freezing would pin the marker through real motion (the "linear move + rung
+  lắc → `ours-ba`/`ours-slam` đứng ì một chỗ while `ours` tracks full" symptom —
+  the freeze fired on the shaky frames, which carry 2× the gyro/accel of the
+  rest). The accelerometer residual vs its EMA is the honest discriminator, so
+  the freeze fires **only when still** (`> _REST_MOTION_THRESH` vetoes it).
+  Offline on `shake_linear_20s` this recovered the frozen frames (12 → 0,
+  display path 15.05 → 16.29 m, matching `ours` 16.51 m). The legacy tools pass
+  no flag (`imu_moving=False`) so every offline/gold score is byte-identical.
 - **`resolve_translation_on_disagree`** — kept available but **left off live**:
   measured on `push_shake_20s` its disagreement gate fires on only ~8% of frames
   and never zeroed the translation, so it was ineffective; the freeze under hard
