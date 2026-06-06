@@ -617,6 +617,8 @@ class OakOursVioSource(PoseSource):
             diag_prev_vo = None
             diag_prev_filt = None
             diag_prev_disp = None
+            diag_vo_fail = 0       # frames where f2f VO did not solve motion
+            diag_vo_n = 0          # frames counted for the fail rate
             accel_n = 0
             accel_used = 0
             last_tilt_log = t0
@@ -881,6 +883,9 @@ class OakOursVioSource(PoseSource):
                     so3_log(R_imu_accum)))) if gyro_cnt > 0 else 0.0)
                 vo_t_now = vo.pose[:3, 3].copy()
                 vis_ok = bool(vo.last_info.get("ok", False))
+                diag_vo_n += 1
+                if not vis_ok:
+                    diag_vo_fail += 1
                 if prev_vo_t is not None and vis_ok:
                     dp_vis = vo_t_now - prev_vo_t
                 else:
@@ -1226,13 +1231,17 @@ class OakOursVioSource(PoseSource):
                           f"disp={diag_disp_path*1000:6.0f}mm "
                           f"(filt/vo={diag_filt_path/max(diag_vo_path,1e-6):.2f} "
                           f"disp/filt={diag_disp_path/max(diag_filt_path,1e-6):.2f}) "
-                          f"|v|={np.linalg.norm(tfilt.v):.2f}m/s")
+                          f"|v|={np.linalg.norm(tfilt.v):.2f}m/s "
+                          f"klt={fe_cfg.win_size}/{fe_cfg.max_level}"
+                          f"{'+jit' if HAVE_NUMBA else ''} "
+                          f"vofail={100*diag_vo_fail/max(diag_vo_n,1):2.0f}%")
                     frames = 0
                     last_fps_t = now
                     diag_backlog_sum = diag_recv = 0
                     diag_sgm_ms = diag_vo_ms = diag_emit_ms = diag_loop_ms = 0.0
                     diag_iter = 0
                     diag_vo_path = diag_filt_path = diag_disp_path = 0.0
+                    diag_vo_fail = diag_vo_n = 0
 
             if ba_state is not None:
                 ba_state["stop"].set()

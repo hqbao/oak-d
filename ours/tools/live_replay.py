@@ -55,7 +55,9 @@ _REST_MOTION_THRESH = 0.35   # m/s^2, same as the live source
 def replay(session_dir: Path, max_frames: int = 0, verbose: bool = False,
            no_accel: bool = False, decimate: int = 1, lock_trans: bool = False,
            vel_damp: float = 0.9, resolve_disagree: bool = False,
-           clamp_speed: float = 0.0, min_inliers: int = 0):
+           clamp_speed: float = 0.0, min_inliers: int = 0,
+           ba: bool = False, ba_latency: int = 4, rate_limit: bool = True,
+           live_tip_raw: bool = False, klt_win: int = 0, klt_level: int = -1):
     reader = SessionReader(session_dir)
     K = reader.K
     imu = reader.load_imu()
@@ -85,11 +87,40 @@ def replay(session_dir: Path, max_frames: int = 0, verbose: bool = False,
                             max_translation_speed=clamp_speed,
                             min_inliers_for_translation=min_inliers)
     vo = RGBDVisualOdometry(K, od_cfg)
+    if klt_win > 0 or klt_level >= 0:
+        from ours.lib.frontend.frontend import FrontendConfig, KLTFrontend
+        base = FrontendConfig()
+        fe = FrontendConfig(
+            win_size=klt_win if klt_win > 0 else base.win_size,
+            max_level=klt_level if klt_level >= 0 else base.max_level)
+        vo.frontend = KLTFrontend(fe)
     if accel0_cam is not None:
         vo.align_to_gravity(accel0_cam)
 
     tfilt = InertialTranslationFilter(InertialFilterConfig(vel_damp=vel_damp))
     tfilt.reset(vo.pose[:3, 3].copy())
+
+    # --- optional ours-ba correction stage (faithful to the live source) ----
+    # Mirrors depthai_ours_vio.py: a background WindowedBAMap is fed the filtered
+    # f2f display pose every kf_every frames; it returns a world-frame correction
+    # C = inv(T_ba) @ T_cw that is eased (15%/frame, optionally rate-limited)
+    # onto the displayed tip. The worker latency + single-slot drop are modelled
+    # so the offline trajectory matches what the device shows for ours-ba.
+    ba_map = None
+    C_applied = np.eye(4)
+    C_target = np.eye(4)
+    kf_count = 0
+    busy_until = -1
+    pending: list[tuple[int, np.ndarray]] = []   # (reveal_frame, C)
+    if ba:
+        from ours.lib import WindowedBAMap, WindowedConfig
+        from ours.lib.backend.bundle import BAConfig
+        from ours.legacy.depthai_ours_vio import (
+            _ease_se3, _CORR_MAX_STEP_T, _CORR_MAX_STEP_R)
+        bacfg = WindowedConfig(window=6, kf_every=5,
+                               ba=BAConfig(max_iters=5, use_gravity=True,
+                                           use_vo_trans_prior=True))
+        ba_map = WindowedBAMap(K, bacfg)
 
     # frame indices actually processed (decimate>1 simulates the live loop
     # dropping its backlog when the host cannot keep up at the recorded fps).
@@ -172,6 +203,38 @@ def replay(session_dir: Path, max_frames: int = 0, verbose: bool = False,
         prev_vo_t = vo_t_now
         accel_in = None if no_accel else accel_cam
         pos = tfilt.step(dt_f, R_wc, accel_in, dp_vis, gyro_deg).copy()
+
+        # --- ours-ba correction stage (async BA, eased+rate-limited) --------
+        if ba_map is not None:
+            pose4 = np.eye(4)
+            pose4[:3, :3] = vo.pose[:3, :3]
+            pose4[:3, 3] = pos                       # filtered f2f display tip
+            kf_count += 1
+            if kf_count >= 5:
+                kf_count = 0
+                if n_proc >= busy_until:             # worker free (else: drop)
+                    st = vo.frontend.tracks
+                    T_cw = np.linalg.inv(pose4)
+                    ba_map.add_keyframe(
+                        T_cw, st.ids.copy(), st.points.copy(), depth.copy(),
+                        accel_cam=(accel_cam.copy()
+                                   if (accel_cam is not None and at_rest)
+                                   else None))
+                    post = ba_map.run_ba()
+                    if post is not None:
+                        C_new = np.linalg.inv(post) @ T_cw
+                        pending.append((n_proc + ba_latency, C_new))
+                        busy_until = n_proc + ba_latency
+            while pending and pending[0][0] <= n_proc:
+                C_target = pending.pop(0)[1]
+            if rate_limit:
+                C_applied = _ease_se3(C_applied, C_target, 0.15,
+                                      _CORR_MAX_STEP_T, _CORR_MAX_STEP_R)
+            else:
+                C_applied = _ease_se3(C_applied, C_target, 0.15)
+            if not live_tip_raw:
+                pos = (C_applied @ pose4)[:3, 3]      # BA-corrected display tip
+            # live_tip_raw=True: tip stays raw (BA would only nudge history)
         positions[fr.seq] = pos
 
         if verbose and n_proc % 40 == 0:
@@ -258,6 +321,22 @@ def main():
     ap.add_argument("--min-inliers", type=int, default=0, dest="min_inliers",
                     help="freeze translation when PnP inliers < this (white-wall"
                          " / textureless freeze); 0 = off")
+    ap.add_argument("--ba", action="store_true",
+                    help="add the ours-ba correction stage (async windowed BA "
+                         "eased onto the live tip), matching --source ours-ba")
+    ap.add_argument("--ba-latency", type=int, default=4, dest="ba_latency",
+                    help="modelled BA worker latency in frames (drop while busy)")
+    ap.add_argument("--no-rate-limit", action="store_true", dest="no_rate_limit",
+                    help="with --ba, disable the per-frame correction step cap")
+    ap.add_argument("--live-tip-raw", action="store_true", dest="live_tip_raw",
+                    help="with --ba, keep the live tip = raw VO (BA corrects "
+                         "history/map only) -- the candidate fix")
+    ap.add_argument("--klt-win", type=int, default=0, dest="klt_win",
+                    help="override KLT window size (0=full default 21; "
+                         "live-light preset uses 13)")
+    ap.add_argument("--klt-level", type=int, default=-1, dest="klt_level",
+                    help="override KLT pyramid max_level (-1=full default 3; "
+                         "live-light preset uses 2 -> ~half trackable motion)")
     args = ap.parse_args()
 
     if args.all:
@@ -275,7 +354,11 @@ def main():
                             lock_trans=args.lock, vel_damp=args.vel_damp,
                             resolve_disagree=args.resolve_disagree,
                             clamp_speed=args.clamp_speed,
-                            min_inliers=args.min_inliers)
+                            min_inliers=args.min_inliers,
+                            ba=args.ba, ba_latency=args.ba_latency,
+                            rate_limit=not args.no_rate_limit,
+                            live_tip_raw=args.live_tip_raw,
+                            klt_win=args.klt_win, klt_level=args.klt_level)
         score(sd, positions)
         print()
     return 0
