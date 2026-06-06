@@ -1171,16 +1171,24 @@ class OakOursVioSource(PoseSource):
                     self.fps = frames / (now - last_fps_t)
                     win = now - last_fps_t
                     n = max(diag_iter, 1)
-                    print(f"[ours-vio] thru recv={diag_recv/win:4.1f}fps "
+                    tag = f"ours-{self.backend}"
+                    print(f"[{tag}] thru recv={diag_recv/win:4.1f}fps "
                           f"proc={frames/win:4.1f}fps drop={diag_backlog_sum} "
                           f"sgm={diag_sgm_ms/n:4.1f}ms vo={diag_vo_ms/n:4.1f}ms "
                           f"emit={diag_emit_ms/n:4.1f}ms "
                           f"loop={diag_loop_ms/n:4.1f}ms")
-                    print(f"[ours-vio] path  vo={diag_vo_path*1000:6.0f}mm "
+                    # Translation accounting: where motion is lost between the raw
+                    # VO, the inertial filter and the displayed (post-correction)
+                    # path, plus the current filter speed. filt/vo<1 -> the filter
+                    # is undershooting (the "đẩy nhanh rồi ì lại" symptom); |v| is
+                    # the live speed so a stall reads as |v| collapsing to ~0 while
+                    # the camera is still moving.
+                    print(f"[{tag}] path  vo={diag_vo_path*1000:6.0f}mm "
                           f"filt={diag_filt_path*1000:6.0f}mm "
                           f"disp={diag_disp_path*1000:6.0f}mm "
                           f"(filt/vo={diag_filt_path/max(diag_vo_path,1e-6):.2f} "
-                          f"disp/filt={diag_disp_path/max(diag_filt_path,1e-6):.2f})")
+                          f"disp/filt={diag_disp_path/max(diag_filt_path,1e-6):.2f}) "
+                          f"|v|={np.linalg.norm(tfilt.v):.2f}m/s")
                     frames = 0
                     last_fps_t = now
                     diag_backlog_sum = diag_recv = 0
