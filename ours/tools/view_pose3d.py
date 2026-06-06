@@ -46,16 +46,28 @@ def _build_source(name: str, args):
         return FlowPoseSource(width=args.width, height=args.height,
                               fps=args.fps,
                               recalibrate_bias=args.recalibrate_bias)
+    if name in ("ours-ba", "ours-slam"):
+        # Rebuilt on the SAME flow pipeline as ``ours`` (NOT the legacy
+        # monolith): the live marker stays the responsive pose.odom tip (tracks
+        # the full distance like ``ours``, never dragged), while the windowed-BA
+        # (``ours-ba``) or loop-closure SLAM (``ours-slam``) flow runs latest-only
+        # in the background to refine the map behind it. ``mode`` selects which
+        # optimiser runs.
+        from ours.ui.live_source import FlowPoseSource
+        return FlowPoseSource(width=args.width, height=args.height,
+                              fps=args.fps,
+                              recalibrate_bias=args.recalibrate_bias,
+                              mode="ba" if name == "ours-ba" else "slam")
     if name == "ours-legacy":
         from ours.legacy.depthai_ours_vio import OakOursVioSource
         return OakOursVioSource(fps=args.fps, backend="f2f", **res_kw)
-    if name == "ours-ba":
+    if name == "ours-legacy-ba":
         from ours.legacy.depthai_ours_vio import OakOursVioSource
         return OakOursVioSource(
             fps=args.fps, backend="ba",
             ba_window=args.ba_window, ba_kf_every=args.ba_kf_every,
             ba_iters=args.ba_iters, ba_marg=args.marg, **res_kw)
-    if name == "ours-slam":
+    if name == "ours-legacy-slam":
         from ours.legacy.depthai_ours_vio import OakOursVioSource
         return OakOursVioSource(
             fps=args.fps, backend="slam",
@@ -69,18 +81,21 @@ def _build_source(name: str, args):
             fps=args.fps, backend="vio",
             ba_window=args.ba_window, ba_kf_every=args.ba_kf_every, **res_kw)
     raise SystemExit(f"unknown --source '{name}' "
-                     f"(expected: fake|ours|ours-legacy|ours-ba|ours-slam|ours-vio)")
+                     f"(expected: fake|ours|ours-ba|ours-slam|ours-legacy|"
+                     f"ours-legacy-ba|ours-legacy-slam|ours-vio)")
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="3D pose viewer (our VIO)")
     ap.add_argument("--source", default="ours",
-                    choices=("fake", "ours", "ours-legacy", "ours-ba",
-                             "ours-slam", "ours-vio"),
+                    choices=("fake", "ours", "ours-ba", "ours-slam",
+                             "ours-legacy", "ours-legacy-ba", "ours-legacy-slam",
+                             "ours-vio"),
                     help="pose provider (ours = flow pipeline, f2f live; "
-                         "ours-legacy = monolithic f2f source; ours-ba = "
-                         "windowed BA; ours-slam = f2f + loop-closure SLAM; "
-                         "ours-vio = tight-coupled visual+IMU VIO)")
+                         "ours-ba = flow pipeline + windowed BA (map refine, "
+                         "marker stays responsive f2f); ours-slam = flow "
+                         "pipeline + loop-closure SLAM; ours-legacy* = the old "
+                         "monolithic sources; ours-vio = tight-coupled VIO)")
     ap.add_argument("--fps", type=int, default=20,
                     help="camera frame rate (ours/ours-ba/ours-slam) [20]")
     ap.add_argument("--recalibrate-bias", action="store_true",

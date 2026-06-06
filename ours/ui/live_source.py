@@ -6,20 +6,30 @@ whose callback converts each streamed ``pose.odom`` (camera-optical world) into 
 viewer :class:`~ours.lib.misc.pose.Pose` in NED and pushes it through the
 :class:`~ours.ui.source.PoseSource` callback the viewer already understands.
 
-It replaces the monolithic ``OakOursVioSource`` as the default live source while
-keeping the same UI contract (start / stop / fps / error). The displayed
-trajectory is the real-time frame-to-frame VO (``pose.odom``).
+It replaces the monolithic ``OakOursVioSource`` as the live source for every
+mode while keeping the same UI contract (start / stop / fps / error). The
+displayed MARKER is always the real-time frame-to-frame VO (``pose.odom``) -- the
+responsive tip that tracks the camera at full distance.
 
-It builds the live graph **realtime-bounded**: ``with_backend_slam=False`` (the
-windowed-BA back-end + loop-closing SLAM are NOT built — this source displays
-``pose.odom`` only, so running them would burn CPU and, worse, pile keyframe
-images in their UNBOUNDED FIFO inboxes until host memory pressure starves the
-depthai XLink and the OAK-D firmware watchdog crashes the device) and
-``realtime_latest=True`` (the cam/imu_cam/odometry inboxes coalesce to the newest
-frame, so a momentarily slow consumer drops stale frames instead of growing an
-unbounded backlog). This mirrors the already-stable keypoint-depth live view,
-which runs the same device with the same two flags. Applying BA/SLAM corrections
-to the displayed path is a follow-up that must first bound the keyframe path.
+``mode`` selects which heavy optimiser flow runs in the BACKGROUND to refine the
+map behind that marker:
+
+* ``"odom"`` -- none (bare ``ours``).
+* ``"ba"``   -- the windowed-BA back-end (``ours-ba``).
+* ``"slam"`` -- the loop-closing SLAM flow (``ours-slam``).
+
+Crucially the marker is **decoupled** from the heavy flow: the BA/SLAM output
+(``pose.refined`` / ``loop.correction``) feeds the map overlay, never the marker,
+so an async correction can never drag or stall the live tip -- the failure mode
+that made the legacy source "ì lại" under fast / shaky motion. Offline-verified:
+``pose.odom`` is byte-identical with and without BA running.
+
+The graph is built **realtime-bounded**: the heavy flow is ``latest_only=True``
+(its keyframe inbox coalesces, so a slow BA / loop solve drops backlog instead of
+piling keyframe images in an unbounded FIFO until the depthai XLink starves and
+the OAK-D watchdog crashes the device), and the cam/imu_cam/odometry inboxes are
+``realtime_latest=True`` (newest-frame-wins, bounded latency). This mirrors the
+already-stable keypoint-depth live view.
 
 Only exercisable on real hardware (it opens the OAK-D device).
 """
@@ -50,7 +60,8 @@ class FlowPoseSource(PoseSource):
     def __init__(self, width: int = 640, height: int = 400, fps: int = 20,
                  kf_every: int = 5, use_gyro: bool = True,
                  depth_fast: bool = True,
-                 recalibrate_bias: bool = False) -> None:
+                 recalibrate_bias: bool = False,
+                 mode: str = "odom") -> None:
         super().__init__()
         self.width = int(width)
         self.height = int(height)
@@ -59,6 +70,19 @@ class FlowPoseSource(PoseSource):
         self.use_gyro = bool(use_gyro)
         self.depth_fast = bool(depth_fast)
         self.recalibrate_bias = bool(recalibrate_bias)
+        # Display mode (the live MARKER is always the realtime pose.odom -- the
+        # responsive f2f tip that tracks the camera at full distance, exactly
+        # like the bare ``ours`` source). ``mode`` only selects which heavy
+        # optimiser flow runs in the background to refine the MAP behind it:
+        #   "odom" -> none (bare ours);  "ba" -> BackendFlow (windowed BA);
+        #   "slam" -> SlamFlow (loop closure). The heavy flow is built latest-only
+        # so it can never backlog the marker. Its refined output (pose.refined /
+        # loop.correction) feeds the map overlay, NOT the marker -- so the marker
+        # can never be dragged/stalled by an async correction (the failure mode of
+        # the legacy OakOursVioSource).
+        if mode not in ("odom", "ba", "slam"):
+            raise ValueError(f"FlowPoseSource mode must be odom|ba|slam, got {mode!r}")
+        self.mode = mode
         self._t0 = 0.0
         self._prev_pos: np.ndarray | None = None
         self._prev_t: float | None = None
@@ -105,7 +129,8 @@ class FlowPoseSource(PoseSource):
                 kf_every=self.kf_every, use_gyro=self.use_gyro,
                 depth_fast=self.depth_fast,
                 recalibrate_bias=self.recalibrate_bias, ui=ui,
-                with_backend_slam=False, realtime_latest=True)
+                with_backend_slam=False, realtime_latest=True,
+                backend=(self.mode == "ba"), slam=(self.mode == "slam"))
         except Exception as e:                                    # noqa: BLE001
             self._fail(f"device open failed: {e}")
             return

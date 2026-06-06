@@ -24,8 +24,9 @@ from .publish_refined import PublishRefined
 
 class BackendFlow(Flow):
     def __init__(self, bus: Bus, K: np.ndarray,
-                 window: int = 6, kf_every: int = 1, iters: int = 5) -> None:
-        super().__init__("backend", bus)
+                 window: int = 6, kf_every: int = 1, iters: int = 5,
+                 latest_only: bool = False) -> None:
+        super().__init__("backend", bus, latest_only=latest_only)
         cfg = WindowedConfig(window=window, kf_every=kf_every,
                              ba=BAConfig(max_iters=iters))
         self.ctx.state["ba"] = WindowedBAMap(K, cfg)

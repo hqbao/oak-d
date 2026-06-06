@@ -16,8 +16,9 @@ from .publish_correction import PublishCorrection
 
 
 class SlamFlow(Flow):
-    def __init__(self, bus: Bus, K, cfg: SlamConfig | None = None) -> None:
-        super().__init__("slam", bus)
+    def __init__(self, bus: Bus, K, cfg: SlamConfig | None = None,
+                 latest_only: bool = False) -> None:
+        super().__init__("slam", bus, latest_only=latest_only)
         self.ctx.state["slam"] = SlamMap(K, cfg or SlamConfig())
         self.on(topics.KEYFRAME, [SlamStep(), PublishCorrection()])
         self.forwards_to(topics.LOOP_CORRECTION)
