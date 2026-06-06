@@ -23,37 +23,74 @@ Measured on our gold suite (offline, `--depth ours`, post VO‑prior fix):
 
 So on recorded data our path is already good.
 
-### Why `ours` moves full but `ours-ba/slam` stalls (verified from source, 2026‑06‑06)
-Both live sources run the **same KLT frontend** on the same device: `ours`
-(`FlowPoseSource` → `OdometryFlow` → `RGBDVisualOdometry`) uses the default
-`FrontendConfig()` = win21/lvl3/400; `ours-ba` (`OakOursVioSource`) uses
-`res.frontend(numba=HAVE_NUMBA)` which on a Numba‑capable device is **the exact
-same** win21/lvl3/400. So KLT is **not** what separates them. The difference is
-entirely in the **display/translation path**:
+### Why `ours` moves full but `ours-ba/slam` stalls — REPRODUCED & root-caused (2026‑06‑06, session `fast_push_15s`)
+The user recorded a genuine super‑fast push (Basalt path 14.3 m, peak ~2.2 m/s,
+1.1 m travelled in a 0.5 s window, 205/298 frames above the 0.3 m/s correction
+cap). Running it through `ours/tools/live_replay.py`:
 
-* `ours` paints the **raw `pose.odom`** (frame‑to‑frame VO translation) — instant,
-  unfiltered, uncapped.
-* `ours-ba` paints `filt_p` from `InertialTranslationFilter` (an EMA on velocity,
-  `vision_trust=0.8`) **and then** crawls toward an **async, rate‑limited BA
-  correction** `C_applied`, capped at `_CORR_MAX_STEP_T=0.015 m/frame = 0.3 m/s`.
+| mode | scale vs Basalt | path ratio | stall? |
+|------|-----------------|-----------|--------|
+| filter only (≈`ours`)          | 0.883 | 0.96 | no |
+| `--ba` (real `ours-ba`)        | 0.891 | 0.99 | no |
+| `--ba --no-rate-limit`         | 0.891 | 0.99 | no |
 
-On a super‑fast push the EMA softens the onset and the **0.3 m/s correction cap**
-is the smoking gun: when the displayed position lags the true motion, BA wants a
-forward correction but the marker can only *crawl* there at 0.3 m/s — exactly
-"đi 50%, **ì lại**, rồi **đi từ từ** 30%". The crawl speed is the rate cap, not a
-tracking failure. (Earlier note blamed KLT; that was wrong — KLT is identical on
-both branches. Corrected here.)
+**When every frame is processed, `ours` and `ours-ba` are identical and neither
+stalls. The rate‑limit is neutral.** So the algorithm / EMA / 0.3 m/s cap are NOT
+the cause (an earlier note that blamed first KLT, then the rate cap, was wrong —
+both disproved by this table). The real differentiator is **frame drops under CPU
+load**:
 
-This is a *display* artefact of loose coupling, and it is **offline‑verifiable**:
-`ours/tools/live_replay.py` already models the filter + rate‑limit + async BA
-latency. A recorded super‑fast‑push session will let us A/B (raw‑tip vs filtered
-vs rate‑limited‑corrected) and confirm the mechanism before any change.
+* Dropping frames offline (`--decimate`) collapses the scale for **both** branches
+  equally: decimate 1→2→3→4 gives scale 0.88 → 0.91 → 0.80 → ratio 0.80. Fewer KLT
+  steps across a fast push ⇒ each step's inter‑frame motion is larger ⇒ PnP
+  under‑measures translation ⇒ undershoot. **Frame drops are the undershoot
+  mechanism.**
+* `ours` (`FlowPoseSource`) is built `with_backend_slam=False` — **no BA/SLAM
+  threads** — so its read loop owns the CPU and keeps up at 20 fps (no drops).
+* `ours-ba` (`OakOursVioSource`) runs the BA refiner as a **`threading.Thread`**
+  (`depthai_ours_vio.py:1377`, not a process despite the stale "process" comment).
+  Measured here: one `run_ba()` = **43 ms mean / 74 ms peak**, firing every 5
+  frames (250 ms) ⇒ **~17 % mean, ~30 % peak GIL/CPU contention** stolen from the
+  read loop. The legacy read loop **drains each queue to the latest frame and
+  drops the backlog** (`depthai_ours_vio.py:688`), so whenever BA (and SLAM, in
+  `ours-slam`) starve it — especially on a device slower than the dev Mac, or with
+  no Numba where KLT alone is ~140 ms — it drops frames ⇒ the decimate effect ⇒
+  the stall. `ours` never pays this tax.
+
+**Net:** `ours-ba` stalls because its background BA/SLAM threads steal CPU (GIL)
+from the frame read loop, which then drops frames, and frame drops undershoot the
+fast‑push translation. It is a **realtime/CPU‑contention** failure, not an
+estimator‑accuracy failure — which is exactly why no offline tuning of the BA or
+the filter removes it, and why the loose‑coupled architecture is structurally the
+wrong tool here.
+
+### Confirm on the next bench run (already instrumented)
+The live `[ours-X] thru …` / `[ours-X] path …` diag lines now print everything
+needed to confirm which knob bites on the actual device:
+* `drop=` and `proc=…fps` vs `recv=…fps` → if `drop` is high / `proc ≪ recv`, the
+  read loop is dropping frames (CPU‑contention confirmed).
+* `klt=W/L(+jit)` → if it shows `13/2` (no `+jit`), the device lacks Numba and KLT
+  cost alone is the bottleneck.
+* `vofail=X%` → KLT tracking‑loss fraction.
+* `filt/vo` and `disp/filt` → where translation is lost between raw VO, the filter,
+  and the displayed tip.
+
+### Candidate loose‑path mitigations (offline‑verify before shipping)
+Ordered cheapest‑first; each must be A/B'd on `fast_push_15s` first:
+1. **Move the BA worker to a true `multiprocessing.Process`** so its CPU no longer
+   shares the GIL with the read loop (removes the ~17–30 % tax).
+2. **Throttle / cap BA cost** (smaller window, fewer iters, lower kf rate) so each
+   burst is shorter than one frame budget.
+3. Ensure the device has **Numba** (so KLT is ~15 ms, not ~140 ms) — the single
+   biggest read‑loop cost on a no‑Numba host.
+
+These are band‑aids. The structural fix is tight coupling:
 
 Basalt does not have this failure because the **IMU is inside the estimator**:
 during the fast push the preintegrated accelerometer *predicts* the translation
-(`predictState`) and vision only *refines* it — one consistent state, no separate
-"filter then crawl a correction" stage. That is the fundamental fix, and it is the
-reason this rebuild is the real answer, not another loose‑coupling tuning pass.
+(`predictState`) and vision only *refines* it — one consistent state at the camera
+rate, no separate "filter then crawl a correction" stage competing for CPU. That is
+the fundamental fix, and it is the reason this rebuild is the real answer.
 
 > See `docs/TIGHT_COUPLED_TASKS.md` for the smallest‑possible, each‑step‑visualised
 > task breakdown of the tight‑coupled rebuild.
