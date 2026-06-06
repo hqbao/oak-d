@@ -20,16 +20,18 @@ from pathlib import Path
 # allow running directly without `pip install -e .`
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from PyQt6.QtWidgets import QApplication       # noqa: E402
-
-from ours.lib.misc.pose import PoseHistory              # noqa: E402
-from ours.ui.source import FakePoseSource          # noqa: E402
-from ours.ui.mainwindow import MainWindow      # noqa: E402
+# NOTE: keep module top import-light. The out-of-process BA/SLAM worker
+# (``ours.lib.engine.subprocess``) is spawned with the ``spawn`` start method,
+# whose bootstrap RE-IMPORTS this script as ``__mp_main__`` in the child. Importing
+# PyQt6 / the Qt viewer there would pull a GUI toolkit into every worker process
+# (slow, and Qt dislikes living in a spawned child). So the Qt / UI imports live
+# inside the functions that need them, NOT at module top.
 
 
 def _build_source(name: str, args):
     name = name.lower()
     if name == "fake":
+        from ours.ui.source import FakePoseSource
         return FakePoseSource(rate_hz=100.0, radius_m=3.0, period_s=12.0)
     if name in ("ours", "ours-ba", "ours-slam"):
         # The live source is the flow pipeline (cam/imu_cam/odometry/ui flows over
@@ -72,6 +74,12 @@ def main() -> int:
     ap.add_argument("--height", type=int, default=400,
                     help="capture height in px [400]")
     args = ap.parse_args()
+
+    # Qt / UI imports are local (see the module-top note: the spawned BA/SLAM
+    # worker re-imports this script and must not pull in a GUI toolkit).
+    from PyQt6.QtWidgets import QApplication
+    from ours.lib.misc.pose import PoseHistory
+    from ours.ui.mainwindow import MainWindow
 
     history = PoseHistory(capacity=8192)
     source = _build_source(args.source, args)

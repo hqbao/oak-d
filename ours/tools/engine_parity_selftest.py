@@ -93,6 +93,7 @@ def _run_inprocess(engine, snaps):
 
 def _run_subprocess(engine, snaps, expect_nonnull):
     """Feed every snapshot no-drop (blocking put); collect per-keyframe results."""
+    engine.start()                        # spawn now (lazy: not done in __init__)
     out = []
     for i, s in enumerate(snaps):
         engine._in_q.put(s)               # blocking => no input drop, in order
@@ -175,6 +176,7 @@ def check_slam(session: str, kf_every: int, max_frames: int, tol: float) -> bool
 
     expect = [r is not None for r in ip]
     esp = make_slam_engine(K, cfg, worker=True)
+    esp.start()                           # spawn now (lazy: not done in __init__)
     sp = []
     for i, s in enumerate(snaps):
         esp._in_q.put(s)                  # blocking => no input drop, in order

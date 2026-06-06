@@ -109,31 +109,67 @@ def _slam_worker_main(K, cfg, in_q, out_q, ov_q, stop_evt, reset_evt) -> None:
 
 
 class SubprocessEngine:
-    """Engine that runs ``worker_main`` in a spawned process. See module docstring."""
+    """Engine that runs ``worker_main`` in a spawned process. See module docstring.
+
+    The worker process is spawned **lazily** on the first :meth:`submit` (or an
+    explicit :meth:`start`), NOT in ``__init__``. The live graph builds the engine
+    while the OAK-D is open but the camera read loop has not started yet; spawning a
+    fresh interpreter in that dead window left the device unread long enough to
+    starve the XLink and trip the firmware watchdog (``mutex lock failed`` on the
+    crashed device). Deferring the spawn to the first keyframe means the read loop is
+    already streaming the device when the (heavy, decoupled) backend flow spawns the
+    worker -- the spawn blocks only that flow's thread, never the device readers.
+    The queues are created up front so a no-drop feeder can attach after ``start``.
+    """
 
     def __init__(self, worker_main, K: np.ndarray, cfg) -> None:
-        ctx = mp.get_context("spawn")
-        self._in_q: "mp.Queue" = ctx.Queue(maxsize=1)    # one pending KF; newest wins
-        self._out_q: "mp.Queue" = ctx.Queue(maxsize=2)   # corrections (drain to newest)
-        self._ov_q: "mp.Queue" = ctx.Queue(maxsize=2)    # map overlay (drain to newest)
-        self._stop_evt = ctx.Event()
-        self._reset_evt = ctx.Event()
-        self._proc = ctx.Process(
-            target=worker_main,
-            args=(K, cfg, self._in_q, self._out_q, self._ov_q,
-                  self._stop_evt, self._reset_evt),
-            name="OursEngineWorker", daemon=True)
-        self._proc.start()
+        self._ctx = mp.get_context("spawn")
+        self._worker_main = worker_main
+        self._K = np.asarray(K)
+        self._cfg = cfg
+        self._in_q: "mp.Queue" = self._ctx.Queue(maxsize=1)   # one pending KF; newest wins
+        self._out_q: "mp.Queue" = self._ctx.Queue(maxsize=2)  # corrections (drain to newest)
+        self._ov_q: "mp.Queue" = self._ctx.Queue(maxsize=2)   # map overlay (drain to newest)
+        self._stop_evt = self._ctx.Event()
+        self._reset_evt = self._ctx.Event()
+        self._proc = None
         self._closed = False
+        self._failed = False
+
+    def start(self) -> None:
+        """Spawn the worker process (idempotent; no-op after close/failure).
+
+        A spawn failure is non-fatal: the engine goes inert (``submit``/``poll`` are
+        no-ops), so ours-ba/ours-slam keep running with the responsive marker and
+        simply show no refined-map overlay -- never a crash on the flow thread.
+        """
+        if self._proc is not None or self._closed or self._failed:
+            return
+        try:
+            self._proc = self._ctx.Process(
+                target=self._worker_main,
+                args=(self._K, self._cfg, self._in_q, self._out_q, self._ov_q,
+                      self._stop_evt, self._reset_evt),
+                name="OursEngineWorker", daemon=True)
+            self._proc.start()
+        except Exception as e:                 # noqa: BLE001
+            import sys
+            self._proc = None
+            self._failed = True
+            print(f"[engine] worker spawn failed ({e}); running without the "
+                  f"map overlay (marker unaffected)", file=sys.stderr)
 
     def submit(self, snapshot: Any) -> None:
+        self.start()                           # lazy: spawn only once data flows
+        if self._proc is None:                 # spawn failed -> inert engine
+            return
         _put_latest(self._in_q, snapshot)
 
     def poll(self) -> Any:
-        return _drain_latest(self._out_q)
+        return None if self._proc is None else _drain_latest(self._out_q)
 
     def poll_overlay(self) -> Any:
-        return _drain_latest(self._ov_q)
+        return None if self._proc is None else _drain_latest(self._ov_q)
 
     def reset(self) -> None:
         self._reset_evt.set()
@@ -142,6 +178,8 @@ class SubprocessEngine:
         if self._closed:
             return
         self._closed = True
+        if self._proc is None:                 # never started -> nothing to reap
+            return
         self._stop_evt.set()
         _put_latest(self._in_q, None)          # wake the blocking get with the sentinel
         self._proc.join(timeout=1.0)

@@ -240,9 +240,13 @@ class FlowPoseSource(PoseSource):
             ui.done.wait(timeout=5.0)
             for f in flows:
                 f.stop()
-            # Join so each heavy flow's run()-finally has reaped its subprocess
-            # engine (sentinel -> join -> terminate) BEFORE we release the device;
-            # otherwise a lingering worker could outlive the parent's teardown.
+            # Join everything that touches the device BEFORE releasing it, so no
+            # reader thread (and no heavy flow still reaping its subprocess engine)
+            # is alive when the depthai pipeline is destroyed -- the lifetime race
+            # behind the ``mutex lock failed`` device crash. Heavy flows first
+            # (their run()-finally reaps the worker), then the cam/imu readers.
             for f in flows:
                 f.join(timeout=3.0)
+            cam_flow.join(timeout=2.0)
+            imu_flow.join(timeout=2.0)
             device.release()
