@@ -37,9 +37,11 @@ def _build_source(name: str, args):
         orb_features=args.orb_features,
     )
     if name == "ours":
-        # Default live source = the new flow pipeline (capture/depth/odometry/
-        # backend/slam/ui flows over a pub/sub bus). Displays the real-time f2f
-        # trajectory; backend + SLAM flows run alongside.
+        # Default live source = the new flow pipeline (cam/imu_cam/odometry/ui
+        # flows over a pub/sub bus). Displays the real-time f2f trajectory
+        # (pose.odom) with realtime-bounded inboxes; the heavy backend/SLAM flows
+        # are NOT run here (they would only backlog and crash the device link —
+        # see FlowPoseSource).
         from ours.ui.live_source import FlowPoseSource
         return FlowPoseSource(width=args.width, height=args.height,
                               fps=args.fps,

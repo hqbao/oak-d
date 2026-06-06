@@ -8,9 +8,18 @@ viewer :class:`~ours.lib.misc.pose.Pose` in NED and pushes it through the
 
 It replaces the monolithic ``OakOursVioSource`` as the default live source while
 keeping the same UI contract (start / stop / fps / error). The displayed
-trajectory is the real-time frame-to-frame VO (``pose.odom``); the back-end and
-SLAM flows still run (their corrections are exercised, see ``ours.app``), but
-applying them to the displayed path is a follow-up.
+trajectory is the real-time frame-to-frame VO (``pose.odom``).
+
+It builds the live graph **realtime-bounded**: ``with_backend_slam=False`` (the
+windowed-BA back-end + loop-closing SLAM are NOT built — this source displays
+``pose.odom`` only, so running them would burn CPU and, worse, pile keyframe
+images in their UNBOUNDED FIFO inboxes until host memory pressure starves the
+depthai XLink and the OAK-D firmware watchdog crashes the device) and
+``realtime_latest=True`` (the cam/imu_cam/odometry inboxes coalesce to the newest
+frame, so a momentarily slow consumer drops stale frames instead of growing an
+unbounded backlog). This mirrors the already-stable keypoint-depth live view,
+which runs the same device with the same two flags. Applying BA/SLAM corrections
+to the displayed path is a follow-up that must first bound the keyframe path.
 
 Only exercisable on real hardware (it opens the OAK-D device).
 """
@@ -95,7 +104,8 @@ class FlowPoseSource(PoseSource):
                 bus, width=self.width, height=self.height, fps=self.cam_fps,
                 kf_every=self.kf_every, use_gyro=self.use_gyro,
                 depth_fast=self.depth_fast,
-                recalibrate_bias=self.recalibrate_bias, ui=ui)
+                recalibrate_bias=self.recalibrate_bias, ui=ui,
+                with_backend_slam=False, realtime_latest=True)
         except Exception as e:                                    # noqa: BLE001
             self._fail(f"device open failed: {e}")
             return
