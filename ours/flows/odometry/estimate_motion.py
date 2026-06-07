@@ -26,7 +26,12 @@ class EstimateMotion(Task):
         vo: RGBDVisualOdometry = ctx.state["vo"]
         prior = primed.prior
         R_prior = prior.R_prior if prior is not None else None
-        pose = vo.estimate(primed.obs, primed.frame.depth_m, R_prior=R_prior)
+        # Pass the IMU "definitely moving" flag so the low-inlier translation
+        # freeze (textureless wall) is vetoed during a real motion-blurred shake.
+        # See OdometryConfig.min_inliers_for_translation + ImuPrior.imu_moving.
+        imu_moving = prior.imu_moving if prior is not None else False
+        pose = vo.estimate(primed.obs, primed.frame.depth_m, R_prior=R_prior,
+                           imu_moving=imu_moving)
         accel_cam = prior.accel_cam if prior is not None else None
         at_rest = prior.at_rest if prior is not None else False
         return Step(primed.frame, pose.copy(), dict(vo.last_info),

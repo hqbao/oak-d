@@ -33,6 +33,14 @@ class ImuPrior:
       whether the camera was still; supplied so a keyframe can carry a gravity
       prior into the back-end. ``at_rest`` is ``False`` (accel ``None``) when no
       usable gravity measurement is available.
+    * ``imu_moving`` -- loose stillness gate (gyro rate or accel deviation above a
+      "definitely moving" threshold). Distinct from ``at_rest`` (strict): the
+      middle band is neither, so a freeze gate that vetoes ONLY on confirmed
+      motion does not fire on borderline samples. Consumed by
+      :meth:`~ours.lib.odometry.odometry.RGBDVisualOdometry.estimate` to keep the
+      low-inlier translation freeze (textureless wall) from pinning the marker
+      through a real motion-blurred shake -- the same IMU signal that
+      ``OdometryConfig.min_inliers_for_translation`` was designed around.
 
     It is stashed in the flow's ``priors[seq]`` (never put on the bus) so the
     matching depth frame can pick it up by ``seq``.
@@ -42,6 +50,7 @@ class ImuPrior:
     R_prior: np.ndarray | None
     accel_cam: np.ndarray | None = None
     at_rest: bool = False
+    imu_moving: bool = False
 
 
 @dataclass(frozen=True)
@@ -62,8 +71,16 @@ class FrameTracks:
     :class:`~ours.flows.odometry.publish_tracks.PublishTracks` task. The ``ids`` /
     ``points`` are the REAL frontend tracks the motion estimate consumes (the same
     ``{id: pixel}`` :class:`~ours.flows.odometry.tracked.Tracked` carries) -- not a
-    parallel detector. The frame's rectified-left image + depth ride along so the
-    UI can colour every keypoint by its metric depth without re-running anything.
+    parallel detector.
+
+    NOTE: this message carries ONLY the per-frame tracks (ids + pixels). The
+    rectified-left image and depth map needed to render the overlay travel on
+    ``topics.FRAME_DEPTH`` (already published by the ``imu_cam`` flow); the UI
+    sink (:class:`~ours.flows.ui.tracks.UiTracksFlow`) joins them by ``seq``. This
+    keeps the cross-process layout honest -- in the 4-proc topology the capture
+    process is the SINGLE writer of the gray / depth shared-memory rings, and the
+    VIO process (which publishes ``frame.tracks``) does not race the capture
+    process for the same ring slots.
 
     * ``ids`` -- ``(N,)`` int64 persistent track ids.
     * ``points`` -- ``(N, 2)`` float32 pixel coordinates (same order as ``ids``).
@@ -71,8 +88,6 @@ class FrameTracks:
 
     seq: int
     ts_ns: int
-    gray_left: np.ndarray
-    depth_m: np.ndarray
     ids: np.ndarray
     points: np.ndarray
 

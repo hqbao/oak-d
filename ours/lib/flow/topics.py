@@ -57,3 +57,16 @@ IMUCAM_SAMPLE = "imucam.sample"
 # Raw IMU for each frame interval, published BEFORE calibration (honest, what
 # the sensor reported). ``imucam.sample`` carries the CALIBRATED IMU.
 IMU_RAW = "imu.raw"
+
+# Topics that MUST stay FIFO end-to-end -- VIO + deterministic replay break if
+# any frame is coalesced away. See ARCHITECTURE.md section 3 ("VIO + deterministic
+# replay require FIFO"). A flow built with ``latest_only=True`` whose inbox or
+# downstream chain feeds the odometry compute path (PreintegratePrior /
+# TrackFeatures / EstimateMotion) corrupts the gyro continuity and the KLT track
+# continuity. The set documents the contract; UI-ONLY sinks may subscribe these
+# topics on a latest-only inbox (they consume frames for display, not VIO state).
+VIO_PATH_TOPICS = frozenset({
+    CAM_SYNC,
+    IMUCAM_SAMPLE,
+    FRAME_DEPTH,
+})

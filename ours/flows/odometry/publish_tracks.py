@@ -2,10 +2,13 @@
 
 Sits between :class:`~ours.flows.odometry.track_features.TrackFeatures` and
 :class:`~ours.flows.odometry.estimate_motion.EstimateMotion` in the frame-chain.
-It has the freshly tracked ``{id: pixel}`` (from the :class:`Tracked` carrier) and
-the frame's depth, so it publishes the REAL frontend tracks for the keypoint-depth
-visualiser to subscribe -- no parallel detector. It passes ``tracked`` through
-unchanged so the motion estimate still runs on the same carrier.
+It has the freshly tracked ``{id: pixel}`` (from the :class:`Tracked` carrier),
+so it publishes the REAL frontend tracks for the keypoint-depth visualiser to
+subscribe -- no parallel detector. The matching frame image + depth are NOT
+sent on this topic: the UI sink joins ``frame.tracks`` with ``frame.depth`` by
+``seq`` (capture is the single writer of the gray/depth shared-memory rings).
+``tracked`` passes through unchanged so the motion estimate still runs on the
+same carrier.
 """
 from __future__ import annotations
 
@@ -32,6 +35,5 @@ class PublishTracks(Task):
             points = np.empty((0, 2), dtype=np.float32)
         frame = tracked.frame
         ctx.bus.publish(topics.FRAME_TRACKS,
-                        FrameTracks(frame.seq, frame.ts_ns, frame.gray_left,
-                                    frame.depth_m, ids, points))
+                        FrameTracks(frame.seq, frame.ts_ns, ids, points))
         return tracked

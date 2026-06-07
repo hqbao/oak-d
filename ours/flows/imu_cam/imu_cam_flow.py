@@ -44,6 +44,15 @@ class ImuCamFlow(Flow):
     high-rate IMU read on its OWN I/O thread -- a hardware producer, not a flow,
     the same pattern the calibration ``ImuStream`` uses. No flow logic runs on
     that thread; it only fills the thread-safe buffer.
+
+    WARNING: ``latest_only=True`` makes THIS flow's CAM_SYNC inbox coalesce, which
+    drops camera triggers when packing/SGM falls behind -- the downstream
+    ``imucam.sample`` + ``frame.depth`` (both in ``topics.VIO_PATH_TOPICS``) then
+    skip those frames, breaking VIO's gyro continuity (PreintegratePrior) and KLT
+    continuity (TrackFeatures). ONLY pass ``latest_only=True`` when this flow
+    feeds a UI-only graph with no odometry downstream (e.g. the triplet view).
+    For VIO / replay / the 4-proc capture process, keep the default FIFO inbox
+    and put backpressure at the IPC boundary (``IpcServerBus(blocking=False)``).
     """
 
     def __init__(self, bus: Bus, source: ImuSource, *,

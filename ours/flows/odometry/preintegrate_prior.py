@@ -28,6 +28,12 @@ from ...lib.imu.imu import integrate_gyro_camera
 _STILL_GYRO = 0.15      # rad/s
 _GRAVITY = 9.81         # m/s^2
 _STILL_ACCEL_DEV = 0.6  # m/s^2 deviation of |accel| from gravity
+# Loose "definitely moving" gate for the IMU-vetoed low-inlier freeze (see
+# OdometryConfig.min_inliers_for_translation): higher than the still gates so the
+# middle band stays "neither". 0.3 rad/s ~ 17 deg/s (any real hand turn); 0.5
+# m/s^2 ~ 5 % of g (any real linear push).
+_MOVING_GYRO = 0.3      # rad/s
+_MOVING_ACCEL_DEV = 0.5  # m/s^2 deviation of |accel| from gravity
 
 
 class PreintegratePrior(Task):
@@ -46,15 +52,23 @@ class PreintegratePrior(Task):
 
         accel_cam = None
         at_rest = False
+        imu_moving = False
         if R_imu_cam is not None and accel.size:
             a_mean = accel.mean(axis=0)
             accel_cam = np.asarray(R_imu_cam, dtype=np.float64) @ a_mean
-            gyro_still = (gyro.size == 0
-                          or float(np.linalg.norm(gyro, axis=1).mean()) < _STILL_GYRO)
-            accel_still = abs(float(np.linalg.norm(a_mean)) - _GRAVITY) < _STILL_ACCEL_DEV
+            gyro_mag = (0.0 if gyro.size == 0
+                        else float(np.linalg.norm(gyro, axis=1).mean()))
+            accel_dev = abs(float(np.linalg.norm(a_mean)) - _GRAVITY)
+            gyro_still = (gyro.size == 0 or gyro_mag < _STILL_GYRO)
+            accel_still = accel_dev < _STILL_ACCEL_DEV
             at_rest = bool(gyro_still and accel_still)
+            # Loose "definitely moving" flag: vetoes the low-inlier translation
+            # freeze when motion blur (not a textureless wall) is starving PnP.
+            imu_moving = bool(gyro_mag > _MOVING_GYRO
+                              or accel_dev > _MOVING_ACCEL_DEV)
 
-        ctx.state["priors"][msg.seq] = ImuPrior(msg.seq, R_prior, accel_cam, at_rest)
+        ctx.state["priors"][msg.seq] = ImuPrior(
+            msg.seq, R_prior, accel_cam, at_rest, imu_moving)
         # Safety cap: in the normal full-fidelity path each prior is popped by the
         # matching depth frame, so the dict stays ~1 entry and this never fires.
         # Under a latest-only visualiser graph, frames whose depth was coalesced

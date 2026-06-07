@@ -98,6 +98,23 @@ The **baseline** (DepthAI/Basalt) viewer is a separate entry point:
 .venv/bin/python baseline/tools/view_pose3d.py --source slam   # BasaltVIO + RTABMapSLAM
 ```
 
+```bash
+# 4-process live pipeline (capture + vio + slam + ui in separate processes;
+# UI fault never kills capture; VIO and SLAM each own their own map).
+./run.sh --proc                      # full 4-proc with UI (two tabs: VIO / SLAM)
+./run.sh --proc --no-ui              # headless capture + vio + slam
+./run.sh --proc --session sessions/gold/lab_loop_30s   # replay through 4 procs
+```
+
+`--proc` is the **production live path**; the default single-process viewer
+remains the offline / debug oracle (parity-checked by `proc4_replay_selftest`).
+Each proc owns its own pub/sub `Bus` exactly as before — inter-process traffic
+goes through stdlib bridges only (`multiprocessing.connection` AF_UNIX for
+control, `multiprocessing.shared_memory` rings for image payloads; no extra
+deps). Design + invariants are in [docs/PROC4_ARCHITECTURE.md](docs/PROC4_ARCHITECTURE.md);
+the dual codepath (single-proc oracle vs 4-proc live) is summarised in
+[ours/ARCHITECTURE.md](ours/ARCHITECTURE.md) §9.
+
 `--source ours` is the flow pipeline (cam + imu_cam → odometry → backend →
 slam → ui flows over a pub/sub bus); `--source ours-ba` / `ours-slam` add an
 out-of-process BA / loop-closure optimiser refining the map behind the marker.
@@ -161,19 +178,27 @@ primary START/STOP):
     **KLT-frontend track** drawn on it. The tracks are **subscribed from the
     running pipeline** — the odometry flow publishes the very `{id: pixel}` its
     motion estimate consumes on `frame.tracks`, and this window is just a sink for
-    it (no parallel detector, no second frontend). Each dot's **colour = that
-    keypoint's metric depth** (the same fixed khaki 0.3–8 m ramp + scale bar as
-    the depth panel), so colour means the same distance everywhere; keypoints with
-    no stereo return are **hollow grey rings** (never a faked colour), fresh
-    tracks get an amber ring, and tracks the **RGB-D PnP kept as inliers** — the
-    clean subset the motion solve actually trusted — get a **green ring**. Those
-    inlier ids are a separate REAL solve output the odometry flow publishes on
-    `frame.inliers` (the noisy/no-depth points are dropped before PnP and the rest
-    pass a RANSAC reprojection gate), so the green ring honestly marks the points
-    behind the pose, not every tracked corner. A faint per-id **trail** shows where
-    the *same* keypoint moved over the last 20 frames. The footer prints honest
-    stats (`trk`, `valid-z %`, `inlier`, `mean-age`, `new`). Live off the OAK-D or
-    a recorded session — both run the same flow graph the VIO runs.
+    it (no parallel detector, no second frontend). The overlay's **background
+    image and per-keypoint depth** come from a **separate** subscription on
+    `frame.depth` (the capture-side rectified-left + metric depth); the
+    `UiTracksFlow` sink **joins them by `seq`** before handing the bundle to the
+    Qt widget. Splitting the two topics keeps `FrameTracks` as pure POD
+    (ids + pixels only) so the VIO process never republishes frame imagery into
+    capture's `SharedMemory` rings — capture stays the **single writer** of those
+    rings under the 4-proc layout (see `docs/PROC4_ARCHITECTURE.md` §9 invariant
+    6). Each dot's **colour = that keypoint's metric depth** (the same fixed
+    khaki 0.3–8 m ramp + scale bar as the depth panel), so colour means the same
+    distance everywhere; keypoints with no stereo return are **hollow grey rings**
+    (never a faked colour), fresh tracks get an amber ring, and tracks the
+    **RGB-D PnP kept as inliers** — the clean subset the motion solve actually
+    trusted — get a **green ring**. Those inlier ids are a separate REAL solve
+    output the odometry flow publishes on `frame.inliers` (the noisy/no-depth
+    points are dropped before PnP and the rest pass a RANSAC reprojection gate),
+    so the green ring honestly marks the points behind the pose, not every
+    tracked corner. A faint per-id **trail** shows where the *same* keypoint
+    moved over the last 20 frames. The footer prints honest stats (`trk`,
+    `valid-z %`, `inlier`, `mean-age`, `new`). Live off the OAK-D or a recorded
+    session — both run the same flow graph the VIO runs.
 
 The same synced split front-end can be inspected **without the GUI** — a cv2
 window over a recorded session or the live device:
@@ -268,6 +293,10 @@ gold sessions, not guessed:
   Offline on `shake_linear_20s` this recovered the frozen frames (12 → 0,
   display path 15.05 → 16.29 m, matching `ours` 16.51 m). The offline tools pass
   no flag (`imu_moving=False`) so every offline/gold score is byte-identical.
+  The `imu_moving` field is computed by `PreintegratePrior` from each frame's
+  IMU samples and threaded through `EstimateMotion` into the PnP guard
+  end-to-end; the wiring is regression-guarded by
+  `ours.tools.imu_moving_propagation_selftest`.
 - **`resolve_translation_on_disagree`** — kept available but **left off live**:
   measured on `push_shake_20s` its disagreement gate fires on only ~8% of frames
   and never zeroed the translation, so it was ineffective; the freeze under hard
@@ -368,6 +397,12 @@ Self-tests (run before/after touching the from-scratch VIO):
 QT_QPA_PLATFORM=offscreen .venv/bin/python -m ours.tools.imucam_window_selftest  # in-app synced view renders (offscreen Qt)
 QT_QPA_PLATFORM=offscreen .venv/bin/python -m ours.tools.synced_window_selftest  # image|depth|IMU triplet window renders (offscreen Qt)
 QT_QPA_PLATFORM=offscreen .venv/bin/python -m ours.tools.keypoints_window_selftest # keypoints coloured by depth + per-id trails (offscreen Qt)
+.venv/bin/python -m ours.tools.ipc_bus_selftest                  # IPC primitives (pub/sub + retain + shared rings)
+.venv/bin/python -m ours.tools.proc4_replay_selftest --max-frames 60   # 4-proc parity vs single-proc baseline
+.venv/bin/python -m ours.tools.proc4_ui_selftest --max-frames 20      # UI data path + Qt MainWindow construct
+.venv/bin/python -m ours.tools.frametracks_no_capture_ring_write_selftest  # FrameTracks carries ids/points only; VIO bridge does not write capture rings (4-proc single-writer guard)
+.venv/bin/python -m ours.tools.capture_fifo_inbox_selftest               # capture front-end inboxes are FIFO; topics.VIO_PATH_TOPICS lists CAM_SYNC/IMUCAM_SAMPLE/FRAME_DEPTH
+.venv/bin/python -m ours.tools.imu_moving_propagation_selftest          # ImuPrior.imu_moving wired end-to-end PreintegratePrior -> EstimateMotion -> RGBDVisualOdometry.estimate
 ```
 
 `klt_selftest.py` is the regression guard for the library-free frontend: it
@@ -418,6 +453,10 @@ in the numbers instead of as lag on the device.
       image | depth | gyro angular-velocity chart + 3D accel vector)
 - [x] Persistent SLAM database (auto save `rtabmap.db` + extract KF/loop via `baseline/tools/extract_kf_from_db.py`)
 - [x] Gold regression suite (12 sessions, see `docs/GOLD_SESSIONS.md`)
+- [x] 4-process live architecture (capture + vio + slam + ui in separate
+      processes; stdlib `multiprocessing.connection` + `SharedMemory` IPC;
+      VIO and SLAM each own their own map; UI fault never kills capture;
+      `./run.sh --proc`, see [docs/PROC4_ARCHITECTURE.md](docs/PROC4_ARCHITECTURE.md))
 - [ ] UDP / UART link to flight-controller
 - [ ] Tracking-lost UI badge
 - [ ] Calibration check tool
