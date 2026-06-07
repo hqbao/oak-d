@@ -47,6 +47,7 @@ desktop dev tool; production would add an atexit fallback).
 """
 from __future__ import annotations
 
+import atexit
 import struct
 from dataclasses import dataclass
 from multiprocessing import shared_memory
@@ -84,6 +85,9 @@ class SharedArrayRing:
         self.dtype = np.dtype(dtype)
         self._shm = _shm_blocks           # list[SharedMemory], len == slots
         self._owner = bool(_owner)
+        #: Set after the first successful :meth:`unlink` so a stray atexit
+        #: callback (defence in depth -- see :meth:`create`) is a no-op.
+        self._unlinked = False
         # Pre-build np.ndarray views (one per slot) so the hot publish/poll path
         # only does a memcpy, no fresh ndarray construction.
         self._views: list[np.ndarray] = [
@@ -133,7 +137,18 @@ class SharedArrayRing:
             raise RuntimeError(
                 f"shared memory ring {name!r} already exists -- "
                 f"call SharedArrayRing.cleanup_stale({name!r}, {slots}) first") from e
-        return cls(name, slots, shape, dt, blocks, _owner=True)
+        ring = cls(name, slots, shape, dt, blocks, _owner=True)
+        # Defence in depth: register an atexit fallback so an unhandled exception
+        # path (or any creator-side teardown that forgets `unlink`) still frees
+        # the shared blocks instead of leaking them as
+        # `resource_tracker: There appear to be N leaked shared_memory objects`.
+        # The fallback can't save us from SIGKILL (atexit doesn't run there) --
+        # only the clean SIGTERM / exception paths -- but combined with the
+        # SIGTERM handlers in `ours.proc.{capture,vio,slam}` this closes the
+        # window. `_safe_unlink` is idempotent (guarded by `_unlinked`) so it is
+        # a no-op when the caller has already unlinked explicitly.
+        atexit.register(ring._safe_unlink)
+        return ring
 
     @classmethod
     def attach(cls, name: str, slots: int, shape: Iterable[int],
@@ -228,10 +243,12 @@ class SharedArrayRing:
 
         After :meth:`unlink` no further reads / writes succeed. Always pair
         :meth:`close` after :meth:`unlink` in the creator to free the local
-        handle.
+        handle. Sets ``self._unlinked`` so the atexit fallback registered in
+        :meth:`create` becomes a no-op once the caller has cleaned up.
         """
-        if not self._owner:
+        if not self._owner or self._unlinked:
             return
+        self._unlinked = True
         for shm in self._shm:
             try:
                 shm.unlink()
@@ -239,6 +256,20 @@ class SharedArrayRing:
                 pass
             except Exception:                                      # noqa: BLE001
                 pass
+
+    def _safe_unlink(self) -> None:
+        """atexit fallback: unlink wrapped in try/except so interpreter teardown
+        never raises out of the registered callback.
+
+        Idempotent via :attr:`_unlinked`; called automatically when the
+        interpreter exits normally (clean exit, SIGTERM with finally-block,
+        unhandled exception). Does NOT run on SIGKILL or os._exit -- those paths
+        rely on the OS / next reboot to reclaim the shared blocks.
+        """
+        try:
+            self.unlink()
+        except Exception:                                          # noqa: BLE001
+            pass
 
 
 # --------------------------------------------------------------------------- #

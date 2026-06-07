@@ -143,15 +143,34 @@ def run_capture_replay(session: Path, endpoint: str, *,
     LOG.info("capture[%s] replay session=%s frames=%d %dx%d",
              endpoint, session, len(reader), width, height)
 
+    # Install SIGTERM handler BEFORE starting the flows so the launcher's
+    # SIGTERM is observed even if the producer is mid-frame. Without this the
+    # `cam_flow.join()` below blocks until the source is fully drained -- a
+    # 30-second replay session would block shutdown for ~30 s and the launcher
+    # would SIGKILL the process at the 10 s deadline, leaking every ring slot.
+    stop = [False]
+    def _on_sigterm(_signo, _frame):
+        stop[0] = True
+        # cam_flow is a SourceFlow; setting its _stop flag breaks out of the
+        # produce() loop at the next item boundary so the join() returns.
+        cam_flow.stop()
+    signal.signal(signal.SIGTERM, _on_sigterm)
+
     imu_flow.start()
     cam_flow.start()
     LOG.info("capture: cam_flow + imu_flow started, waiting for join ...")
     try:
-        cam_flow.join()                       # produce all frames + END
-        LOG.info("capture: cam_flow.join returned (produced up to %d frames)",
-                 int(max_frames) if max_frames else len(reader))
+        # Poll instead of pure join() so KeyboardInterrupt + signal handlers
+        # are delivered promptly. The poll cadence (0.2 s) matches the live
+        # path; cam_flow.is_alive() flips False after produce() returns or
+        # _stop is observed inside the loop.
+        while not stop[0] and cam_flow.is_alive():
+            time.sleep(0.2)
+        LOG.info("capture: cam_flow loop exit (stop=%s, alive=%s)",
+                 stop[0], cam_flow.is_alive())
     except KeyboardInterrupt:
         LOG.info("capture: SIGINT -> stopping")
+        stop[0] = True
     finally:
         # CamFlow (SourceFlow) emits END on CAM_SYNC when produce() returns;
         # ImuCamFlow forwards END from CAM_SYNC to IMU_RAW + IMUCAM_SAMPLE +
@@ -165,9 +184,16 @@ def run_capture_replay(session: Path, endpoint: str, *,
         # so if we stop while CAM_SYNC items are still queued, we discard them
         # AND the END. `done` is set inside `_handle_end` after expected_ends
         # have been processed, which only happens when END is drained.
+        #
+        # Under SIGTERM the operator wants a fast exit, NOT a full drain --
+        # END will never arrive from a half-killed producer, so cap the wait
+        # at 2 s. Natural end-of-replay keeps the generous 120 s ceiling so a
+        # busy backend can finish.
         cam_flow.stop()
-        LOG.info("capture: waiting for imu_flow to drain (done event) ...")
-        ok = imu_flow.done.wait(timeout=120.0)
+        drain_timeout = 2.0 if stop[0] else 120.0
+        LOG.info("capture: waiting for imu_flow to drain (timeout=%.1fs) ...",
+                 drain_timeout)
+        ok = imu_flow.done.wait(timeout=drain_timeout)
         LOG.info("capture: imu_flow.done=%s", ok)
         imu_flow.stop()
         # Give the bridge a brief window to flush the buffered WireEnds onto
@@ -301,4 +327,14 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    # Same os._exit pattern as ours.proc.vio / ours.proc.slam / ours.proc.ui
+    # -- prevent any lingering non-daemon thread (depthai background thread,
+    # numba pool, etc.) from holding the process past the launcher's 10 s
+    # SIGTERM deadline.
+    import os as _os
+    _rc = main()
+    LOG.info("capture: main returned, calling os._exit(%d)", int(_rc))
+    logging.shutdown()
+    _os.sys.stdout.flush()
+    _os.sys.stderr.flush()
+    _os._exit(int(_rc))

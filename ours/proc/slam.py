@@ -122,7 +122,13 @@ def run_slam(*,
         in_bridge.stop()
         # Same generous drain window as VIO -- a full inbox of buffered
         # keyframes can take seconds to chew through (loop closure is heavy).
-        slam.done.wait(timeout=120.0)
+        # Under SIGTERM the operator wants a fast exit and VIO is also
+        # shutting down so END will never arrive -- cap the wait at 2 s and
+        # let Flow.stop() force-kill the drain thread, otherwise the launcher
+        # SIGKILLs us at its 10 s deadline (no SHM rings here, but a clean
+        # shutdown still keeps the launcher logs free of SIGKILL noise).
+        drain_timeout = 2.0 if stop[0] else 120.0
+        slam.done.wait(timeout=drain_timeout)
         slam.stop()
         # SlamFlow forwards END to loop.correction via its `_emit_end`; the
         # publisher bridge mirrors that onto IPC. No explicit publish_end.
@@ -130,6 +136,7 @@ def run_slam(*,
         pub_flow.stop()
         server.close()
         vio_rings.close()
+        LOG.info("slam: shutdown complete")
     return 0
 
 
@@ -156,4 +163,13 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    # Same os._exit pattern as ours.proc.vio / ours.proc.ui -- prevent any
+    # lingering non-daemon thread from holding the process past the launcher's
+    # 10 s SIGTERM deadline.
+    import os as _os
+    _rc = main()
+    LOG.info("slam: main returned, calling os._exit(%d)", int(_rc))
+    logging.shutdown()
+    _os.sys.stdout.flush()
+    _os.sys.stderr.flush()
+    _os._exit(int(_rc))

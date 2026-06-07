@@ -212,10 +212,19 @@ def run_vio(*,
         # buffered replay frames drains -- 30 frames at ~100 ms / frame can
         # easily take 3-5 s; allow a generous ceiling here, and let SIGTERM
         # short-circuit if the operator gives up.
+        #
+        # Under SIGTERM the operator wants a fast exit. Capture is also
+        # shutting down so END will never arrive on imucam.sample / frame.depth
+        # -- waiting 120 s on `odom.done` would let the launcher SIGKILL us
+        # (10 s deadline), leaking every vio_rings slot. Cap the wait at 2 s
+        # under SIGTERM, then Flow.stop() forces the drain thread out at the
+        # top of its next loop iteration. Natural END (finished.is_set()) keeps
+        # the generous 120 s ceiling so a busy backend can finish.
         in_bridge.stop()
-        odom.done.wait(timeout=120.0)
+        drain_timeout = 2.0 if stop[0] else 120.0
+        odom.done.wait(timeout=drain_timeout)
         odom.stop()
-        backend.done.wait(timeout=120.0)
+        backend.done.wait(timeout=drain_timeout)
         backend.stop()
         # The flows already forward END on their declared downstream topics
         # via `_emit_end` (see `Flow._handle_end`), but those go onto the
@@ -228,6 +237,7 @@ def run_vio(*,
         cap_rings.close()
         vio_rings.unlink()
         vio_rings.close()
+        LOG.info("vio: shutdown complete")
     return 0
 
 
@@ -263,4 +273,15 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    # Use os._exit (not SystemExit / return-from-main) so a lingering non-daemon
+    # thread -- IpcSubscriberFlow's recv loop, the InProcessEngine worker, a
+    # numba thread pool, etc -- cannot keep the process alive past
+    # `vio: shutdown complete`. Without this the launcher waits its full 10 s
+    # deadline and SIGKILLs us. Mirrors the same pattern in `ours.proc.ui`.
+    import os as _os
+    _rc = main()
+    LOG.info("vio: main returned, calling os._exit(%d)", int(_rc))
+    logging.shutdown()
+    _os.sys.stdout.flush()
+    _os.sys.stderr.flush()
+    _os._exit(int(_rc))

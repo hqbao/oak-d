@@ -36,6 +36,7 @@ from __future__ import annotations
 import argparse
 import logging
 import signal
+import socket
 import sys
 import threading
 import time
@@ -273,6 +274,7 @@ def run_ui(*, vio_endpoint: str = DEFAULT_VIO_ENDPOINT,
     """Open the 2-tab Qt UI and block on the Qt event loop."""
     # Import Qt lazily so a headless smoke / CI run that doesn't need the GUI
     # can import this module without pulling PyQt6.
+    from PyQt6.QtCore import QSocketNotifier
     from PyQt6.QtWidgets import (
         QApplication, QHBoxLayout, QLabel, QMainWindow, QTabWidget, QVBoxLayout,
         QWidget,
@@ -360,20 +362,77 @@ def run_ui(*, vio_endpoint: str = DEFAULT_VIO_ENDPOINT,
     win.setCentralWidget(tabs)
     win.show()
 
-    # SIGTERM from the launcher closes the window so the Qt loop exits cleanly
-    # (signal arrives on the main thread; QApplication.quit is thread-safe).
+    # SIGTERM from the launcher must exit the Qt loop within the launcher's
+    # 10 s deadline (else it SIGKILLs us). A bare `signal.signal` handler is
+    # NOT enough on macOS/Linux Qt: the handler runs on the main thread, but
+    # only when the Qt event loop wakes -- and the loop is usually blocked in
+    # a native syscall (`select` / `CFRunLoop`) with no reason to wake. Result:
+    # the Python handler runs after a SIGKILL has already arrived.
+    #
+    # The Qt-recommended fix is `signal.set_wakeup_fd` + `QSocketNotifier`:
+    # the kernel writes the signal number to a non-blocking socket, the
+    # notifier turns the resulting "fd readable" event into a Qt slot
+    # invocation on the GUI thread, and that slot calls `app.quit()` -- which
+    # is now guaranteed to be observed because the event loop has been woken
+    # by the socket I/O event itself. See
+    # https://doc.qt.io/qt-6/qsocketnotifier.html and
+    # https://docs.python.org/3/library/signal.html#signal.set_wakeup_fd
+    #
+    # `socketpair()` is UNIX-only; the project only targets macOS/Linux (same
+    # constraint already imposed by AF_UNIX in `ours.lib.ipc`).
+    wakeup_rd, wakeup_wr = socket.socketpair()
+    wakeup_rd.setblocking(False)
+    wakeup_wr.setblocking(False)
+    # `set_wakeup_fd` returns the previous wakeup fd so we can restore it on
+    # exit (otherwise a re-entrant Qt run in the same interpreter -- e.g. the
+    # selftest re-using a `QApplication` singleton -- would leak a stale fd).
+    prev_wakeup_fd = signal.set_wakeup_fd(wakeup_wr.fileno())
+
+    stop = [False]
+
     def _on_sigterm(_signo, _frame):
-        LOG.info("ui: SIGTERM -> quitting")
-        app.quit()
+        # Runs on the main thread. Just flip the flag; the QSocketNotifier
+        # slot below (woken by the wakeup-fd byte the kernel just wrote) does
+        # the actual `app.quit()`.
+        stop[0] = True
+
     signal.signal(signal.SIGTERM, _on_sigterm)
+
+    notifier = QSocketNotifier(wakeup_rd.fileno(), QSocketNotifier.Type.Read)
+
+    def _on_signal_wake(_fd) -> None:
+        # Drain whatever the kernel wrote (one byte per pending signal); the
+        # exact contents don't matter -- the wake is the signal.
+        try:
+            wakeup_rd.recv(4096)
+        except (BlockingIOError, OSError):
+            pass
+        if stop[0]:
+            LOG.info("ui: SIGTERM -> quitting")
+            app.quit()
+
+    notifier.activated.connect(_on_signal_wake)
 
     LOG.info("ui: entering Qt event loop")
     try:
         rc = app.exec()
     finally:
+        # Stop the IPC sources FIRST -- their recv threads otherwise keep the
+        # process alive after `app.exec()` returns.
         vio_source.stop()
         slam_pose_source.stop()
         slam_tracker.stop()
+        # Tear down the signal plumbing in reverse order so no signal racing
+        # in during teardown writes to a closed socket. `set_wakeup_fd(-1)`
+        # (or the previous fd) disables wakeups before we close ours.
+        try:
+            signal.set_wakeup_fd(prev_wakeup_fd)
+        except (ValueError, OSError):
+            pass
+        notifier.setEnabled(False)
+        wakeup_rd.close()
+        wakeup_wr.close()
+    LOG.info("ui: bye (rc=%d)", int(rc))
     return int(rc)
 
 
@@ -399,4 +458,10 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    import os as _os
+    _rc = main()
+    LOG.info("ui: main returned, calling os._exit(%d)", int(_rc))
+    logging.shutdown()
+    _os.sys.stdout.flush()
+    _os.sys.stderr.flush()
+    _os._exit(int(_rc))

@@ -28,15 +28,81 @@ Run::
 from __future__ import annotations
 
 import argparse
+import glob
 import logging
 import os
 import signal
 import subprocess
 import sys
+import tempfile
 import time
+from multiprocessing import shared_memory
 from pathlib import Path
 
 LOG = logging.getLogger("ours.proc.launcher")
+
+
+# Endpoint roles + the ring names each role's process owns. Mirrors
+# `default_capture_specs()` (capture) and `default_vio_specs()` (vio); slam
+# attaches but owns no rings. Used by `_cleanup_orphans` to brute-force unlink
+# every stale POSIX shm segment from prior crashed runs so a fresh launch
+# doesn't trip macOS's per-process fd / shm caps with EMFILE.
+_RING_NAMES_BY_ROLE = {
+    "cap": ("gray_left", "gray_right", "depth_m"),
+    "vio": ("kf_gray", "kf_depth"),
+    "slm": (),
+}
+_RING_SLOTS = 64
+
+
+def _cleanup_orphans() -> None:
+    """Best-effort: unlink every stale `oak.*` SHM segment + IPC socket file.
+
+    macOS has no public listing API for POSIX shared memory, so we discover
+    candidate endpoints by listing the launcher's IPC socket directory (each
+    launch leaves `oak.{cap,vio,slm}.<suffix>.sock` there). For each endpoint
+    we then try to unlink every (ring, slot) name owned by that role. Missing
+    segments are silently skipped -- this is a guard against accumulation, not
+    a correctness operation.
+    """
+    sock_dir = Path(tempfile.gettempdir()) / "ours_ipc"
+    if not sock_dir.is_dir():
+        return
+    endpoints: set[str] = set()
+    for p in glob.glob(str(sock_dir / "oak.*.sock")):
+        endpoints.add(Path(p).name[:-len(".sock")])
+    if not endpoints:
+        return
+    unlinked = 0
+    for ep in sorted(endpoints):
+        parts = ep.split(".")
+        if len(parts) != 3:
+            continue
+        role = parts[1]
+        for ring in _RING_NAMES_BY_ROLE.get(role, ()):
+            for i in range(_RING_SLOTS):
+                shm_name = f"{ep}.{ring}.{i}"
+                try:
+                    shm = shared_memory.SharedMemory(name=shm_name,
+                                                     create=False)
+                    shm.close()
+                    shm.unlink()
+                    unlinked += 1
+                except FileNotFoundError:
+                    pass
+                except Exception:                                  # noqa: BLE001
+                    pass
+    sock_removed = 0
+    for p in glob.glob(str(sock_dir / "oak.*.sock")):
+        try:
+            os.unlink(p)
+            sock_removed += 1
+        except FileNotFoundError:
+            pass
+    if unlinked or sock_removed:
+        LOG.info("launcher: cleanup_orphans freed %d stale SHM segments + "
+                 "%d socket files from %d prior endpoints",
+                 unlinked, sock_removed, len(endpoints))
 
 
 # --------------------------------------------------------------------------- #
@@ -44,8 +110,9 @@ def _spawn(py: str, mod: str, args: list[str], *, env: dict[str, str],
            name: str) -> subprocess.Popen:
     """Spawn a child python process; stdout / stderr inherited from launcher."""
     cmd = [py, "-m", mod, *args]
-    LOG.info("launcher: spawning %s -> %s", name, " ".join(cmd))
-    return subprocess.Popen(cmd, env=env)
+    p = subprocess.Popen(cmd, env=env)
+    LOG.info("launcher: spawned %s pid=%d -> %s", name, p.pid, " ".join(cmd))
+    return p
 
 
 def _terminate(procs: list[subprocess.Popen], *, deadline_s: float = 10.0,
@@ -97,6 +164,13 @@ def main() -> int:
     ap.add_argument("--no-ui", action="store_true",
                     help="don't open the UI -- useful for capture-only headless runs")
     args = ap.parse_args()
+
+    # ---- Best-effort cleanup of stale SHM + sockets from prior crashed runs.
+    # macOS POSIX shm persists past process death (SIGKILL skips unlink); after
+    # enough crashed launches the kernel namespace fills up and the next
+    # capture's shm_open() fails with EMFILE. We run this BEFORE spawning so
+    # the children start in a clean namespace.
+    _cleanup_orphans()
 
     # ---- Endpoint names --------------------------------------------------
     if args.auto_suffix:
@@ -169,10 +243,25 @@ def main() -> int:
 
         # SIGTERM handler so a `kill <launcher_pid>` from outside cleans up
         # the whole tree (not just the launcher process itself).
+        #
+        # CRITICAL: do NOT call `_terminate(procs)` here -- `_terminate` polls
+        # each `Popen.poll()`, which calls `os.waitpid(pid, WNOHANG)` on the
+        # same pid the main thread is blocked in `ui_proc.wait()` on. The two
+        # waitpid callers race for the single reap event, leaving Popen's
+        # `returncode` stuck at None on the loser, so the handler's
+        # `_terminate` loop spins the full 10 s deadline and SIGKILLs the UI
+        # even though it already exited cleanly. Instead just forward SIGTERM
+        # to each child (they likely already got it from the process-group
+        # signal anyway) and `os._exit` immediately; children either finish
+        # their own shutdown or get reaped by init when launcher dies.
         def _on_sigterm(_signo, _frame):
-            LOG.info("launcher: SIGTERM -> terminating background procs")
-            _terminate(procs)
-            sys.exit(143)                                         # 128 + SIGTERM
+            LOG.info("launcher: SIGTERM -> forwarding to children + exiting")
+            for p in procs:
+                try:
+                    p.terminate()
+                except Exception:                                  # noqa: BLE001
+                    pass
+            os._exit(143)                                         # 128 + SIGTERM
         signal.signal(signal.SIGTERM, _on_sigterm)
 
         if args.no_ui:
