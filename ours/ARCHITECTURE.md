@@ -340,9 +340,11 @@ The stable public API is the flat re-export from `ours/lib/__init__.py`
 - **`ours/ui/`** — PyQt6 GUI. `mainwindow.py` (feature menu + 3D viewer),
   `viewer3d.py`, `panels.py`, `calib_dialogs.py` (gyro/accel calib wizards),
   `source.py` (`PoseSource` ABC + `FakePoseSource`), `live_source.py`
-  (`FlowPoseSource` bridges the live flow graph → Qt viewer, optical→NED).
+  (`FlowPoseSource` bridges the live flow graph → Qt viewer, optical→NED),
+  `map_window.py` (the SLAM keyframe point-cloud viewer for `tools/slam_map3d`).
 - **`ours/tools/`** — offline scripts that call `ours.lib` directly: per-module
-  self-tests (`*_selftest.py`), the `vio_run` oracle, diagnostics, viewers.
+  self-tests (`*_selftest.py`), the `vio_run` oracle, `slam_map3d` (3D room map),
+  diagnostics, viewers.
 
 ---
 

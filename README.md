@@ -35,6 +35,7 @@ oak-d/
       live_replay.py     replay a recorded session through the live ours pipeline
       synced_view.py     inspect the synced (image, depth, IMU) triplet
       imucam_view.py     cv2 view of the split cam/IMU front-end (left|right|gyro|accel)
+      slam_map3d.py      3D room point-cloud fused from keyframe depths (+ PLY export)
       *_selftest.py      regression guards (klt, ba, posegraph, imu_preint, vio_ba, imucam_*, flow_replay)
   baseline/              DepthAI library pipeline (BasaltVIO + RTABMapSLAM)
     oakd/                baseline-only core (its Pose/frames/pngio/sources/ui)
