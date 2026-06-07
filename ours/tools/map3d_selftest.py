@@ -58,13 +58,35 @@ def test_synthetic() -> None:
     _check(pts3.shape[0] == 0, "points beyond max_depth are dropped")
 
 
+def test_landmark_synthetic() -> None:
+    print("keyframe_landmark_cloud draws only PnP inliers")
+    from ours.lib.misc.geometry import keyframe_landmark_cloud
+    K = np.array([[100.0, 0, 32.0], [0, 100.0, 24.0], [0, 0, 1.0]])
+    depth = np.full((48, 64), 2.0, np.float32)
+    ids = np.array([10, 11, 12, 13])
+    px = np.array([[32, 24], [10, 10], [40, 30], [50, 20]], float)
+    inl = np.array([10, 12])                          # only 2 of 4 are inliers
+    p, _ = keyframe_landmark_cloud([np.eye(4)], [ids], [px], [depth], [inl], K)
+    _check(len(p) == 2, f"only the 2 inlier pixels back-project ({len(p)})")
+    _check(any(np.allclose(q, [0, 0, 2], atol=1e-3) for q in p),
+           "inlier id 10 at the principal point -> (0,0,2)")
+    # No inliers -> empty (not the dense cloud).
+    p0, _ = keyframe_landmark_cloud([np.eye(4)], [ids], [px], [depth],
+                                    [np.array([], int)], K)
+    _check(len(p0) == 0, "no inliers -> no points")
+
+
 def test_gold_smoke() -> None:
-    print("build_map on a gold session (offline)")
-    m = build_map("sessions/gold/lab_loop_30s", kf_every=5, max_frames=80,
-                  use_slam=False, stride=6, max_depth=6.0)
+    print("build_map on a gold session (offline): inlier landmarks << dense")
+    m = build_map("sessions/gold/lab_loop_30s", kf_every=5, max_frames=120,
+                  use_slam=False, max_depth=6.0)                  # default = inliers
+    d = build_map("sessions/gold/lab_loop_30s", kf_every=5, max_frames=120,
+                  use_slam=False, stride=6, max_depth=6.0, dense=True)
     pts = m["points"]
     _check(m["n_kf"] > 0, f"keyframes collected ({m['n_kf']})")
-    _check(len(pts) > 1000, f"cloud has points ({len(pts)})")
+    _check(len(pts) > 200, f"inlier cloud has points ({len(pts)})")
+    _check(len(pts) < len(d["points"]),
+           f"inlier cloud is sparser than dense ({len(pts)} < {len(d['points'])})")
     _check(bool(np.all(np.isfinite(pts))), "all points finite")
     extent = float(np.linalg.norm(pts.max(0) - pts.min(0))) if len(pts) else 0.0
     _check(0.1 < extent < 100.0, f"room-scale extent ({extent:.1f} m)")
@@ -74,6 +96,7 @@ def test_gold_smoke() -> None:
 def main() -> int:
     print("map3d_selftest")
     test_synthetic()
+    test_landmark_synthetic()
     test_gold_smoke()
     print("ALL MAP3D SELFTESTS PASSED" if _FAILS == 0
           else f"MAP3D SELFTEST FAILED ({_FAILS})")

@@ -124,6 +124,10 @@ class Keyframe:
     track_ids: np.ndarray | None = None
     track_px: np.ndarray | None = None
     accel: np.ndarray | None = None
+    #: subset of ``track_ids`` the RGB-D PnP kept as INLIERS this frame (the clean,
+    #: motion-consistent features). The 3D-map viewer back-projects only these, so
+    #: the noisy dense-depth points the solve rejected are never drawn.
+    inlier_ids: np.ndarray | None = None
 
 
 @dataclass(frozen=True)

@@ -33,7 +33,8 @@ from ours.lib.io.reader import SessionReader                       # noqa: E402
 from ours.lib.flow.pubsub import Bus                              # noqa: E402
 from ours.lib.flow.messages import END                            # noqa: E402
 from ours.lib.flow import topics                                  # noqa: E402
-from ours.lib.misc.geometry import keyframe_pointcloud            # noqa: E402
+from ours.lib.misc.geometry import (keyframe_pointcloud,           # noqa: E402
+                                    keyframe_landmark_cloud)
 
 
 def collect_keyframes(session: str, *, kf_every: int, max_frames: int,
@@ -87,15 +88,26 @@ def _corrected_poses(keyframes, corrections):
 
 
 def build_map(session: str, *, kf_every: int, max_frames: int, use_slam: bool,
-              stride: int, max_depth: float, max_points: int = 0):
+              stride: int = 4, max_depth: float = 6.0, max_points: int = 0,
+              dense: bool = False):
     K, kfs, corr = collect_keyframes(session, kf_every=kf_every,
                                      max_frames=max_frames, use_slam=use_slam)
     poses = _corrected_poses(kfs, corr)
     depths = [kf.depth_m for kf in kfs]
     grays = [kf.gray_left for kf in kfs]
-    print(f"[map3d] fusing {len(kfs)} keyframes into a cloud…", flush=True)
-    points, colors = keyframe_pointcloud(poses, depths, grays, K,
-                                         stride=stride, max_depth=max_depth)
+    if dense:
+        print(f"[map3d] fusing {len(kfs)} keyframes (DENSE depth)…", flush=True)
+        points, colors = keyframe_pointcloud(poses, depths, grays, K,
+                                             stride=stride, max_depth=max_depth)
+    else:
+        # Default: only the PnP-inlier landmarks (clean) — the dense depth the
+        # solve rejected is noise (flying points before/behind real surfaces).
+        print(f"[map3d] fusing {len(kfs)} keyframes (PnP-inlier landmarks)…",
+              flush=True)
+        points, colors = keyframe_landmark_cloud(
+            poses, [kf.track_ids for kf in kfs], [kf.track_px for kf in kfs],
+            depths, [kf.inlier_ids for kf in kfs], K, grays=grays,
+            max_depth=max_depth)
     # Cap the cloud so the interactive GL viewer stays responsive (a full session
     # is millions of points; pyqtgraph's scatter bogs down well before that).
     # Deterministic random subsample keeps the room shape; raise --max-points or
@@ -132,8 +144,12 @@ def main() -> int:
     ap.add_argument("--slam", action="store_true",
                     help="run loop-closure SLAM and use the drift-corrected poses "
                          "(slower; cleaner map on sessions that revisit a place)")
+    ap.add_argument("--dense", action="store_true",
+                    help="back-project the FULL depth map instead of only the "
+                         "PnP-inlier landmarks (noisier; the default shows just the "
+                         "clean trusted points)")
     ap.add_argument("--stride", type=int, default=4,
-                    help="depth subsample (lower = denser cloud, more points) [4]")
+                    help="DENSE only: depth subsample (lower = more points) [4]")
     ap.add_argument("--max-depth", type=float, default=6.0,
                     help="drop points beyond this many metres (far depth is noisy)")
     ap.add_argument("--max-points", type=int, default=500_000,
@@ -148,7 +164,7 @@ def main() -> int:
     cap = 0 if args.export else args.max_points
     m = build_map(args.session, kf_every=args.kf_every, max_frames=args.max_frames,
                   use_slam=args.slam, stride=args.stride, max_depth=args.max_depth,
-                  max_points=cap)
+                  max_points=cap, dense=args.dense)
     print(f"[map3d] {Path(args.session).name}: {m['n_kf']} keyframes, "
           f"{m['n_loops']} loop(s) -> {len(m['points'])} points", flush=True)
     if len(m["points"]) == 0:

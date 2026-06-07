@@ -6,6 +6,8 @@ keyframe's lateral acceleration would bias the gravity direction).
 """
 from __future__ import annotations
 
+import numpy as np
+
 from ...lib.flow import topics
 from ...lib.flow.messages import Keyframe
 from ...lib.flow.task import Task
@@ -27,8 +29,11 @@ class EmitKeyframe(Task):
         ids = tr.ids.copy() if tr is not None and tr.ids is not None else None
         px = tr.points.copy() if tr is not None and tr.points is not None else None
         accel = step.accel_cam if step.at_rest else None
+        inl = step.info.get("inlier_ids")        # PnP inliers this frame (clean subset)
+        inl = None if inl is None else np.asarray(inl).copy()
         ctx.bus.publish(topics.KEYFRAME,
                         Keyframe(step.frame.seq, step.pose,
                                  step.frame.gray_left, step.frame.depth_m,
-                                 track_ids=ids, track_px=px, accel=accel))
+                                 track_ids=ids, track_px=px, accel=accel,
+                                 inlier_ids=inl))
         return step
