@@ -200,6 +200,20 @@ class FlowPoseSource(PoseSource):
             self._slam_n_loops = 0
             self._slam_flash_id += 1
 
+    def stop(self, timeout: float = 10.0) -> None:
+        """Block until the live teardown (in ``_run``'s finally) has fully released
+        the OAK-D, BEFORE returning to the caller (the Qt close handler).
+
+        The base default of 1 s is far too short: the live teardown drains the
+        flows, reaps the subprocess engine, joins the cam/imu readers and destroys
+        the depthai pipeline -- a couple seconds. If ``stop`` returned early the GUI
+        would proceed to exit while ``_run`` is still destroying the pipeline on its
+        own thread, and that concurrent teardown aborts the process with
+        ``mutex lock failed: Invalid argument``. Waiting here serialises it: the
+        device is fully released first, then the process exits cleanly.
+        """
+        super().stop(timeout=timeout)
+
     def _run(self) -> None:
         from ..app import build_live           # lazy: pulls depthai only here
         from ..flows.ui import UiRenderFlow
@@ -234,19 +248,19 @@ class FlowPoseSource(PoseSource):
                 self._poll_overlay()
                 time.sleep(0.05)
         finally:
+            # Tear down so NOTHING touches the depthai pipeline when it is
+            # destroyed (the lifetime race behind the ``mutex lock failed`` crash):
+            # stop producing, stop+join the reactive flows (each heavy flow's
+            # run()-finally reaps its subprocess engine), JOIN the cam/imu readers,
+            # and only THEN release the device. ``stop()`` blocks the GUI until this
+            # whole block completes, so the process never exits mid-teardown.
             self._engine = None
             cam_flow.stop()
             imu_flow.stop()
-            ui.done.wait(timeout=5.0)
-            for f in flows:
+            for f in flows:                       # ui render flow is in `flows` too
                 f.stop()
-            # Join everything that touches the device BEFORE releasing it, so no
-            # reader thread (and no heavy flow still reaping its subprocess engine)
-            # is alive when the depthai pipeline is destroyed -- the lifetime race
-            # behind the ``mutex lock failed`` device crash. Heavy flows first
-            # (their run()-finally reaps the worker), then the cam/imu readers.
             for f in flows:
-                f.join(timeout=3.0)
-            cam_flow.join(timeout=2.0)
-            imu_flow.join(timeout=2.0)
-            device.release()
+                f.join(timeout=2.0)
+            cam_flow.join(timeout=1.5)
+            imu_flow.join(timeout=1.5)
+            device.release()                      # last: no reader/worker alive now
