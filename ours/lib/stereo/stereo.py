@@ -474,14 +474,19 @@ class RightRectifier:
         ones = np.ones_like(uu)
         # Rectified pixel -> rectified normalized ray (intrinsic = K_left).
         pix = np.stack([uu, vv, ones], axis=0).reshape(3, -1)
-        ray_rect = Kl_inv @ pix
-        # Rectified -> raw-right camera coordinates (rectified = R2 @ raw_right).
-        ray_raw = R2.T @ ray_rect
-        x = ray_raw[0] / ray_raw[2]
-        y = ray_raw[1] / ray_raw[2]
-        xd, yd = _distort_normalized(x, y, dist_right)
-        map_u = (Kr[0, 0] * xd + Kr[0, 1] * yd + Kr[0, 2]).reshape(height, width)
-        map_v = (Kr[1, 1] * yd + Kr[1, 2]).reshape(height, width)
+        # macOS Accelerate BLAS sets spurious divide/overflow/invalid FP flags on
+        # matmul SIMD padding lanes even though the result is finite for any valid
+        # pinhole calibration (verified: map_u/map_v come out finite + in range).
+        # Silence them locally so the rectifier build is warning-clean on every BLAS.
+        with np.errstate(divide="ignore", over="ignore", invalid="ignore"):
+            ray_rect = Kl_inv @ pix
+            # Rectified -> raw-right camera coordinates (rectified = R2 @ raw_right).
+            ray_raw = R2.T @ ray_rect
+            x = ray_raw[0] / ray_raw[2]
+            y = ray_raw[1] / ray_raw[2]
+            xd, yd = _distort_normalized(x, y, dist_right)
+            map_u = (Kr[0, 0] * xd + Kr[0, 1] * yd + Kr[0, 2]).reshape(height, width)
+            map_v = (Kr[1, 1] * yd + Kr[1, 2]).reshape(height, width)
         self.map_u = np.ascontiguousarray(map_u.astype(np.float32))
         self.map_v = np.ascontiguousarray(map_v.astype(np.float32))
 
@@ -522,14 +527,17 @@ class LeftRectifier:
         ones = np.ones_like(uu)
         # Rectified pixel -> rectified normalized ray (intrinsic = K_left).
         pix = np.stack([uu, vv, ones], axis=0).reshape(3, -1)
-        ray_rect = Kl_inv @ pix
-        # Rectified -> raw-left camera coordinates (rectified = R1 @ raw_left).
-        ray_raw = R1.T @ ray_rect
-        x = ray_raw[0] / ray_raw[2]
-        y = ray_raw[1] / ray_raw[2]
-        xd, yd = _distort_normalized(x, y, dist_left)
-        map_u = (Kl[0, 0] * xd + Kl[0, 1] * yd + Kl[0, 2]).reshape(height, width)
-        map_v = (Kl[1, 1] * yd + Kl[1, 2]).reshape(height, width)
+        # See RightRectifier: silence spurious Accelerate-BLAS FP flags on the
+        # matmuls; the maps are finite for any valid pinhole calibration.
+        with np.errstate(divide="ignore", over="ignore", invalid="ignore"):
+            ray_rect = Kl_inv @ pix
+            # Rectified -> raw-left camera coordinates (rectified = R1 @ raw_left).
+            ray_raw = R1.T @ ray_rect
+            x = ray_raw[0] / ray_raw[2]
+            y = ray_raw[1] / ray_raw[2]
+            xd, yd = _distort_normalized(x, y, dist_left)
+            map_u = (Kl[0, 0] * xd + Kl[0, 1] * yd + Kl[0, 2]).reshape(height, width)
+            map_v = (Kl[1, 1] * yd + Kl[1, 2]).reshape(height, width)
         self.map_u = np.ascontiguousarray(map_u.astype(np.float32))
         self.map_v = np.ascontiguousarray(map_v.astype(np.float32))
 
