@@ -18,6 +18,9 @@ Everything is metric because depth is metric, so the trajectory has true scale
 """
 from __future__ import annotations
 
+import json
+import os
+import time
 from dataclasses import dataclass
 
 import numpy as np
@@ -663,6 +666,10 @@ class RGBDVisualOdometry:
                     self.pose = self.pose @ np.linalg.inv(T_pc)
                     info["n_inliers"] = ninl
                     info["ok"] = True
+                    if os.environ.get("VIO_DEBUG"):        # diagnostics only
+                        info["rot_deg_vis"] = float(np.degrees(
+                            np.linalg.norm(so3_log(R))))
+                        info["t_norm"] = float(np.linalg.norm(t_use))
                     # Refresh the trusted velocity for coasting / rotation-gated
                     # blending -- but ONLY from clean (low-rotation) frames, so a
                     # phantom translation produced during a fast yaw never
@@ -686,6 +693,23 @@ class RGBDVisualOdometry:
         self._prev_obs = cur_obs
         self._prev_depth = depth_m
         self.last_info = info
+        if os.environ.get("VIO_DEBUG"):                    # observation-only
+            self._dbg_n = getattr(self, "_dbg_n", 0) + 1
+            try:
+                with open("/tmp/vio_debug.jsonl", "a") as _f:
+                    _f.write(json.dumps({
+                        "n": self._dbg_n,
+                        "wall": round(time.monotonic(), 4),
+                        "ntrk": int(info.get("n_tracks", -1)),
+                        "npnp": int(info.get("n_pnp", -1)),
+                        "inl": int(info.get("n_inliers", 0)),
+                        "ok": bool(info.get("ok", False)),
+                        "rot_deg": round(float(info.get("rot_deg_vis", 0.0)), 2),
+                        "t_norm": round(float(info.get("t_norm", 0.0)), 4),
+                        "reason": info.get("reason", ""),
+                    }) + "\n")
+            except Exception:                              # noqa: BLE001
+                pass
         return self.pose
 
     # ------------------------------------------------------------------ #
