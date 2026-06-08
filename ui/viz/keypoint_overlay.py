@@ -52,9 +52,15 @@ def marker_sizes(shape: tuple[int, int]) -> tuple[int, int, int, int]:
     """
     short = min(int(shape[0]), int(shape[1]))
     s = short / _REF_SHORT
-    dot_r = max(2, int(round(3.0 * s)))
-    halo_r = dot_r + max(1, int(round(s)))
-    fresh_r = dot_r + max(2, int(round(2.0 * s)))
+    # The halo + fresh/inlier rings GROW off the inner dot; on very small frames
+    # those additions must collapse to 0 so the whole marker shrinks to a ~1 px
+    # inner dot (otherwise dozens of tracks bury the 54px-wide ToF frame). Only
+    # ``dot_r`` and ``line_w`` keep a 1 px minimum. At s=1 (640) the rounds give
+    # +1/+2/2 exactly as before, so 640 is unchanged; the additions vanish only
+    # at low res (round(s)->0), shrinking the markers there.
+    dot_r = max(1, int(round(3.0 * s)))
+    halo_r = dot_r + int(round(s))
+    fresh_r = dot_r + int(round(2.0 * s))
     line_w = max(1, int(round(1.5 * s)))
     return dot_r, halo_r, fresh_r, line_w
 
