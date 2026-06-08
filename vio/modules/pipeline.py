@@ -73,6 +73,7 @@ from __future__ import annotations
 import numpy as np
 
 from vio.comms import Module, LocalPubSub, topics
+from vio.mathlib.frontend.frontend import FrontendConfig, KLTFrontend
 from vio.mathlib.odometry.odometry import OdometryConfig, RGBDVisualOdometry
 from vio.mathlib.backend.bundle import BAConfig
 from vio.mathlib.backend.windowed import WindowedConfig
@@ -97,11 +98,18 @@ class OdometryModule(Module):
                  R_imu_cam: np.ndarray | None = None,
                  accel_align: np.ndarray | None = None,
                  odom_cfg: OdometryConfig | None = None,
+                 frontend_cfg: FrontendConfig | None = None,
                  kf_every: int = 5, use_gyro: bool = True,
                  latest_only: bool = False, level_tilt: bool = False,
                  publish_vo: bool = False) -> None:
         super().__init__("odometry", bus, latest_only=latest_only)
-        self.ctx.state["vo"] = RGBDVisualOdometry(K, odom_cfg or OdometryConfig())
+        # ``frontend_cfg`` carries the resolution-scaled KLT + corner-detection
+        # geometry (window/pyramid/corner budget, and at low res the block_size=3
+        # + bucketed coverage levers). Defaulting to None keeps the historical
+        # full-quality FrontendConfig() the offline byte-parity oracle relies on.
+        fe = KLTFrontend(frontend_cfg) if frontend_cfg is not None else None
+        self.ctx.state["vo"] = RGBDVisualOdometry(
+            K, odom_cfg or OdometryConfig(), frontend=fe)
         self.ctx.state["kf_every"] = int(kf_every)
         self.ctx.state["use_gyro"] = bool(use_gyro)
         # Continuous at-rest roll/pitch leveling (CorrectTilt). LIVE-only so the

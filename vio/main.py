@@ -56,6 +56,8 @@ from vio.comms.ring_registry import (                              # noqa: E402
 )
 from vio.modules import BackendModule, OdometryModule              # noqa: E402
 from vio.mathlib.odometry.odometry import OdometryConfig           # noqa: E402
+from vio.comms.lib.config.resolution import ResolutionProfile     # noqa: E402
+from vio.mathlib.resolution_build import frontend_config          # noqa: E402
 
 LOG = logging.getLogger("vio.main")
 
@@ -132,6 +134,20 @@ def run_vio(*,
 
     # 4. Build the local bus + the odometry / backend graph using the bundle.
     local = LocalPubSub()
+    # Resolution-scaled frontend config: at the 640 baseline this is the
+    # historical full-quality FrontendConfig (block_size=7, no bucketing); at a
+    # low ToF resolution (e.g. the 54x42 VL53L9CX sim) the profile shrinks the
+    # Shi-Tomasi window to 3px and turns on bucketed per-cell detection so the
+    # frontend produces more, evenly-spread, consistent corners (the PnP no
+    # longer flips LOST<->OK on clustered points). Numba availability only caps
+    # the KLT window/pyramid/budget, never the detection geometry.
+    try:
+        from vio.mathlib.frontend.klt_numba import HAVE_NUMBA
+    except Exception:
+        HAVE_NUMBA = False
+    res = ResolutionProfile.for_resolution(width, height)
+    fe_cfg = frontend_config(res, numba=HAVE_NUMBA)
+    LOG.info("vio: frontend profile -> %s", res.describe())
     # The VIO process serves the interactive LIVE viewer (capture runs --live), so
     # VIO must self-level (level_tilt) and gyro-fuse rotation exactly like the
     # in-process live graph -- otherwise the body frame renders tilted and heading
@@ -141,6 +157,7 @@ def run_vio(*,
                           R_imu_cam=bundle.R_imu_cam,
                           accel_align=bundle.accel_align,
                           odom_cfg=OdometryConfig(gyro_fuse=use_gyro),
+                          frontend_cfg=fe_cfg,
                           kf_every=kf_every, use_gyro=use_gyro,
                           latest_only=False, level_tilt=True,
                           publish_vo=True)   # live viewer's pure-vision "VO" line

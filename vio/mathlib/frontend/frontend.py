@@ -25,6 +25,11 @@ class FrontendConfig:
     quality_level: float = 0.01
     min_distance: float = 12.0  # px between corners
     block_size: int = 7
+    # Bucketed (per-cell grid) corner detection. Default False -> the original
+    # global detect path (byte-identical at the 640 baseline). Set True ONLY at
+    # low resolution (the resolution builder turns it on) to force even spatial
+    # coverage so clustered corners don't make the PnP geometry degenerate.
+    bucketed: bool = False
     # KLT
     win_size: int = 21
     max_level: int = 3
@@ -107,6 +112,7 @@ class KLTFrontend:
             min_distance=self.cfg.min_distance,
             block_size=self.cfg.block_size,
             exclude=existing,
+            bucketed=self.cfg.bucketed,
         )
 
     def process(self, gray: np.ndarray) -> TrackState:

@@ -28,7 +28,14 @@ The startup log prints the active profile, e.g.:
 
 ```
 [ours] resolution profile: 320x200 (s=0.50): corners=200 min_dist=6.0px
-           klt=11px/2lvl reproj=1.0px ndisp=48 orb=400
+           blk=5px klt=11px/2lvl reproj=1.0px ndisp=48 orb=400
+```
+
+At a low ToF resolution the `blk` field shows `+bucket`, e.g. the VL53L9CX sim:
+
+```
+vio: frontend profile -> 54x42 (s=0.08): corners=80 min_dist=4.0px
+           blk=3px+bucket klt=7px/1lvl reproj=1.0px ndisp=32 orb=200
 ```
 
 > Keep the aspect ratio at **16:10** (640:400) when picking a size — the scale
@@ -53,10 +60,20 @@ resolution-independent and are **not** scaled.
 | `--num-disparities` | `SGMConfig.num_disparities` | px | `max(32, even(96·s))` | Stereo disparity search range. Disparity is a pixel distance → halves at half width. Keeps the near-depth bound `fx·B/ndisp` roughly constant. |
 | `--orb-features` | `LoopConfig.orb_features` | count | `max(200, round(800·s))` | ORB budget for loop closure (`ours-slam`). Fewer pixels → fewer reliable ORB keypoints. |
 
-Auto-scaled but **not** individually flagged (derived from `s` inside the
+Auto-scaled but **not** individually flagged (derived from `s`/`width` inside the
 profile): `min_inliers_for_translation` (`max(6, round(12·s))`), the loop
-epipolar/PnP thresholds (`max(1, 2·s)`), and the BA Huber scale (`max(1, 2·s)`).
-Add a flag if co-tuning shows one of these needs it.
+epipolar/PnP thresholds (`max(1, 2·s)`), the BA Huber scale (`max(1, 2·s)`), and
+the two **low-resolution corner-detection levers** below. Add a flag if
+co-tuning shows one of these needs it.
+
+| Profile field | Config field | Auto rule (`width`) | What it does / why it matters at low res |
+|---|---|---|---|
+| `block_size` | `FrontendConfig.block_size` | 7 at `s≥1`; 5 for `160<width<640`; **3 for `width≤160`** | Shi-Tomasi structure-tensor window (a *pixel* footprint). A 7 px window over a ~54 px-wide ToF frame over-smooths and **halves** the corner count; 3 px roughly doubles it. Pinned to 7 at the 640 baseline so that detect path is **byte-identical**. |
+| `bucketed` | `FrontendConfig.bucketed` | `True` only when `width≤160`, else `False` | Per-cell grid detection (≈6×5 cells, ≤2 corners/cell, per-cell relative quality threshold). Forces **even spatial coverage** so corners don't cluster — clustered corners give degenerate PnP geometry, which is what makes the tracker flicker `LOST↔OK`. Off at 640 → the original global detect path (byte-identical). |
+
+> Both levers are **resolution-gated**: at 640×400 they are `7 / False`, so the
+> corner detector runs its original global path and the offline byte-parity
+> oracle (`verification/oracle_replay_selftest.py`) stays `gap=0`.
 
 ## Co-tuning workflow
 
@@ -100,16 +117,30 @@ a device run of the live preview at 54×42:
 | 320×200 | 0.50 | ~54% | 104 | healthy |
 | 160×100 | 0.25 | ~58% | 75 | healthy — **recommended floor** |
 | 96×60 | 0.15 | ~50% | 38 | edge; usable, fewer tracks |
-| 54×42 | ~0.08 | ~30% | 14 | runs (device-confirmed, no crash) but **less accurate** than higher res — coverage and corner count drop sharply, so the pose jitters/drifts more |
+| 54×42 (`block_size=3` + bucketed) | ~0.08 | ~30% | **~50** | runs (device-confirmed) — with the low-res corner levers the tracker is now **consistent** (see below); still less accurate than higher res, but no longer flickers |
 
 Notes:
 
 - The SGM `live()` preset uses `downscale=2`, which internally **halves**
   `num_disparities`, so stereo stays geometrically valid (internal ndisp <
   compute width) even at 54×42 — the tiny sizes get *less accurate*, not broken.
-- **54×42 runs but is marginal**: with ~14 corners and ~30% depth coverage the
-  VIO has little to bind to, so it drifts more than higher resolutions. Use it
-  only when CPU is the hard constraint and some jitter is acceptable.
+- **54×42 corner-detection levers (`block_size=3` + `bucketed`).** A 7 px
+  Shi-Tomasi window over a 54 px-wide frame over-smooths, and the strongest
+  corners cluster in one region — so PnP saw ~7 clustered tracks and alternated
+  0↔9 inliers (degenerate geometry → constant `LOST↔OK` flicker). Measured on the
+  `lab_loop_30s` gold ToF replay (`--vl53l9cx`, 598 frames, device-free), the
+  block-size + bucketed levers change this decisively:
+
+  | Detector at 54×42 | mean tracks | grid coverage | mean PnP inliers (median) | LOST frames | OK↔LOST flips |
+  |---|---|---|---|---|---|
+  | before (`blk7`, `min_dist=12` default) | 7.2 | 24% | 0.1 (0) | **590 / 598 (98.7%)** | 12 |
+  | scaled spacing only (`blk7`, `min_dist=4`) | 33.7 | 61% | 25.2 (27) | 9 / 598 (1.5%) | 1 |
+  | + `block_size=3` (lever 1) | 42.8 | 69% | 31.6 (33) | 9 / 598 (1.5%) | 1 |
+  | + `block_size=3` **+ bucketed** (both levers) | **49.6** | **85%** | **35.7 (37)** | **9 / 598 (1.5%)** | **1** |
+
+  Reproduced on `corridor_60s` (before 6.2 tracks / 97.7% LOST → after 50.7
+  tracks / 85% coverage / 2.5% LOST). The bucketed lever's signature is the jump
+  in spatial coverage (61% → 85%), which is what removes the PnP degeneracy.
 - **160×100 is the practical floor** for VIO (≈58% coverage, ≈75 corners): much
   lighter than 640×400 while still tracking well. **96×60** is the edge if you
   need maximum lightness.

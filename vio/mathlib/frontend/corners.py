@@ -81,30 +81,16 @@ def _dilate3(r: np.ndarray) -> np.ndarray:
     return out
 
 
-def good_features_to_track(
-    gray: np.ndarray,
-    max_corners: int,
-    quality_level: float = 0.01,
-    min_distance: float = 12.0,
-    block_size: int = 7,
-    mask: np.ndarray | None = None,
-    exclude: np.ndarray | None = None,
-) -> np.ndarray:
-    """Shi-Tomasi corners. Drop-in for ``cv2.goodFeaturesToTrack``.
+def _shi_tomasi_response(img: np.ndarray, block_size: int,
+                         mask: np.ndarray | None) -> np.ndarray:
+    """Windowed Shi-Tomasi response map (smaller eigenvalue of the structure
+    tensor), with the off-image border and an optional ``mask`` zeroed out.
 
-    Returns an ``(N, 2) float32`` array of ``(x, y)`` pixel coordinates, sorted
-    strongest-first, with at most ``max_corners`` points spaced at least
-    ``min_distance`` apart. ``N`` may be 0.
-
-    ``exclude`` is an optional ``(M, 2)`` set of already-tracked points; new
-    corners are kept ``min_distance`` away from them too (this replaces drawing a
-    ``cv2.circle`` mask around existing tracks).
+    Factored out of :func:`good_features_to_track` so the bucketed path can
+    reuse the IDENTICAL response computation. The default (non-bucketed) caller
+    runs exactly the same arithmetic it always did -> byte-identical output.
     """
-    if max_corners <= 0:
-        return np.empty((0, 2), np.float32)
-    img = gray.astype(np.float32)
     H, W = img.shape
-
     Ix, Iy = _sobel(img)
     Sxx = _box_sum(Ix * Ix, block_size)
     Syy = _box_sum(Iy * Iy, block_size)
@@ -124,21 +110,125 @@ def good_features_to_track(
 
     if mask is not None:
         resp = np.where(mask > 0, resp, 0.0)
+    return resp
+
+
+def _bucketed_candidates(
+    resp: np.ndarray,
+    quality_level: float,
+    grid_cols: int,
+    grid_rows: int,
+    per_cell: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Pick the strongest ``per_cell`` 3x3-maxima in EACH grid cell.
+
+    Returns ``(ys, xs)`` of the chosen candidates, already sorted globally
+    strongest-first so the shared greedy ``min_distance`` pass below can consume
+    them unchanged.
+
+    Two deliberate differences from the global path force EVEN spatial coverage
+    at low resolution (where a single bright structure otherwise starves whole
+    regions of corners):
+
+    * the quality threshold is taken **per cell** (``quality_level * cell_max``),
+      so a dim-but-real corner in a low-contrast cell is not suppressed by a
+      bright corner in another cell;
+    * at most ``per_cell`` corners are emitted per cell, so the candidate set is
+      spread across the grid instead of piling onto the strongest region.
+    """
+    H, W = resp.shape
+    # 3x3 non-maximum suppression, computed once over the whole map (same NMS
+    # the global path uses) so a "corner" means the same thing in both paths.
+    local_max = resp >= _dilate3(resp)
+    sel_vals: list[float] = []
+    sel_ys: list[int] = []
+    sel_xs: list[int] = []
+    for cy in range(grid_rows):
+        y0 = cy * H // grid_rows
+        y1 = (cy + 1) * H // grid_rows
+        for cx in range(grid_cols):
+            x0 = cx * W // grid_cols
+            x1 = (cx + 1) * W // grid_cols
+            sub = resp[y0:y1, x0:x1]
+            cmax = float(sub.max()) if sub.size else 0.0
+            if cmax <= 0.0:
+                continue
+            thresh = quality_level * cmax
+            keep = local_max[y0:y1, x0:x1] & (sub > thresh)
+            yy, xx = np.nonzero(keep)
+            if yy.size == 0:
+                continue
+            vals = sub[yy, xx]
+            top = np.argsort(vals)[::-1][:per_cell]
+            for j in top:
+                sel_vals.append(float(vals[j]))
+                sel_ys.append(int(yy[j]) + y0)
+                sel_xs.append(int(xx[j]) + x0)
+    if not sel_vals:
+        return np.empty((0,), np.intp), np.empty((0,), np.intp)
+    order = np.argsort(np.asarray(sel_vals))[::-1]
+    ys = np.asarray(sel_ys, dtype=np.intp)[order]
+    xs = np.asarray(sel_xs, dtype=np.intp)[order]
+    return ys, xs
+
+
+def good_features_to_track(
+    gray: np.ndarray,
+    max_corners: int,
+    quality_level: float = 0.01,
+    min_distance: float = 12.0,
+    block_size: int = 7,
+    mask: np.ndarray | None = None,
+    exclude: np.ndarray | None = None,
+    bucketed: bool = False,
+    grid_cols: int = 6,
+    grid_rows: int = 5,
+    per_cell: int = 2,
+) -> np.ndarray:
+    """Shi-Tomasi corners. Drop-in for ``cv2.goodFeaturesToTrack``.
+
+    Returns an ``(N, 2) float32`` array of ``(x, y)`` pixel coordinates, sorted
+    strongest-first, with at most ``max_corners`` points spaced at least
+    ``min_distance`` apart. ``N`` may be 0.
+
+    ``exclude`` is an optional ``(M, 2)`` set of already-tracked points; new
+    corners are kept ``min_distance`` away from them too (this replaces drawing a
+    ``cv2.circle`` mask around existing tracks).
+
+    ``bucketed`` (default ``False``) switches candidate selection to a per-cell
+    grid path used ONLY at low resolution (see :func:`_bucketed_candidates`); it
+    forces even spatial coverage so the PnP geometry does not degenerate when
+    corners would otherwise cluster. With ``bucketed=False`` the function is the
+    original global path and its output is byte-for-byte unchanged.
+    """
+    if max_corners <= 0:
+        return np.empty((0, 2), np.float32)
+    img = gray.astype(np.float32)
+    H, W = img.shape
+
+    resp = _shi_tomasi_response(img, block_size, mask)
 
     rmax = float(resp.max())
     if rmax <= 0.0:
         return np.empty((0, 2), np.float32)
-    thresh = quality_level * rmax
 
-    # non-maximum suppression: keep strict-ish 3x3 local maxima above threshold
-    local_max = resp >= _dilate3(resp)
-    keep = local_max & (resp > thresh)
-    ys, xs = np.nonzero(keep)
-    if ys.size == 0:
-        return np.empty((0, 2), np.float32)
-    vals = resp[ys, xs]
-    order = np.argsort(vals)[::-1]
-    ys, xs = ys[order], xs[order]
+    if bucketed:
+        # Low-res only: pick the strongest per-cell maxima across the grid.
+        ys, xs = _bucketed_candidates(
+            resp, quality_level, grid_cols, grid_rows, per_cell)
+        if ys.size == 0:
+            return np.empty((0, 2), np.float32)
+    else:
+        thresh = quality_level * rmax
+        # non-maximum suppression: keep strict-ish 3x3 local maxima above thresh
+        local_max = resp >= _dilate3(resp)
+        keep = local_max & (resp > thresh)
+        ys, xs = np.nonzero(keep)
+        if ys.size == 0:
+            return np.empty((0, 2), np.float32)
+        vals = resp[ys, xs]
+        order = np.argsort(vals)[::-1]
+        ys, xs = ys[order], xs[order]
 
     # greedy min-distance enforcement via an occupancy grid (cells of side
     # min_distance; a new corner is rejected if any kept corner in the 3x3

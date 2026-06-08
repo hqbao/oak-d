@@ -38,8 +38,20 @@ def frontend_config(res: ResolutionProfile, *, numba: bool) -> FrontendConfig:
     win = res.klt_win if numba else _round_odd(min(res.klt_win, 13), lo=7)
     lvl = res.klt_levels if numba else min(res.klt_levels, 2)
     corners = res.max_corners if numba else min(res.max_corners, 200)
+    # Detection geometry is a VIO-frontend concern, so it is derived HERE from
+    # the width -- NOT stored on the shared ``ResolutionProfile`` (that lives in
+    # the vendored ``comms`` package, which must stay byte-identical across every
+    # project's copy). Only the low-res regime (<= 160 px wide: the 160x100 floor
+    # + the 54x42 ToF sim) switches to a small Shi-Tomasi window + bucketed
+    # detection (more, evenly-spread corners); 320/640 keep the historical
+    # block_size=7 / non-bucketed path -> 640 stays byte-identical to the oracle.
+    low_res = res.width <= 160
+    block_size = 3 if low_res else 7
+    bucketed = low_res
     return FrontendConfig(max_corners=corners,
                           min_distance=res.min_distance,
+                          block_size=block_size,
+                          bucketed=bucketed,
                           win_size=win, max_level=lvl)
 
 
