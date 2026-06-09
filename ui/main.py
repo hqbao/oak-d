@@ -830,13 +830,13 @@ def run_ui(*, vio_endpoint: str = DEFAULT_VIO_ENDPOINT,
     vis_menu.addAction(slam_map_act)
 
     # Floor Plan (top-down): the SAME mapped space, but rendered as a LIGHT 2D
-    # top-down OCCUPANCY raster (NO OpenGL) -- the walls read as a top-down outline
-    # + the camera path -- so the room layout is clear AND the view never stutters
-    # (the 3D maps are heavy GL on this Mac and noisy in perspective). The
-    # IpcFloorPlanSource consumes VIO's ``keyframe`` (depth via VIO's kf rings)
-    # only, back-projects each keyframe's depth by its own VIO pose, drops the
-    # world-vertical axis to bin the points onto the ground plane, and colour-maps
-    # the occupancy; its callback hands each rebuilt raster to the window via the
+    # top-down WALL raster (NO OpenGL) -- the walls read as top-down marks (the
+    # room's true shape) + the camera path -- so the room layout is clear AND the
+    # view never stutters (the 3D maps are heavy GL on this Mac and noisy in
+    # perspective). The IpcFloorPlanSource consumes VIO's ``keyframe`` (depth via
+    # VIO's kf rings) only, back-projects each keyframe's depth by its own VIO pose,
+    # drops the world-vertical axis to bin the points onto the ground plane, and
+    # keeps the high-vertical-extent cells as walls; its callback hands each raster
     # thread-safe `submit` (a queued signal onto the GUI thread). Cached on `win`;
     # the source is stopped in run_ui's teardown (mirrors the SLAM-Map entry).
     def _open_floor_plan() -> None:

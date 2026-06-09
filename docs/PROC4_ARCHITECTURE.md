@@ -431,23 +431,33 @@ The menu is plain Qt (`QMenuBar` / `QAction`); `ui.main` calls
   UI-only — so only consistently-tracked, motion-validated points show, NOT a dense
   reconstruction), and **"Floor Plan (top-down)…"**
   (`FloorPlanWindow`, driven by `IpcFloorPlanSource` — a **LIGHT 2D top-down
-  wall-outline raster**, NOT OpenGL). The floor plan is a cheap, readable alternative
+  WALL raster**, NOT OpenGL). The floor plan is a cheap, readable alternative
   to the 3D maps (heavy GL on a Mac, noisy in perspective): it back-projects each
   keyframe's depth by its own VIO pose, drops the world-vertical optical-`+y` axis
-  to bin the points onto the optical `(x,z)` GROUND plane, then builds the room's
-  **occupied region** (a cell needs enough rays AND a real vertical column —
-  `extent_m >= FLOOR_EXTENT_M`, the explicit *wall = vertical extent* gate that drops
-  the flat floor) and reduces it to a **crisp wall line** with cheap 2D `cv2` ops:
-  `MORPH_OPEN` scrubs the radial *star-burst* streaks, `MORPH_CLOSE` bridges
-  depth-dropout gaps, `connectedComponentsWithStats` drops the isolated noise islands,
-  and `MORPH_GRADIENT` takes the region **boundary** (top-down, a wall *is* the
-  boundary between occupied and free space). The bright outline is drawn over a faint
-  raw-occupancy context wash, with the **camera path** + latest-pose marker on top. It
-  uses a 2D pyqtgraph `PlotWidget` (`ImageItem` + `PlotDataItem`) — **no
-  `GLViewWidget`** — so it never stutters the UI, and the raster can be written to a
-  PNG with pure numpy/cv2 for offscreen visual verification. The builder math is the
-  pure-numpy+cv2 `ui/viz/floor_plan.py` (no Qt/GL). Each window is cached so repeated
-  opens reuse the one IPC source.
+  to bin the points onto the optical `(x,z)` GROUND plane, then renders the **WALL
+  CELLS DIRECTLY** — a cell is a wall cell when its points span a tall vertical
+  column (`extent_m = max_h − min_h ≥ WALL_EXTENT_M`, the *wall = high vertical
+  extent* detector that excludes the flat floor) AND it has enough ray support
+  (`MIN_CELL_COUNT`). Those cells **are** the walls (thin marks, drawn directly),
+  cleaned of speckle by a *light* 2D `cv2` pass — a tiny `MORPH_OPEN` drops 1-cell
+  specks, `connectedComponentsWithStats` drops isolated noise blobs. Crucially it
+  **does NOT** `MORPH_CLOSE` or take a `MORPH_GRADIENT` outline: an earlier version
+  outlined the whole occupied region, but the camera sits ~centre and rotates, so
+  its limited-range noisy depth fills a roughly circular disc whose outline is just
+  the **sensing horizon** (a circle), not the walls. Rendering wall cells directly
+  lets the room's true shape emerge (a square if the 4 walls were sensed; partial
+  walls if only part was — honest). *Honest caveat on the gold OAK-D stereo: the
+  fused per-cell vertical span is large at nearly every cell (noisy/flying points +
+  real floor/ceiling/clutter fill the column across the swept disc), so the gate
+  cannot cleanly isolate walls on that data — `WALL_EXTENT_M` is tuned (~2.0 m) to
+  be selective rather than to draw a perfect square; on cleaner per-pixel depth (the
+  VL53 ToF target) the same gate resolves walls.* The bright wall cells are drawn
+  over a faint raw-occupancy context wash, with the **camera path** + latest-pose
+  marker on top. It uses a 2D pyqtgraph `PlotWidget` (`ImageItem` + `PlotDataItem`)
+  — **no `GLViewWidget`** — so it never stutters the UI, and the raster can be
+  written to a PNG with pure numpy/cv2 for offscreen visual verification. The builder
+  math is the pure-numpy+cv2 `ui/viz/floor_plan.py` (no Qt/GL). Each window is cached
+  so repeated opens reuse the one IPC source.
 - **Calibration** — **"Gyroscope Bias…"** (`GyroCalibDialog`) and **"Accelerometer
   (6-position)…"** (`AccelCalibDialog`). Each opens with a fresh `IpcImuRawSource`
   injected as its `stream`; the menu handler owns the stream and closes it in its
@@ -471,12 +481,12 @@ clear reason rather than a raw shared-memory path error.
 
 Beside these three duck-typed adapters, the same module hosts the **keyframe-map
 builder** sources — `IpcSlamMapSource` (sparse landmark cloud) and `IpcFloorPlanSource`
-(2D top-down wall-outline raster). Both subclass a shared `_KeyframeAccumulator` base
+(2D top-down WALL raster). Both subclass a shared `_KeyframeAccumulator` base
 (VIO `keyframe` ring attach + stash + evict + a coalesced off-GUI rebuild loop), so
 each adds **only** its own build (`_build`) with **no copy-paste** of the SHM/recv
 wiring; the floor-plan build
-delegates to the pure-numpy+cv2 `ui/viz/floor_plan.py` so its projection + wall-mask
-cleanup are testable headless.
+delegates to the pure-numpy+cv2 `ui/viz/floor_plan.py` so its projection + wall-cell
+detection + speckle cleanup are testable headless.
 
 ### 6.4 Calibration semantic — "saves for the NEXT capture start"
 

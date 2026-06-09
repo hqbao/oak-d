@@ -364,31 +364,39 @@ The menu bar renders **in-window on every platform** (`setNativeMenuBar(False)`)
     only consistently-tracked, motion-validated points show, NOT a dense reconstruction.
   - *Floor Plan (top-down)* — a **LIGHT, no-OpenGL** alternative to the 3D map
     (heavy GL on a Mac, noisy depth hard to read in perspective): a **2D top-down
-    wall-outline raster**. Each keyframe's depth is back-projected by its own VIO pose
-    (strided, same depth gate + edge reject as the 3D builds, but a **tighter
-    `MAX_DEPTH_M`≈2.5 m** because far stereo sprays radial fans top-down), the
-    world-vertical **optical-`+y` (down)** axis is dropped to bin the points onto the
-    optical `(x,z)` **ground plane**. A cell joins the room's **occupied region** only
-    if it is hit by enough rays (`MIN_CELL_COUNT`, drops thin radial noise) **and** its
-    points span a real **vertical column** (`FLOOR_EXTENT_M` — the explicit *wall =
-    vertical extent* gate that drops the flat floor). That binary region is then
-    cleaned + reduced to a **crisp wall line** with cheap 2D `cv2` ops — `MORPH_OPEN`
-    scrubs the radial *star-burst* streaks, `MORPH_CLOSE` bridges depth-dropout gaps,
-    `connectedComponentsWithStats` drops the isolated noise islands, and `MORPH_GRADIENT`
-    takes the region's **boundary** (a wall reads top-down as the *boundary* between
-    occupied and free space, not an interior blob). The crisp outline is drawn bright
-    over a faint raw-occupancy context wash, with the **camera path** + latest-pose
-    marker on top. It renders on a 2D `pyqtgraph.PlotWidget` (`ImageItem` +
-    `PlotDataItem`) — **no `GLViewWidget`** — so it never stutters the UI, and (being a
-    plain raster) it can be written to a PNG with pure numpy/cv2 for **offscreen visual
-    verification**. Every cleanup knob (extent gate, morphology kernels, min-component
-    area, outline-vs-filled) is exposed + commented. UI-only: the pure-numpy+cv2
+    WALL raster**. Each keyframe's depth is back-projected by its own VIO pose
+    (strided, same depth gate + edge reject as the 3D builds; **`MAX_DEPTH_M`≈4.0 m**
+    — raised from 2.5 m so depth actually lands **on the far walls** rather than only
+    filling the near floor disc), the world-vertical **optical-`+y` (down)** axis is
+    dropped to bin the points onto the optical `(x,z)` **ground plane**. It then
+    renders the **wall cells directly**: a cell is a *wall cell* when its points span
+    a tall vertical column (`extent_m = max_h − min_h ≥ WALL_EXTENT_M` — the *wall =
+    high vertical extent* detector that excludes the flat floor) **and** it has enough
+    ray support (`MIN_CELL_COUNT`, drops thin radial noise). Those cells **are** the
+    walls (thin marks, drawn directly), cleaned of speckle by a *light* 2D `cv2` pass
+    only — a tiny `MORPH_OPEN` drops 1-cell specks and `connectedComponentsWithStats`
+    drops isolated noise blobs. It deliberately does **NOT** `MORPH_CLOSE` or take a
+    `MORPH_GRADIENT` **outline**: an earlier version outlined the whole occupied
+    region, but since the camera sits ~centre and rotates, its limited-range noisy
+    depth fills a roughly **circular disc** whose outline is just the **sensing
+    horizon** (a circle), not the walls. Drawing wall cells directly lets the room's
+    true shape emerge — a **square** if the 4 walls were sensed, partial walls if only
+    part was (honest). *Caveat: on the gold OAK-D stereo the fused per-cell vertical
+    span is large nearly everywhere, so the gate can't cleanly carve a square out of
+    that data; `WALL_EXTENT_M`≈2.0 m is tuned to be selective, and cleaner per-pixel
+    depth (the VL53 ToF target) resolves walls properly.* The wall cells are drawn
+    bright over a faint raw-occupancy context wash, with the **camera path** +
+    latest-pose marker on top. It renders on a 2D `pyqtgraph.PlotWidget` (`ImageItem`
+    + `PlotDataItem`) — **no `GLViewWidget`** — so it never stutters the UI, and (being
+    a plain raster) it can be written to a PNG with pure numpy/cv2 for **offscreen
+    visual verification**. Every knob (`WALL_EXTENT_M`, `MAX_DEPTH_M`, `MORPH_OPEN_PX`,
+    `MIN_COMPONENT_CELLS`) is exposed + commented. UI-only: the pure-numpy+cv2
     projection + cleanup live in `ui/viz/floor_plan.py`, the window in
     `ui/qt/floor_plan_window.py`.
   - Both map windows reuse the same VIO `keyframe` feed via a shared
     `_KeyframeAccumulator` base (`ui/modules/ipc_sources.py`) — the SHM ring attach +
     keyframe stash + evict wiring is written ONCE; the landmark source adds SLAM's
-    `slam.map`, the floor-plan source adds the 2D ground-plane wall-outline build.
+    `slam.map`, the floor-plan source adds the 2D ground-plane wall build.
   - All reuse the unchanged `ui/qt` windows, fed over IPC by the adapters in
     `ui/modules/ipc_sources.py` (capture's `imucam.sample` / `frame.depth`; the tracker
     also VIO's `frame.tracks` / `frame.inliers`; the SLAM map VIO's `keyframe` + SLAM's

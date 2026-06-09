@@ -2,12 +2,12 @@
 
 The 3D map viewer (the SLAM landmark point cloud) is heavy GL on this Mac AND
 hard to read (noisy marginal depth seen in perspective). This module builds a
-LIGHT, READABLE alternative: a 2D top-down OCCUPANCY raster of the room -- the
-walls/vertical structure read as a top-down OUTLINE, with the camera path drawn
-over it -- so the room LAYOUT is obvious at a glance. Because the result is a 2D
-raster it renders as a cheap pyqtgraph ``ImageItem`` (no ``GLViewWidget``), and --
-crucially -- it can be written to a PNG with pure numpy/cv2 with NO GL/display, so
-the build is VISUALLY VERIFIABLE offscreen (the GL viewers were not).
+LIGHT, READABLE alternative: a 2D top-down raster of the room's WALLS, with the
+camera path drawn over it -- so the room LAYOUT is obvious at a glance. Because
+the result is a 2D raster it renders as a cheap pyqtgraph ``ImageItem`` (no
+``GLViewWidget``), and -- crucially -- it can be written to a PNG with pure
+numpy/cv2 with NO GL/display, so the build is VISUALLY VERIFIABLE offscreen (the
+GL viewers were not).
 
 It is a pure CONSUMER of the SAME VIO keyframe feed the SLAM landmark map uses
 (denoised ``depth_m`` + each keyframe's own VIO pose ``[R | t]``): no new topic,
@@ -26,31 +26,45 @@ plane is the optical ``(x, z)`` plane. The floor plan therefore:
 * uses ``y`` (vertical extent within a cell) to tell a WALL (a tall column of
   points spanning floor->ceiling) from the FLOOR (points at ~one height).
 
-Wall emphasis + cleanup (why walls read as a CRISP outline)
------------------------------------------------------------
-Raw top-down occupancy is a fuzzy blue cloud: a vertical wall does read brighter
-(it is hit by depth pixels across its whole height -> a tall column of points in
-one ground cell), but far/grazing stereo SPRAYS thin radial "star-burst" streaks
-that smear it. The key realisation is that, top-down, a WALL reads as the BOUNDARY
-between occupied space and free space -- not as an interior bright blob -- so we
-build a clean SOLID occupied-region mask and take its OUTLINE. Three stages:
+We render the WALLS, not the occupied-region boundary (why the room shape emerges)
+----------------------------------------------------------------------------------
+An earlier version outlined the BOUNDARY of the whole occupied region. But the
+camera sits ~centre of the room and rotates, so its limited-range + noisy depth
+fills a roughly CIRCULAR disc (floor + radial noise) around it; closing that disc
+with morphology and taking its gradient yields a CIRCLE -- the SENSING HORIZON,
+not the walls. So that approach drew the horizon, never the room's true shape.
 
-1. OCCUPIED REGION: a cell joins the region only if it is hit by enough rays
-   (``>= MIN_CELL_COUNT`` -- drops the thin radial noise) AND its points span a
-   real vertical column (``extent_m >= FLOOR_EXTENT_M`` -- the explicit "wall =
-   vertical extent" gate that drops the flat floor), so the region hugs the
-   VERTICAL structure (walls / furniture), not the swept floor.
-2. CLEANUP (pure 2D + cv2, :func:`_clean_wall_mask`): ``cv2.morphologyEx``
-   MORPH_OPEN deletes the thin radial streaks, MORPH_CLOSE bridges depth-dropout
-   gaps so the room is one connected area, and ``cv2.connectedComponentsWithStats``
-   drops the small isolated star-burst islands (keeping the large room region).
-3. OUTLINE: the cleaned region's morphological GRADIENT (``MORPH_GRADIENT``) is a
-   crisp 1-2 cell boundary LINE = the top-down wall, drawn as a bright outline over
-   a faint raw-occupancy context wash.
+This version renders the WALL SURFACES directly. The key physical fact: top-down,
+a vertical WALL is a ground cell hit by depth pixels across its WHOLE HEIGHT --
+i.e. a TALL COLUMN of points in one cell -- whereas the FLOOR is points at ~one
+height (a near-zero column). So we score each ground cell by its VERTICAL EXTENT
+(``max_h - min_h`` of the points that land in it) and keep only the cells whose
+extent clears a wall-height threshold AND that have enough ray support. Those
+surviving cells ARE the walls; we draw them DIRECTLY (a thin wall-cell mark per
+cell), NOT the outline of the whole region. Consequences that make the room read:
 
-Everything here is pure numpy + a single ``np.add.at`` histogram + a few cheap 2D
-cv2 ops on the small raster, so a rebuild is far cheaper than a 3D map build (it
-can run at a higher rate). No Qt, no GL, no device, no comms.
+* if the camera sensed the 4 walls, they appear as the lines/corners forming the
+  room (a square reads square); if only part was sensed, partial walls show --
+  HONEST about what was actually captured, never a synthesised closed loop.
+* the flat floor (zero vertical extent) is excluded, so it cannot fill a disc.
+* there is NO MORPH_CLOSE bridging across open space: nothing rounds the interior
+  into a disc whose boundary becomes a circle. We keep only a tiny optional
+  MORPH_OPEN + a connected-component area filter to kill isolated speckle.
+
+Pipeline (all pure numpy + a few cheap 2D cv2 ops on the small raster):
+
+1. WALL SCORE: a single ``np.add.at`` scatter accumulates per-cell count, min(y)
+   and max(y); the per-cell vertical EXTENT is ``max(y) - min(y)``. A cell is a
+   wall cell when ``extent >= WALL_EXTENT_M`` AND ``count >= MIN_CELL_COUNT``.
+2. SPECKLE CLEANUP (:func:`_clean_wall_cells`): an optional tiny MORPH_OPEN scrubs
+   1-cell specks, then ``cv2.connectedComponentsWithStats`` drops components below
+   ``MIN_COMPONENT_CELLS``. NO close, NO gradient -- the wall cells stay as the
+   thin marks they already are.
+3. RENDER: the wall cells are drawn directly as a bright extent-tinted mark over a
+   faint raw-occupancy context wash; the camera path overlays on the same grid.
+
+So a rebuild is far cheaper than a 3D map build (it can run at a higher rate). No
+Qt, no GL, no device, no comms.
 """
 from __future__ import annotations
 
@@ -72,18 +86,21 @@ CELL_M = 0.08
 #: denser, heavier plan; RAISE for a lighter, sparser one.
 STRIDE = 4
 #: Valid-depth band (m) for the floor plan. ``MIN`` matches the SLAM-map builder
-#: (below it stereo is unreliable). ``MAX`` is deliberately TIGHTER than the
-#: SLAM-map builder's 6.0 m: a dense per-pixel occupancy plan seen
-#: top-down is dominated by the FAR depth, where stereo range error grows ~with
-#: range^2 and SPRAYS points radially along each viewing ray -- a "starburst" fan
-#: from every camera that smears the walls. Those fans are the single biggest
-#: readability killer top-down, so the plan uses only the RELIABLE near band
-#: (~2.5 m), which both gold sessions read far more clearly at (verified by the
-#: saved PNGs). The sparse SLAM landmark map can afford 6 m because it keeps only
-#: PnP-inlier landmarks; the dense plan cannot. RAISE for more reach in a big room
-#: (at the cost of more radial fan); LOWER for an even crisper near outline.
+#: (below it stereo is unreliable). ``MAX`` must be large enough that depth
+#: actually LANDS ON THE WALLS: with a tight 2.5 m cap, depth in a room wider than
+#: ~5 m never reaches the far walls -- it only fills the near floor + radial noise,
+#: so the plan shows a near disc, never the room. A WALL needs depth ON it to score
+#: any vertical extent, so the cap is opened to ~4.0 m. The trade-off the other way:
+#: far stereo range error grows ~range^2 and SPRAYS points radially ("starburst"),
+#: which the wall-EXTENT score + the MIN_CELL_COUNT support gate + the speckle
+#: cleanup tolerate far better than the old region-outline did (radial spray is
+#: mostly low-extent floor-ish noise, gated out). Empirically on the gold sessions
+#: (lab_loop_30s, corridor_60s) 4.0 m reveals the most genuine wall/corner structure
+#: with acceptable noise: 2.5 m leaves only the near floor disc (no far wall), while
+#: 5.0 m starts re-adding radial fan without revealing new real wall. RAISE for more
+#: reach in a larger room (more fan); LOWER for an even crisper but shorter-range plan.
 MIN_DEPTH_M = 0.3
-MAX_DEPTH_M = 2.5
+MAX_DEPTH_M = 4.0
 #: Edge-reject threshold (m): drop "flying pixels" on a depth discontinuity (a
 #: foreground/background edge back-projects to points floating BETWEEN the two
 #: surfaces, which would smear the plan). A pixel is kept only if BOTH its
@@ -100,69 +117,70 @@ MAX_GRID_CELLS = 1024
 #: top few percent of cells saturate to full brightness; the rest spread across
 #: the ramp. RAISE toward 100 to use the true max (more contrast lost to outliers).
 SCORE_CLIP_PCT = 99.0
-#: Minimum points a ground cell must collect to be drawn (else it is treated as
-#: empty). This is the floor-plan analogue of ``voxel_downsample``'s ``min_count``:
-#: raw stereo depth at far/grazing range SPRAYS thin radial noise outward from each
-#: camera (few points per cell, spread across many cells), whereas a real surface
-#: is hit by MANY rays across keyframes so its cells are dense. Dropping cells
-#: under this count removes the worst of the radial "starburst" noise; the
-#: morphology + connected-component pass below then cleans the rest. RAISE for a
-#: cleaner (sparser, more holes) plan; LOWER to keep fainter structure (noisier).
+#: Minimum points (RAY SUPPORT) a ground cell must collect to be drawn as a wall
+#: cell (else it is treated as empty). This is the floor-plan analogue of
+#: ``voxel_downsample``'s ``min_count``: raw stereo depth at far/grazing range
+#: SPRAYS thin radial noise outward from each camera (few points per cell, spread
+#: across many cells), whereas a real wall surface is hit by MANY rays across
+#: keyframes so its cells are dense. Requiring this much support (alongside the
+#: wall-extent gate) removes the worst of the radial "starburst" noise; the speckle
+#: cleanup below then drops the rest. RAISE for a cleaner (sparser, more holes)
+#: plan; LOWER to keep fainter structure (noisier).
 MIN_CELL_COUNT = 3
 
 # --------------------------------------------------------------------------- #
-# Wall-mask cleanup tunables (the 2D + cv2 pass that turns the fuzzy occupancy
-# cloud into a CRISP wall outline). The key realisation: top-down, a "wall" reads
-# as the BOUNDARY between occupied space and free space, NOT as an interior bright
-# blob -- so we build a clean SOLID occupied-region mask (drop flat floor by
-# vertical extent, drop sparse radial noise by count, morphology to scrub thin
-# streaks + fill gaps, connected-component to drop islands) and then take its
-# morphological-GRADIENT OUTLINE as the crisp wall line. All cheap ops on the
-# small raster. The user explicitly accepts the over-clean risk, so each knob is
-# exposed + commented with which way to turn it.
+# Wall-cell tunables (the "wall = vertical extent" detector + a LIGHT 2D speckle
+# cleanup). We render the WALL CELLS DIRECTLY (the thin marks where tall columns
+# of points stand), NOT the outline of the occupied region -- so the room's true
+# shape (square if the 4 walls were sensed) emerges instead of a sensing-horizon
+# circle. The cleanup is deliberately minimal: a tiny optional OPEN + a connected-
+# component area filter to kill isolated speckle, and explicitly NO MORPH_CLOSE
+# (it bridges across open space and rounds the shape into a disc) and NO gradient
+# outline. Each knob is exposed + commented with which way to turn it.
 # --------------------------------------------------------------------------- #
-#: Vertical-extent floor gate (m): a ground cell whose points span LESS than this
-#: in height is treated as FLAT FLOOR and dropped from the occupied region (only
-#: cells with a real vertical column -- walls / furniture / structure -- survive).
-#: This is the explicit "wall = vertical extent" emphasis: it removes the flat
-#: floor so the occupied region (and thus its outline) hugs the vertical structure
-#: rather than the swept floor. RAISE to demand taller columns (keeps only clear
-#: walls, may drop low structure); LOWER toward 0 to keep more (the floor creeps
-#: back in). ~0.5 m cleanly separates a swept-floor cell from a wall column.
-FLOOR_EXTENT_M = 0.5
-#: cv2 MORPH_OPEN kernel size (square, odd, px==cells). An OPEN (erode then dilate)
-#: deletes any occupied blob THINNER than the kernel -- i.e. the 1-2 cell wide
-#: radial streaks fanning off each camera -- while leaving thicker, solid regions
-#: intact. 3 removes single/double-cell streaks; RAISE (5) to scrub heavier noise
-#: (risks eroding thin real structure); 0 disables the open.
-MORPH_OPEN_PX = 3
-#: cv2 MORPH_CLOSE kernel size (square, odd). A CLOSE (dilate then erode) bridges
-#: small gaps WITHIN the occupied region (a few missing cells where depth dropped
-#: out) so the room reads as ONE connected area with a continuous boundary, not a
-#: dashed/holey one. Run AFTER the open so it doesn't re-grow the streaks the open
-#: removed. RAISE to bridge bigger gaps (risks fusing across a doorway / to nearby
-#: noise); 0 disables the close. ~5 closes the typical few-cell depth dropouts.
-MORPH_CLOSE_PX = 5
-#: Minimum connected-component area (cells) an occupied region must have to survive
-#: (``cv2.connectedComponentsWithStats`` 8-connectivity). After the open, the
-#: residual star-burst is a scatter of small isolated blobs; the real room is one
-#: large connected region. Dropping every component under this area vanishes the
-#: isolated noise islands but keeps the room. RAISE for an even cleaner plan (risks
-#: dropping a small detached real structure); LOWER to keep smaller fragments
-#: (noisier). ~40 cells (~0.26 m^2 at CELL_M=0.08) keeps real runs, drops specks.
-MIN_COMPONENT_CELLS = 40
-#: Draw the wall as the OUTLINE of the occupied region (its morphological gradient
-#: = a crisp 1-2 cell boundary line) rather than as the FILLED region. True is the
-#: floor-plan reading the eye expects (a thin wall line tracing the room); set
-#: False to render the solid occupied region instead (useful for debugging the
-#: cleanup, or if you prefer a filled footprint).
-WALL_OUTLINE = True
-#: Brightness [0,1] the faint RAW occupancy context is drawn at UNDER the crisp
-#: wall outline. The cleaned wall outline is the bright line; the raw occupancy is
-#: kept very dim beneath it purely for spatial context (so the room isn't just a
-#: skeleton on black). 0 -> pure outline on background (maximally crisp, no
-#: context); RAISE toward 1 to show more of the raw cloud (more context, more
-#: fuzz). ~0.18 is a faint hint that doesn't compete with the outline.
+#: WALL vertical-extent threshold (m): a ground cell is a WALL cell only if the
+#: points in it span AT LEAST this much in height (``max_h - min_h``). This is the
+#: core "wall = high vertical extent" detector: a vertical wall is hit by depth
+#: pixels across its whole height -> a TALL column in one cell, whereas an ideal
+#: FLOOR is points at ~one height (a near-zero column) and is excluded -- so on
+#: CLEAN depth the bright cells mark WHERE THE WALLS ARE, not the swept floor disc.
+#:
+#: HONEST tuning note (gold OAK-D stereo): on the current gold sessions the fused
+#: per-cell vertical span is large at NEARLY EVERY (x,z) cell (median ~3 m -- see
+#: the functional check), because noisy/flying stereo points + real floor/ceiling/
+#: clutter fill the column across the whole swept disc. So NO single ``max-min``
+#: threshold here cleanly isolates walls: a low value lights the whole disc, a high
+#: value selects the densest-NOISE blobs (not straight walls). ~2.0 m is chosen as a
+#: middle ground that is at least SELECTIVE (drops the lowest-extent cells) without
+#: collapsing to a few noise blobs; on cleaner per-pixel depth (the real VL53 ToF
+#: target) this same gate WILL resolve walls. RAISE to demand taller columns (fewer,
+#: only the tallest); LOWER toward 0 to keep more (the disc fills back in).
+WALL_EXTENT_M = 2.0
+#: cv2 MORPH_OPEN kernel size (square, odd, px==cells) applied to the wall-cell
+#: mask. An OPEN (erode then dilate) deletes any wall blob THINNER than the kernel
+#: -- isolated 1-cell specks of noise -- while leaving connected wall runs intact.
+#: Kept SMALL (2) on purpose: a wall, top-down, is itself only ~1-2 cells thick, so
+#: a large open would erode the very walls we want to show. RAISE only to scrub
+#: heavier speckle (risks thinning real walls); 0 disables the open (rely on the
+#: component filter alone).
+MORPH_OPEN_PX = 2
+#: Minimum connected-component area (cells) a run of wall cells must have to survive
+#: (``cv2.connectedComponentsWithStats`` 8-connectivity). The residual far-range
+#: noise is a scatter of tiny isolated blobs; a real wall is a longer connected run.
+#: Dropping every component under this area vanishes the isolated noise specks but
+#: keeps genuine wall segments. Kept MODEST (8 cells) because we want PARTIAL walls
+#: to survive (honest about what was sensed), not only a fully-closed loop. RAISE
+#: for a cleaner (sparser) plan that may drop short real segments; LOWER to keep
+#: smaller fragments (noisier). ~8 cells (~0.05 m^2 at CELL_M=0.08) keeps short wall
+#: runs, drops single/double-cell specks.
+MIN_COMPONENT_CELLS = 8
+#: Brightness [0,1] the faint RAW occupancy context is drawn at UNDER the bright
+#: wall cells. The wall cells are the bright structure; the raw occupancy (every
+#: cell with enough support, walls + floor) is kept very dim beneath them purely for
+#: spatial context (so the room isn't just a skeleton on black -- you can see the
+#: swept floor area faintly). 0 -> pure wall cells on background (maximally crisp,
+#: no context); RAISE toward 1 to show more of the raw cloud (more context, more
+#: fuzz). ~0.18 is a faint hint that doesn't compete with the wall cells.
 RAW_CONTEXT_GAIN = 0.18
 
 
@@ -273,85 +291,80 @@ def keyframes_to_ground_points(depths, Rs, ts, K, *,
 
 
 def _compose_plan(context: np.ndarray, wall_mask: np.ndarray) -> np.ndarray:
-    """Compose the final floor-plan RGB from a faint context + a crisp wall mask.
+    """Compose the final floor-plan RGB from a faint context + the bright wall cells.
 
     Two layers (pure numpy, no matplotlib):
 
     * ``context`` ``(H,W)`` in [0,1] -- the RAW occupancy (already attenuated by
       :data:`RAW_CONTEXT_GAIN`), drawn as a very dim dark-navy->blue wash so the
       room has spatial context (it is NOT the structure -- it stays faint).
-    * ``wall_mask`` ``(H,W)`` boolean -- the CLEANED wall cells (after threshold +
-      morphology + connected-component filter), drawn as a bright cyan-white
-      OUTLINE that overwrites the context wherever a wall is. This is the crisp
-      reading the eye locks onto.
+    * ``wall_mask`` ``(H,W)`` boolean -- the WALL CELLS (cells whose points span a
+      tall vertical column, after the tiny OPEN + connected-component speckle
+      filter), drawn as bright cyan-white marks that OVERWRITE the context wherever
+      a wall is. These thin marks ARE the walls (drawn directly, not an outline of
+      the occupied region) -- the crisp reading the eye locks onto.
 
     Returns ``(H,W,3)`` uint8. Background (no context, no wall) is the deep navy
-    the window's dark theme expects, so the plan reads as a "lit room" outline
-    rather than holes in black.
+    the window's dark theme expects, so the plan reads as a "lit room" rather than
+    holes in black.
     """
     c = np.clip(np.asarray(context, np.float64), 0.0, 1.0)
     # Faint context wash: a dim navy->blue ramp. Kept low-contrast on purpose so it
-    # never competes with the wall outline -- it is only a spatial hint.
+    # never competes with the wall cells -- it is only a spatial hint.
     r = 0.05 + 0.10 * c
     g = 0.08 + 0.18 * c
     b = 0.20 + 0.45 * c
     rgb = np.stack([r, g, b], axis=-1)
-    # Crisp wall outline: a bright cyan-white that OVERWRITES the context where a
-    # wall cell is (a hard write, not a blend, so the outline stays sharp-edged).
+    # Bright wall cells: a cyan-white that OVERWRITES the context where a wall cell
+    # is (a hard write, not a blend, so the wall marks stay sharp-edged).
     wm = np.asarray(wall_mask, dtype=bool)
     rgb[wm] = (0.85, 0.97, 1.0)
     return (np.clip(rgb, 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8)
 
 
-def _clean_wall_mask(occupied: np.ndarray, *,
-                     open_px: int = MORPH_OPEN_PX,
-                     close_px: int = MORPH_CLOSE_PX,
-                     min_component_cells: int = MIN_COMPONENT_CELLS,
-                     outline: bool = WALL_OUTLINE) -> np.ndarray:
-    """Binary occupied-region mask ``(H,W)`` -> a CRISP boolean WALL mask via cv2.
+def _clean_wall_cells(wall_cells: np.ndarray, *,
+                      open_px: int = MORPH_OPEN_PX,
+                      min_component_cells: int = MIN_COMPONENT_CELLS
+                      ) -> np.ndarray:
+    """Wall-cell mask ``(H,W)`` -> the same cells with isolated speckle removed.
 
-    ``occupied`` is the wall-candidate region (cells that are NOT flat floor and
-    are hit by enough rays -- see :func:`build_floor_plan`). Top-down, a wall reads
-    as the BOUNDARY of this occupied region, not its interior; this cleans the
-    region and extracts that boundary in four cheap 2D passes (all on the small
-    raster -- microseconds):
+    ``wall_cells`` is the raw "wall = tall vertical column" mask (cells whose points
+    span ``>= WALL_EXTENT_M`` in height AND have enough ray support -- see
+    :func:`build_floor_plan`). These cells ARE the walls already; we DO NOT outline
+    a region or close gaps -- doing so re-creates a sensing-horizon disc/circle.
+    We only scrub isolated noise specks in two cheap 2D passes (microseconds on the
+    small raster):
 
-    1. cv2 MORPH_OPEN (erode then dilate, ``open_px`` kernel): delete any occupied
-       blob thinner than the kernel -- the 1-2 cell radial streaks fanning off each
-       camera -- while leaving thicker solid regions intact.
-    2. cv2 MORPH_CLOSE (dilate then erode, ``close_px``): bridge small gaps WITHIN
-       the region (depth dropouts) so the room is ONE connected area with a
-       continuous boundary. Run AFTER the open so it doesn't re-grow the streaks.
-    3. cv2.connectedComponentsWithStats (8-connectivity): drop every component
-       smaller than ``min_component_cells`` -- the residual star-burst is a scatter
-       of small isolated blobs; the real room is one large connected region.
-    4. If ``outline``: the cleaned region's morphological GRADIENT
-       (``MORPH_GRADIENT`` = dilate - erode) is a crisp 1-2 cell boundary LINE = the
-       wall. Else return the filled region (debug / footprint).
+    1. cv2 MORPH_OPEN (erode then dilate, small ``open_px`` kernel): delete any wall
+       blob THINNER than the kernel -- isolated 1-cell specks -- while leaving
+       connected wall runs intact. Kept small (a wall is itself ~1-2 cells thick), so
+       a big open would erode the very walls we want; ``open_px < 2`` skips it.
+    2. cv2.connectedComponentsWithStats (8-connectivity): drop every component
+       smaller than ``min_component_cells`` -- the residual far-range noise is a
+       scatter of tiny blobs, a real wall is a longer connected run. NO close, NO
+       gradient: the wall cells stay the thin marks they are.
 
-    Returns a boolean ``(H,W)`` mask (the wall cells). Every step is a no-op when
-    its knob is 0 / the mask is empty, so the pipeline degrades gracefully.
+    Returns a boolean ``(H,W)`` mask (the cleaned wall cells). Every step is a no-op
+    when its knob is 0 / the mask is empty, so the pipeline degrades gracefully.
     """
     import cv2
 
-    h, w = occupied.shape
-    mask = np.ascontiguousarray(occupied, dtype=np.uint8)   # 0/1, cv2 wants uint8
+    h, w = wall_cells.shape
+    mask = np.ascontiguousarray(wall_cells, dtype=np.uint8)  # 0/1, cv2 wants uint8
     if not mask.any():
         return np.zeros((h, w), dtype=bool)
 
-    # (1) MORPH_OPEN (kill thin radial streaks) then (2) MORPH_CLOSE (bridge gaps).
+    # (1) Tiny MORPH_OPEN to scrub isolated specks (NO close -- closing would bridge
+    # across the open room interior and round the walls into a disc).
     if open_px and open_px >= 2:
         k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (int(open_px),) * 2)
         mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, k)
-    if close_px and close_px >= 2:
-        k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (int(close_px),) * 2)
-        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k)
     if not mask.any():
         return np.zeros((h, w), dtype=bool)
 
-    # (3) Connected-component area filter: drop the small isolated star-burst blobs,
-    # keep the large connected room region. Label 0 is the background; stats[:,AREA]
-    # is the cell count per label.
+    # (2) Connected-component area filter: drop the small isolated noise blobs, keep
+    # the longer connected wall runs. Label 0 is the background; stats[:,AREA] is the
+    # cell count per label. Modest threshold so PARTIAL walls survive (honest).
     n_labels, labels, stats, _ = cv2.connectedComponentsWithStats(
         mask, connectivity=8)
     keep = np.zeros((h, w), dtype=np.uint8)
@@ -359,14 +372,6 @@ def _clean_wall_mask(occupied: np.ndarray, *,
     for lab in range(1, n_labels):                     # skip background (0)
         if stats[lab, cv2.CC_STAT_AREA] >= min_area:
             keep[labels == lab] = 1
-    if not keep.any():
-        return np.zeros((h, w), dtype=bool)
-
-    # (4) Outline = morphological gradient (dilate - erode) of the cleaned region:
-    # a crisp 1-2 cell boundary line = the top-down wall. Else the filled region.
-    if outline:
-        k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-        keep = cv2.morphologyEx(keep, cv2.MORPH_GRADIENT, k)
     return keep.astype(bool)
 
 
@@ -375,43 +380,43 @@ def build_floor_plan(points: np.ndarray, *,
                      score_clip_pct: float = SCORE_CLIP_PCT,
                      min_cell_count: int = MIN_CELL_COUNT,
                      max_grid_cells: int = MAX_GRID_CELLS,
-                     floor_extent_m: float = FLOOR_EXTENT_M,
+                     wall_extent_m: float = WALL_EXTENT_M,
                      open_px: int = MORPH_OPEN_PX,
-                     close_px: int = MORPH_CLOSE_PX,
                      min_component_cells: int = MIN_COMPONENT_CELLS,
-                     outline: bool = WALL_OUTLINE,
                      raw_context_gain: float = RAW_CONTEXT_GAIN):
-    """Bin world points onto the ground plane -> a CRISP wall-outline raster.
+    """Bin world points onto the ground plane -> a WALL-CELL raster (not an outline).
 
     ``points`` are ``(N,3)`` world points in the camera-optical frame (from
     :func:`keyframes_to_ground_points`). They are projected onto the GROUND plane
     by DROPPING the vertical optical ``+y`` (down) axis -- so the plan uses optical
     ``x`` (right, raster columns) and ``z`` (forward, raster rows).
 
-    Pipeline (the per-cell scatter feeds two products):
+    We render the WALLS directly, NOT the boundary of the occupied region (which is
+    just the camera's circular sensing horizon -- see the module docstring). The
+    per-cell scatter feeds two products:
 
-    * OCCUPIED REGION -> WALL OUTLINE. A cell is part of the occupied region when it
-      is hit by ``>= min_cell_count`` rays (drops thin radial noise) AND its points
-      span ``>= floor_extent_m`` vertically (the explicit "wall = vertical extent"
-      gate: a flat-floor cell -- points at ~one height -- is dropped, so the region
-      hugs the VERTICAL structure, not the swept floor). That binary region is
-      cleaned + reduced to a crisp boundary line by :func:`_clean_wall_mask` (cv2
-      MORPH_OPEN to scrub thin streaks -> MORPH_CLOSE to bridge gaps ->
-      connectedComponentsWithStats to drop isolated islands -> MORPH_GRADIENT to
-      take the outline) -- the bright wall line.
-    * faint RAW occupancy CONTEXT -- the per-cell point count, normalised and
-      attenuated by ``raw_context_gain``, drawn dim UNDER the outline purely for
-      spatial context (so the plan isn't a skeleton on black).
+    * WALL CELLS. A cell is a WALL cell when its points span ``>= wall_extent_m``
+      VERTICALLY (``max_h - min_h`` -- the core "wall = high vertical extent"
+      detector: a vertical wall is a tall column of points, the flat floor is a
+      near-zero column and is excluded) AND it is hit by ``>= min_cell_count`` rays
+      (drops thin radial noise). Those cells ARE the walls; they are drawn DIRECTLY
+      (a thin mark per cell) after a LIGHT speckle cleanup by
+      :func:`_clean_wall_cells` (a tiny MORPH_OPEN to drop 1-cell specks +
+      connectedComponentsWithStats to drop isolated noise blobs -- NO close, NO
+      gradient, so the room's true shape emerges instead of a disc/circle).
+    * faint RAW occupancy CONTEXT -- the per-cell point count (support-gated),
+      normalised + attenuated by ``raw_context_gain``, drawn dim UNDER the wall cells
+      purely for spatial context (so the plan isn't a skeleton on black).
 
     :func:`_compose_plan` draws the dim context wash + overwrites it with the bright
-    crisp wall outline. Returns ``(rgb (H,W,3) uint8, extent FloorPlanExtent)``; with
-    no points a 1x1 black raster + a degenerate extent is returned.
+    wall cells. Returns ``(rgb (H,W,3) uint8, extent FloorPlanExtent)``; with no
+    points a 1x1 black raster + a degenerate extent is returned.
 
-    Implementation: a single ``np.add.at`` scatter accumulates per-cell count, sum
-    of height and sum of height^2 -- so the per-cell vertical extent is computed
-    without any Python loop over cells (``extent ~= sqrt(var) * 2``, a robust
-    spread proxy). The cleanup is cheap 2D cv2 morphology + one connected-component
-    pass on the small raster. Pure numpy + cv2, O(N) + O(cells).
+    Implementation: a single scatter accumulates per-cell count, MIN(y) and MAX(y)
+    (via ``np.minimum.at`` / ``np.maximum.at``), so the per-cell vertical extent is
+    the TRUE span ``max_y - min_y`` -- computed without any Python loop over cells.
+    The cleanup is one tiny cv2 morphology + one connected-component pass on the
+    small raster. Pure numpy + cv2, O(N) + O(cells).
     """
     pts = np.asarray(points, dtype=np.float64).reshape(-1, 3)
     if pts.shape[0] == 0:
@@ -439,42 +444,42 @@ def build_floor_plan(points: np.ndarray, *,
     flat = row * width + col                                  # row-major cell id
     ncells = width * height
 
-    # Scatter-accumulate per cell: count, sum(y), sum(y^2). One pass, no per-cell
-    # loop. The vertical EXTENT proxy is 2*std(y) = 2*sqrt(E[y^2]-E[y]^2).
+    # Scatter-accumulate per cell: count, MIN(y) and MAX(y). One pass, no per-cell
+    # loop. The per-cell vertical EXTENT is the TRUE span max(y) - min(y) -- a wall
+    # spans floor->ceiling (large), the flat floor spans ~none. (min/max is a more
+    # faithful "does this cell hold a tall column" test than a std proxy: a wall's
+    # full height is exactly max-min, which a std would under-report.)
     count = np.zeros(ncells, np.float64)
-    sum_y = np.zeros(ncells, np.float64)
-    sum_y2 = np.zeros(ncells, np.float64)
+    min_y = np.full(ncells, np.inf, np.float64)
+    max_y = np.full(ncells, -np.inf, np.float64)
     np.add.at(count, flat, 1.0)
-    np.add.at(sum_y, flat, y)
-    np.add.at(sum_y2, flat, y * y)
+    np.minimum.at(min_y, flat, y)
+    np.maximum.at(max_y, flat, y)
     nz = count > 0
-    mean_y = np.zeros(ncells, np.float64)
-    var_y = np.zeros(ncells, np.float64)
-    mean_y[nz] = sum_y[nz] / count[nz]
-    var_y[nz] = np.maximum(sum_y2[nz] / count[nz] - mean_y[nz] ** 2, 0.0)
-    extent_m = 2.0 * np.sqrt(var_y)                          # ~full vertical span
+    extent_m = np.zeros(ncells, np.float64)
+    extent_m[nz] = max_y[nz] - min_y[nz]                     # true vertical span
 
-    # OCCUPIED REGION (binary): a cell belongs to the room's occupied region when it
-    # is hit by enough rays AND has a real vertical column.
-    #  * ``count >= min_cell_count`` drops the thin radial stereo-noise floor (real
-    #    surfaces are hit by many rays across keyframes; noise sprays thin).
-    #  * ``extent_m >= floor_extent_m`` is the explicit "wall = vertical extent"
-    #    gate: a flat-floor cell (points at ~one height) is dropped, so the region
-    #    hugs VERTICAL structure (walls / furniture), not the swept floor -- which
-    #    keeps the extracted outline on the walls.
+    # WALL CELLS (binary): a cell is a wall cell when it has a real vertical column
+    # AND enough ray support.
+    #  * ``extent_m >= wall_extent_m`` is the core "wall = high vertical extent"
+    #    detector: a flat-floor cell (points at ~one height) is excluded, so the
+    #    bright structure marks WHERE THE WALLS ARE, not the swept floor disc.
+    #  * ``count >= min_cell_count`` drops the thin radial stereo-noise floor (a real
+    #    wall is hit by many rays across keyframes; noise sprays thin).
     enough = count >= float(min_cell_count)
-    tall = extent_m >= float(floor_extent_m)
-    occupied = (enough & tall).reshape(height, width)
+    tall = extent_m >= float(wall_extent_m)
+    wall_cells = (enough & tall).reshape(height, width)
 
-    # CRISP wall outline: clean the region (cv2 MORPH_OPEN/CLOSE + connected-
-    # component area filter) and take its boundary (MORPH_GRADIENT) -- all cheap 2D.
-    wall_mask = _clean_wall_mask(
-        occupied, open_px=open_px, close_px=close_px,
-        min_component_cells=min_component_cells, outline=outline)
+    # WALL CELLS, cleaned: scrub isolated speckle ONLY (tiny MORPH_OPEN + connected-
+    # component area filter). NO close / NO gradient -- the wall cells stay the thin
+    # marks they are, so the room's true shape (square if sensed) reads instead of a
+    # sensing-horizon circle.
+    wall_mask = _clean_wall_cells(
+        wall_cells, open_px=open_px, min_component_cells=min_component_cells)
 
     # FAINT raw-occupancy CONTEXT: the per-cell point count (the thin-noise floor
     # removed), normalised to a high percentile (so one dense cell can't wash it
-    # out) and attenuated -- a dim spatial hint UNDER the outline.
+    # out) and attenuated -- a dim spatial hint UNDER the wall cells.
     ctx = count.copy()
     ctx[~enough] = 0.0
     pos = ctx[ctx > 0]
@@ -494,11 +499,9 @@ def build_floor_plan(points: np.ndarray, *,
 def floor_plan_with_path(points: np.ndarray, cams: np.ndarray, *,
                          cell_m: float = CELL_M,
                          min_cell_count: int = MIN_CELL_COUNT,
-                         floor_extent_m: float = FLOOR_EXTENT_M,
+                         wall_extent_m: float = WALL_EXTENT_M,
                          open_px: int = MORPH_OPEN_PX,
-                         close_px: int = MORPH_CLOSE_PX,
                          min_component_cells: int = MIN_COMPONENT_CELLS,
-                         outline: bool = WALL_OUTLINE,
                          raw_context_gain: float = RAW_CONTEXT_GAIN):
     """Convenience: build the raster AND project the camera path onto its pixels.
 
@@ -508,13 +511,13 @@ def floor_plan_with_path(points: np.ndarray, cams: np.ndarray, *,
     so a caller (the offscreen PNG verifier, a test) can overlay the path without
     re-deriving the extent. The window draws the path itself in world metres via
     the returned ``extent`` (see :class:`FloorPlanExtent`); this helper is mainly
-    for the headless PNG check + the unit tests. The wall-cleanup knobs are
-    forwarded to :func:`build_floor_plan` so a caller can tune the crispness.
+    for the headless PNG check + the unit tests. The wall-detector + cleanup knobs
+    are forwarded to :func:`build_floor_plan` so a caller can tune the crispness.
     """
     rgb, extent = build_floor_plan(
         points, cell_m=cell_m, min_cell_count=min_cell_count,
-        floor_extent_m=floor_extent_m, open_px=open_px, close_px=close_px,
-        min_component_cells=min_component_cells, outline=outline,
+        wall_extent_m=wall_extent_m, open_px=open_px,
+        min_component_cells=min_component_cells,
         raw_context_gain=raw_context_gain)
     cams = np.asarray(cams, dtype=np.float64).reshape(-1, 3)
     if cams.shape[0] == 0:

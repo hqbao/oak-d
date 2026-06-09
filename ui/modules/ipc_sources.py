@@ -923,7 +923,8 @@ class IpcFloorPlanSource(_KeyframeAccumulator):
     instead of a 3D cloud (heavy GL, hard to read in perspective on this Mac),
     this back-projects the SAME VIO keyframe
     feed to world points and bins them onto the horizontal GROUND plane into a 2D
-    OCCUPANCY raster -- so the walls read as a top-down outline + the camera path,
+    raster of the room's WALLS -- so the walls read as top-down marks (the room's
+    true shape, e.g. a square if the 4 walls were sensed) + the camera path,
     rendered as a cheap 2D ``ImageItem`` (no ``GLViewWidget``). Pure CONSUMER of
     the ``keyframe`` feed (no SLAM endpoint, no ``slam.map``); no new field, no
     data-path change.
@@ -931,7 +932,7 @@ class IpcFloorPlanSource(_KeyframeAccumulator):
     Reuses the inherited :class:`_KeyframeAccumulator` machinery WHOLESALE (the kf
     ring attach + ``_on_keyframe`` stash + evict + the coalesced rebuild loop) --
     only ONE VIO client, NO copy-paste of the SHM/recv code. This class adds ONLY
-    the 2D ground-plane occupancy build (delegated to :mod:`ui.viz.floor_plan`).
+    the 2D ground-plane wall build (delegated to :mod:`ui.viz.floor_plan`).
 
     Build (:meth:`_build`, runs OFF the GUI thread):
 
@@ -939,9 +940,10 @@ class IpcFloorPlanSource(_KeyframeAccumulator):
        its OWN VIO pose ``[R | t]`` (strided + the SAME depth gate + edge reject as
        the 3D builders) -- :func:`~ui.viz.floor_plan.keyframes_to_ground_points`.
     2. Bin the points onto the optical ``(x, z)`` GROUND plane (drop the vertical
-       optical ``+y``/DOWN axis) into a 2D occupancy raster, scoring each cell by
-       point count BOOSTED by the vertical extent (so walls outscore floor) and
-       colour-mapping it -- :func:`~ui.viz.floor_plan.build_floor_plan`.
+       optical ``+y``/DOWN axis), score each cell by its VERTICAL EXTENT
+       (``max_h - min_h``) and keep only the high-extent, well-supported cells as
+       WALL CELLS -- so the bright structure marks WHERE THE WALLS ARE, not the
+       swept-floor sensing horizon -- :func:`~ui.viz.floor_plan.build_floor_plan`.
     3. Project ALL keyframe camera positions onto the SAME plane for the path
        overlay.
 
