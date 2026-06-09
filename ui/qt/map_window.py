@@ -1,18 +1,26 @@
-"""MapWindow: a standalone 3D viewer for the SLAM landmark point cloud.
+"""MapWindow: a standalone 3D viewer for the ModalAI-style VOXEL OCCUPANCY map.
 
-Shows the sparse SLAM landmark map (the caller passes the already-built
-``points``/``colors``/``cams`` arrays; this just renders them): a coloured point
-cloud -- ONE point per consistently-tracked landmark -- plus the keyframe camera
-positions, on the same grid/axes the pose viewer uses. Points come in the
+Shows the room as clean green voxel cubes (the ModalAI/VOXL occupancy look: floor
+grid + walls + furniture as blocky voxels). The caller passes the already-built
+occupied-VOXEL arrays (``points`` = voxel CENTRES, ``colors`` = green-by-height,
+``cams`` = keyframe camera positions); this just renders them. Points come in the
 camera-optical world frame and are rotated to the viewer's ENU display frame with
 the SAME convention as :class:`~ui.qt.viewer3d.Viewer3D`, so a map and a
 trajectory line up.
 
-The cloud is REBUILT live: an IPC source (see
-:class:`~ui.modules.ipc_sources.IpcSlamMapSource`) re-builds the landmark cloud
-every time SLAM re-corrects the keyframe poses (after a loop closure) and calls
-:meth:`update` with the fresh ``(points, colors, cams)`` -- so the map re-snaps in
-place rather than being a one-shot snapshot.
+Render is deliberately LIGHT (the user's repeated pain: every prior 3D GL map
+lagged). The voxels are drawn as a single :class:`~pyqtgraph.opengl.GLScatterPlotItem`
+of large SQUARE WORLD-UNIT points (``pxMode=False``, ``size`` = the voxel edge in
+GL world units), NOT an N-cube ``GLMeshItem`` -- a scatter of N points is far
+cheaper to upload + paint than 12*N triangles, and at this voxel size the squares
+read as the blocky cubes. The occupancy fusion upstream keeps the voxel count low
+(noise rejected), and the source re-emits only when the occupied set materially
+changed, so the GUI never re-uploads an unchanged cloud.
+
+The map is REBUILT live: an IPC source (see
+:class:`~ui.modules.ipc_sources.IpcSlamMapSource`) accumulates the persistent
+occupancy grid and calls :meth:`update` with the fresh ``(points, colors, cams)``
+-- so the room fills in / re-snaps in place rather than being a one-shot snapshot.
 """
 from __future__ import annotations
 
@@ -23,8 +31,14 @@ from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import QMainWindow
 
 from ui.comms.lib.misc import frames
+from ui.modules.ipc_sources import IpcSlamMapSource
 from . import theme
 from .viewer3d import _make_grid, _make_world_axes, _qcolor
+
+#: Rendered voxel size in GL WORLD units (metres) -- the source's voxel edge. The
+#: scatter draws each occupied voxel as a square this big (``pxMode=False``), so
+#: the points tile into the blocky VOXL cube look instead of pinpoint dots.
+_VOXEL_SIZE_M = float(IpcSlamMapSource.VOXEL_M)
 
 # Camera optical (x right, y down, z forward) -> world NED; then NED->ENU is the
 # viewer's display transform (identical to Viewer3D, so maps + paths align).
@@ -51,9 +65,9 @@ def _rgba(colors: np.ndarray) -> np.ndarray:
 
 
 class MapWindow(QMainWindow):
-    #: Carries a freshly fused cloud from a background source thread onto the GUI
-    #: thread. :meth:`submit` (thread-safe) emits it; the signal is connected to
-    #: :meth:`update` so the GL items are only touched on the GUI thread.
+    #: Carries a freshly fused voxel map from a background source thread onto the
+    #: GUI thread. :meth:`submit` (thread-safe) emits it; the signal is connected
+    #: to :meth:`update` so the GL items are only touched on the GUI thread.
     cloud_ready = pyqtSignal(object, object, object)
 
     def __init__(self, points: np.ndarray | None = None,
@@ -74,11 +88,13 @@ class MapWindow(QMainWindow):
 
         # Persistent scatter items so a live rebuild re-sets their data in place
         # (instead of stacking a new item per frame). Start empty; `update` fills
-        # them. The cloud points are tiny (size 2 px); the keyframe cameras are
-        # bigger amber dots so the capture path is visible.
+        # them. The voxels are large SQUARE WORLD-UNIT points (pxMode=False, size
+        # == voxel edge in metres) so they tile into blocky cubes -- far lighter
+        # than a per-voxel cube mesh. The keyframe cameras are bigger amber PIXEL
+        # dots so the capture path is visible at any zoom.
         self._cloud = gl.GLScatterPlotItem(
             pos=np.zeros((0, 3), np.float32), color=np.zeros((0, 4), np.float32),
-            size=2.0, pxMode=True)
+            size=_VOXEL_SIZE_M, pxMode=False)
         self._cams = gl.GLScatterPlotItem(
             pos=np.zeros((0, 3), np.float32),
             color=_qcolor(theme.WARN, 0.95), size=9.0, pxMode=True)
@@ -98,7 +114,7 @@ class MapWindow(QMainWindow):
 
     # ------------------------------------------------------------------ #
     def submit(self, points, colors, cams) -> None:
-        """Thread-safe ingest: hand a fused cloud in from any thread.
+        """Thread-safe ingest: hand a fused voxel map in from any thread.
 
         Emits :attr:`cloud_ready`; Qt queues the connected :meth:`update` onto the
         GUI thread, so a background IPC/rebuild thread can call this directly.
@@ -109,24 +125,28 @@ class MapWindow(QMainWindow):
     def update(self, points: np.ndarray | None,
                colors: np.ndarray | None,
                cams: np.ndarray | None) -> None:
-        """Replace the rendered cloud + keyframe cameras with fresh data.
+        """Replace the rendered voxels + keyframe cameras with fresh data.
 
         ``points`` / ``cams`` are ``(N,3)`` / ``(M,3)`` in the camera-optical
-        world frame (the per-landmark world points + keyframe camera positions
+        world frame (the occupied VOXEL CENTRES + keyframe camera positions
         :class:`~ui.modules.ipc_sources.IpcSlamMapSource` builds);
-        ``colors`` is ``(N,3)`` per-point intensity/RGB in [0,1]. All are rotated
-        to the viewer's ENU display frame here, so the map lines up with the main
-        Viewer3D. Safe to call repeatedly from the GUI thread.
+        ``colors`` is ``(N,3)`` per-voxel green-by-height RGB in [0,1]. All are
+        rotated to the viewer's ENU display frame here, so the map lines up with
+        the main Viewer3D. The voxels render as large square world-unit points
+        (the blocky cube look). Safe to call repeatedly from the GUI thread.
         """
         pts = _to_display(points if points is not None
                           else np.zeros((0, 3), np.float32))
         rgba = _rgba(colors if colors is not None
                      else np.zeros((0, 3), np.float32))
         # Guard a colour/point length mismatch (a malformed build) so setData
-        # never raises in the GUI thread -- fall back to a flat grey.
+        # never raises in the GUI thread -- fall back to a flat green.
         if len(rgba) != len(pts):
-            rgba = _rgba(np.full((len(pts), 3), 0.7, np.float32))
-        self._cloud.setData(pos=pts, color=rgba, size=2.0, pxMode=True)
+            rgba = _rgba(np.tile(np.float32([0.3, 0.8, 0.3]), (len(pts), 1)))
+        # Square WORLD-UNIT points (pxMode=False, size == voxel edge): the blocky
+        # voxel look, far lighter than a per-voxel cube mesh.
+        self._cloud.setData(pos=pts, color=rgba, size=_VOXEL_SIZE_M,
+                            pxMode=False)
 
         cam_enu = _to_display(cams if cams is not None
                               else np.zeros((0, 3), np.float32))

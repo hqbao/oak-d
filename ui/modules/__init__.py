@@ -42,13 +42,9 @@ works -- it triggers the lazy import on first access:
 * :class:`~ui.modules.ipc_sources.IpcKeypointWorker` -- capture ``frame.depth`` +
   vio ``frame.tracks`` / ``frame.inliers`` for the keypoint window.
 * :class:`~ui.modules.ipc_sources.IpcSlamMapSource` -- vio ``keyframe`` (+ its kf
-  rings) + slam ``slam.map`` (corrected poses) fused into the room cloud for the
-  SLAM 3D-map window.
-* :class:`~ui.modules.ipc_sources.IpcFloorPlanSource` -- vio ``keyframe`` (+ its
-  kf rings) back-projected + binned onto the ground plane into a 2D top-down
-  OCCUPANCY raster for the Floor Plan (top-down) window -- a LIGHT, no-GL
-  alternative to the 3D map. Shares the ``_KeyframeAccumulator`` base with the
-  SLAM-map source (NO copy-paste of the SHM/recv wiring).
+  rings) + slam ``slam.map`` (corrected poses) fused (TEMPORAL OCCUPANCY FUSION,
+  OctoMap-style) into a ModalAI/VOXL-style VOXEL OCCUPANCY map for the SLAM 3D-map
+  window.
 """
 from .collector import UiCollectorModule
 from .render import UiRenderModule
@@ -60,9 +56,8 @@ from .triplet import UiTripletModule
 # classes live in ui.qt). Accessing any of these names triggers the import.
 _IPC_ADAPTERS = frozenset({
     "IpcImuRawSource", "IpcGyroFuseSource", "IpcTripletWorker",
-    "IpcKeypointWorker", "IpcSlamMapSource", "IpcFloorPlanSource",
+    "IpcKeypointWorker", "IpcSlamMapSource",
     "ipc_triplet_factory", "ipc_keypoint_factory", "ipc_slam_map_factory",
-    "ipc_floor_plan_factory",
 })
 
 __all__ = [
@@ -78,11 +73,9 @@ __all__ = [
     "IpcTripletWorker",
     "IpcKeypointWorker",
     "IpcSlamMapSource",
-    "IpcFloorPlanSource",
     "ipc_triplet_factory",
     "ipc_keypoint_factory",
     "ipc_slam_map_factory",
-    "ipc_floor_plan_factory",
 ]
 
 

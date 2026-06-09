@@ -63,8 +63,6 @@ from ui.comms.messages import END
 from ui.comms import IPCPubSub, IPCSubscriber, RingRegistry
 from ui.comms.converters import to_local
 from ui.comms.ring_registry import default_capture_specs, default_vio_specs
-from ui.viz.map_cloud import longest_consecutive_run
-from ui.viz import floor_plan
 from ui.qt.keypoints_window import KeypointWorker
 from ui.qt.synced_window import TripletWorker
 
@@ -384,16 +382,16 @@ class IpcKeypointWorker(KeypointWorker):
 class _KeyframeAccumulator(threading.Thread):
     """Attach VIO's keyframe rings and stash every keyframe for a 3D-map build.
 
-    Both the sparse landmark map (:class:`IpcSlamMapSource`) and the 2D top-down
-    floor plan (:class:`IpcFloorPlanSource`) need the EXACT same VIO keyframe
-    feed -- the gray/depth grids (read_copy-ed out of VIO's ``kf_gray`` /
-    ``kf_depth`` rings by the converter) and each keyframe's FULL pose
-    ``[R_keyframe | t_keyframe]`` (split from ``T_world_cam``), plus the KLT track
-    snapshot (``track_ids`` / ``track_px`` / ``inlier_ids``) the landmark map
-    reads. Rather than duplicate the ring attach + ``_on_keyframe`` stash + evict
-    wiring in two sources, that machinery lives ONCE here; each concrete source
-    subclasses this and only supplies its own build (``_build`` -> a payload) +
-    its rebuild rate.
+    The occupancy voxel map (:class:`IpcSlamMapSource`) needs, per keyframe, the
+    metric ``depth_m`` grid (``read_copy``-ed out of VIO's ``kf_depth`` ring by the
+    converter) and the keyframe's FULL pose ``[R_keyframe | t_keyframe]`` (split
+    from ``T_world_cam``) to back-project depth to the world. Rather than inline the
+    ring attach + ``_on_keyframe`` stash + evict + the coalesced rebuild wiring in
+    the source, that machinery lives here as a reusable base; a concrete source
+    subclasses this and supplies only its own build (``_build`` -> a payload) + its
+    rebuild rate. (Kept as a separate base -- not folded into the one current
+    source -- because it is the natural seam for a second keyframe-fed map view and
+    keeps the SHM/recv plumbing isolated from the map maths.)
 
     A bounded dict of the last :data:`MAX_KEYFRAMES` keyframes (keyed by source
     frame seq) caps memory; the subclass's build re-orders by seq, so insertion
@@ -405,7 +403,7 @@ class _KeyframeAccumulator(threading.Thread):
       running -> a clear, device-agnostic reason on :attr:`error`).
     * :meth:`_make_keyframe_client` builds the VIO IPC client subscribed to
       ``keyframe`` (the concrete source adds any extra clients it needs, e.g.
-      the landmark map's ``slam.map``).
+      the occupancy map's ``slam.map``).
     * a coalesced rebuild loop (:meth:`run`) re-builds at most :attr:`REBUILD_HZ`
       times a second whenever the model goes dirty, OFF the GUI thread, and hands
       each finished payload to the injected callback (the window marshals it onto
@@ -417,15 +415,16 @@ class _KeyframeAccumulator(threading.Thread):
 
     #: Cap on kept keyframes (bounds memory like the other UI buffers). At
     #: kf_every=5 @ 20 fps a keyframe lands ~every 0.25 s, so 600 kf ~= 2.5 min of
-    #: distinct keyframes -- far more than any 3D map needs.
+    #: distinct keyframes -- far more than any 3D map needs. The occupancy grid is
+    #: PERSISTENT (it accumulates hit counts as keyframes arrive), so an evicted
+    #: keyframe's hits stay folded into the grid -- this cap only bounds the raw
+    #: depth-grid buffer, not the fused map.
     MAX_KEYFRAMES = 600
     #: Valid-depth band (m): outside this range stereo depth is too noisy to
-    #: back-project. Both builds gate to this band (the landmark map samples per
-    #: track; the floor plan bins the whole grid through the SAME band).
+    #: back-project. The occupancy build gates the whole depth grid to this band.
     MIN_DEPTH_M = 0.3
     MAX_DEPTH_M = 6.0
-    #: Max full rebuilds per second. Subclasses override (the floor-plan scatter
-    #: rebuild is cheap -> a higher rate).
+    #: Max full rebuilds per second. Subclasses override.
     REBUILD_HZ = 4.0
 
     def __init__(self, vio_endpoint: str, *, name: str,
@@ -450,16 +449,13 @@ class _KeyframeAccumulator(threading.Thread):
         self._vio_client: IPCPubSub | None = None
         self._vio_rings: RingRegistry | None = None
 
-        # Per-keyframe accumulators, keyed by source frame seq. Each keyframe keeps
-        # its gray/depth grid + rotation AND translation + its KLT track snapshot
-        # (ids + pixels) plus the PnP-inlier id subset. ``MAX_KEYFRAMES`` bounds it.
-        self._kf_gray: dict[int, np.ndarray] = {}
+        # Per-keyframe accumulators, keyed by source frame seq. The occupancy map
+        # needs only the metric depth grid + each keyframe's own pose
+        # (rotation AND translation) to back-project depth to the world.
+        # ``MAX_KEYFRAMES`` bounds the raw depth-grid buffer.
         self._kf_depth: dict[int, np.ndarray] = {}
         self._kf_R: dict[int, np.ndarray] = {}        # (3,3) keyframe rotation
         self._kf_t: dict[int, np.ndarray] = {}        # (3,) VIO keyframe translation
-        self._kf_track_ids: dict[int, np.ndarray] = {}   # (N,) track ids
-        self._kf_track_px: dict[int, np.ndarray] = {}    # (N,2) pixels, id-aligned
-        self._kf_inlier_ids: dict[int, np.ndarray] = {}  # (M,) PnP inlier ids
 
     # ------------------------------------------------------------------ #
     def _attach_or_fail(self) -> bool:
@@ -493,13 +489,16 @@ class _KeyframeAccumulator(threading.Thread):
         return client
 
     def _on_keyframe(self, wm) -> None:
-        """VIO recv thread: stash one keyframe's gray/depth + FULL pose + tracks.
+        """VIO recv thread: stash one keyframe's metric depth + FULL pose.
 
-        Splits the (4,4) VIO world<-cam pose into rotation + translation; every
-        observation a build derives uses ``Xw = R Xc + t`` so positions stay
-        self-consistent (one pose source per keyframe -> no seams). The track
-        snapshot is OPTIONAL on the wire; it is stored as-is and a build skips
-        keyframes lacking it.
+        Splits the (4,4) VIO world<-cam pose into rotation + translation; the
+        build back-projects this keyframe's depth with ``Xw = R Xc + t`` so the
+        hits land in a single consistent odom-frame grid (one pose source per
+        keyframe -> no seams). The depth grid is the keyframe's DENOISED metric
+        depth (``read_copy``-ed out of VIO's ``kf_depth`` ring by the converter).
+        Marks the model dirty so the subclass NEXT rebuild folds it in (the
+        occupancy build INCREMENTS the persistent hit-count grid from the
+        not-yet-fused keyframes -- see :meth:`IpcSlamMapSource._build`).
         """
         if wm is END:
             return
@@ -511,30 +510,22 @@ class _KeyframeAccumulator(threading.Thread):
         R = T[:3, :3].copy()
         t = T[:3, 3].copy()
         with self._lock:
-            self._kf_gray[seq] = kf.gray_left          # already a private copy
             self._kf_depth[seq] = kf.depth_m
             self._kf_R[seq] = R
             self._kf_t[seq] = t
-            self._kf_track_ids[seq] = kf.track_ids
-            self._kf_track_px[seq] = kf.track_px
-            self._kf_inlier_ids[seq] = kf.inlier_ids
             self._evict_locked()
         self._dirty.set()
 
     def _evict_locked(self) -> None:
         """Drop the oldest keyframes once over the cap (call under the lock)."""
-        n = len(self._kf_gray)
+        n = len(self._kf_depth)
         if n <= self.MAX_KEYFRAMES:
             return
         # dict preserves insertion order -> the first keys are the oldest.
-        for seq in list(self._kf_gray.keys())[: n - self.MAX_KEYFRAMES]:
-            self._kf_gray.pop(seq, None)
+        for seq in list(self._kf_depth.keys())[: n - self.MAX_KEYFRAMES]:
             self._kf_depth.pop(seq, None)
             self._kf_R.pop(seq, None)
             self._kf_t.pop(seq, None)
-            self._kf_track_ids.pop(seq, None)
-            self._kf_track_px.pop(seq, None)
-            self._kf_inlier_ids.pop(seq, None)
             self._on_evict_locked(seq)
 
     def _on_evict_locked(self, seq: int) -> None:
@@ -598,96 +589,128 @@ class _KeyframeAccumulator(threading.Thread):
 
 
 # --------------------------------------------------------------------------- #
-# (3c) SLAM 3D-map source (sparse landmark cloud) for MapWindow
+# (3c) SLAM 3D-map source (ModalAI-style VOXEL OCCUPANCY map) for MapWindow
 # --------------------------------------------------------------------------- #
 class IpcSlamMapSource(_KeyframeAccumulator):
-    """Build the sparse, ID-based SLAM landmark cloud for MapWindow.
+    """Build a ModalAI/VOXL-style VOXEL OCCUPANCY map of the room for MapWindow.
 
-    Shows ONE point per LANDMARK (KLT track id) that was a PnP INLIER across a run
-    of ``>= PERSIST_KF`` SUCCESSIVE keyframes -- i.e. only consistently-tracked,
-    motion-validated features (like a real SLAM map), NOT a dense-depth
-    reconstruction. This is a pure CONSUMER of existing topics: no new field, no
-    data-path change.
+    Instead of a noisy per-keyframe point cloud, this builds the clean blocky
+    occupancy map the user wants (floor grid + walls + furniture as green voxel
+    cubes) the way an OctoMap does it: by TEMPORAL OCCUPANCY FUSION. The earlier
+    naive per-keyframe voxel binning was noisy + laggy precisely because it lacked
+    this fusion -- it re-binned every keyframe from scratch and kept every cell a
+    ray ever touched (so transient stereo noise survived). Here a PERSISTENT
+    per-voxel HIT-COUNT grid accumulates across keyframes and a cell only counts as
+    OCCUPIED once it has been hit by ``>= OCC_HITS`` keyframes -- a real surface is
+    re-observed many times and survives; random stereo noise hits a cell once or
+    twice and is rejected. That fusion both CLEANS the map and keeps the voxel
+    count (and therefore the render load) low.
 
-    Subscribes BOTH endpoints the landmark map needs (mirrors
-    :class:`IpcKeypointWorker`'s two-endpoint pattern, but the keyframe gray/depth
-    ride VIO's dedicated ``kf_gray`` / ``kf_depth`` rings, NOT capture's frame
-    rings):
+    This is a pure CONSUMER of existing topics: no new field, no data-path change.
 
-    * ``keyframe`` (VIO) -> per keyframe ``seq`` we keep its gray image + metric
-      depth (``read_copy``-ed out of VIO's kf rings by the converter), the ids +
-      pixels of its KLT tracks (``track_ids`` / ``track_px``), the subset PnP kept
-      as INLIERS this frame (``inlier_ids``) and the FULL POSE (rotation AND
-      translation) of its ``T_world_cam``. The keyframe rate is low (kf_every), so a
-      bounded dict of the last :data:`MAX_KEYFRAMES` keyframes caps memory.
+    Subscribes TWO endpoints (mirrors :class:`IpcKeypointWorker`'s two-endpoint
+    pattern, but the keyframe depth rides VIO's dedicated ``kf_depth`` ring, NOT
+    capture's frame rings):
+
+    * ``keyframe`` (VIO) -> per keyframe ``seq`` we keep its DENOISED metric depth
+      (``read_copy``-ed out of VIO's kf ring by the converter) and the FULL POSE
+      (rotation AND translation) of its ``T_world_cam`` -- everything the
+      back-projection needs. The keyframe rate is low (kf_every), so a bounded dict
+      of the last :data:`MAX_KEYFRAMES` raw depth grids caps memory (the fused
+      occupancy grid is persistent and unaffected by that cap).
     * ``slam.map`` (SLAM) -> the CONTINUOUS per-keyframe loop-closure-corrected
       positions, keyed by source frame seq. Retained (and kept fresh) as the source
       of truth for a future corrected-map variant + diagnostics, but it does NOT
-      position the cloud: the SLAM backend only places a SPARSE subset of keyframes
-      (~1 in ~18), so gating on it starved the persistence run (see below).
+      position the voxels: they are quantised from each keyframe's own VIO pose for
+      a consistent, seam-free odom-frame grid. (Re-anchoring the grid to the
+      loop-corrected translations is a deliberate later step.)
 
-    The cloud positions every keyframe from its OWN VIO pose ``[R_keyframe |
-    t_keyframe]`` (``_kf_R`` / ``_kf_t``), so a landmark's observations across
-    keyframes never mix two pose sources -> a consistent, seam-free odom-frame map.
-    (Re-anchoring to the loop-corrected ``slam.map`` translations is a deliberate
-    later step; positioning from one source first is what makes the map populate.)
+    Occupancy fusion (PERSISTENT + INCREMENTAL -- see :meth:`_fuse_keyframe_locked`
+    and :meth:`_build`):
 
-    Cloud build (TRACK-ID persistence -- see :meth:`_build`):
+    1. :attr:`_hits` is a persistent ``{(ix,iy,iz) -> hit_count}`` dict. As each
+       NEW keyframe arrives, its (denoised) depth is back-projected to the world by
+       the keyframe's OWN VIO pose (strided + depth-gated + edge-rejected), each hit
+       point is quantised to a :data:`VOXEL_M` cell, and that cell's hit_count is
+       INCREMENTED (capped at :data:`HIT_CAP` so a long dwell can't overflow). The
+       grid ACCUMULATES across keyframes; we never rebuild it from scratch. A set
+       :attr:`_fused_seqs` records which keyframe seqs are already folded in, so a
+       rebuild only folds the not-yet-fused keyframes (cheap, incremental).
+    2. A cell is OCCUPIED when ``hit_count >= OCC_HITS`` -- the temporal noise
+       filter. Render emits one voxel per occupied cell.
+    3. Output: voxel CENTRES (the cell index * VOXEL_M + half a cell) + a GREEN
+       gradient colour by HEIGHT (derived from the cell's world ``y``, the optical
+       DOWN axis), capped at :data:`MAX_VOXELS` so the render stays light.
 
-    1. Order ALL VIO keyframes (every ``--kf-every`` frames) by ``seq`` and give
-       each a 0-based sequential index ``k`` -- the index the consecutive-run gate
-       counts in. Counting over the DENSE VIO keyframes (not the sparse ``slam.map``
-       subset) is what lets a KLT track reach :data:`PERSIST_KF` consecutive.
-    2. For each keyframe ``k`` and each ``track_id`` in its ``inlier_ids``: look up
-       the track's pixel (``track_ids`` -> ``track_px``), sample ``depth_m`` there,
-       back-project with the pinhole and transform to the world by
-       ``[R_keyframe | t_keyframe]``; record ``(k, world_xyz, gray)`` under that
-       ``track_id``. So we accumulate, per landmark, every keyframe it was an
-       inlier in (with a world observation + colour).
-    3. For each landmark, take the SET of keyframe indices it was an inlier in and
-       compute its longest run of CONSECUTIVE integers
-       (:func:`ui.viz.map_cloud.longest_consecutive_run`). KEEP the landmark only
-       if that run reaches :data:`PERSIST_KF` -- so a track seen only in scattered
-       or too-few keyframes is dropped.
-    4. Output ONE point per kept landmark: the MEDIAN of its world observations
-       (robust to a stray) with mean colour, plus the keyframe camera markers.
+    Render choice (light, no-lag): the window draws the voxels as a
+    ``GLScatterPlotItem`` of large SQUARE world-unit points (size == VOXEL_M,
+    ``pxMode=False``), NOT an N-cube ``GLMeshItem`` -- a scatter of N points is far
+    cheaper to upload + paint than 12*N triangles, and at this voxel size the
+    squares read as the blocky cubes. The rebuild is coalesced + capped at
+    :attr:`REBUILD_HZ` and only re-emits when the occupied set MATERIALLY changed
+    (see :meth:`run`), so the GUI never re-uploads an unchanged cloud.
 
-    This is much lighter than a dense fuse (only ~tens-hundreds of tracks per
-    keyframe), so the rebuild is fast even as keyframes accumulate.
+    FUTURE (v2, do NOT implement now unless cheap): free-space RAY-CARVING -- decrement
+    the hit_count of voxels along each depth ray BEFORE the hit (the ones the ray
+    passed through unobstructed) so a flying-voxel that a later ray sees through is
+    actively cleared, exactly like OctoMap's miss updates. v1 only does hit updates
+    (the >= OCC_HITS gate already rejects most one-off noise without the extra
+    per-ray traversal cost).
 
     ``K`` comes from VIO's retained ``calib.bundle`` (the rectified-left intrinsic
     for the full-res depth grid the keyframe ``depth_m`` lives on).
 
-    Rebuild policy: a full re-fuse over every kept keyframe is coalesced -- a
-    ``slam.map`` (or a new keyframe) just marks the model dirty, and a background
-    loop rebuilds at most :data:`REBUILD_HZ` times a second, always from the
-    freshest poses. The finished ``(points, colors, cams)`` go to the injected
-    ``on_cloud`` callback (the window marshals it onto the GUI thread).
-
     The VIO keyframe feed (ring attach + ``_on_keyframe`` stash + evict + the
-    coalesced rebuild loop) is inherited UNCHANGED from
-    :class:`_KeyframeAccumulator`; this class adds ONLY the landmark-specific
-    ``slam.map`` client + the track-id-persistence build.
+    coalesced rebuild loop) is inherited from :class:`_KeyframeAccumulator`; this
+    class adds the ``slam.map`` client + the occupancy fusion + the voxel build.
 
     Connect-error model mirrors :class:`IpcGyroFuseSource` /
     :class:`IpcKeypointWorker`: :meth:`start` swallows a connect timeout onto
     :attr:`error` (the window polls it) rather than raising.
     """
 
-    #: Max full-cloud rebuilds per second. The sparse landmark rebuild is light
-    #: (only the ~tens-hundreds of inlier tracks per keyframe, not every depth
-    #: pixel), so we run at 4 Hz to re-snap the map promptly on new keyframes +
-    #: slam.map pose updates. The build is OFF the GUI thread (this source is a
-    #: worker thread that submit()s the finished cloud), so a rebuild never stutters
-    #: the UI.
+    # ------------------------------------------------------------------ #
+    # Tunables (each commented with which way to turn it).
+    # ------------------------------------------------------------------ #
+    #: Max full-build re-emits per second. The build is OFF the GUI thread (this
+    #: source is a worker thread that submit()s the finished voxels), so a rebuild
+    #: never stutters the UI; 4 Hz re-snaps the map promptly as keyframes arrive.
     REBUILD_HZ = 4.0
-    #: Persistence gate: a landmark (track id) shows only if it was a PnP inlier
-    #: across >= PERSIST_KF SUCCESSIVE keyframes -> only consistently-tracked,
-    #: motion-validated points (transient stereo noise never qualifies). 6 is a
-    #: balance: strict enough to reject one-off noise, low enough that the map
-    #: actually populates at the live --kf-every cadence. RAISE for higher
-    #: confidence (sparser), LOWER to fill the room faster (noisier).
-    PERSIST_KF = 6
+    #: Voxel edge length (m). The cell every world hit is quantised to AND the
+    #: rendered square-point size. Coarse on purpose (~0.10 m) -> the blocky VOXL
+    #: look, FEWER voxels (lighter render) and stronger temporal fusion (more rays
+    #: agree per cell). LOWER for finer structure (more voxels, heavier); RAISE for
+    #: a coarser, lighter map.
+    VOXEL_M = 0.10
+    #: Occupancy threshold: a cell is OCCUPIED (rendered) only once it has been hit
+    #: by >= OCC_HITS keyframes. This IS the temporal noise filter -- a real surface
+    #: is re-observed across many keyframes (survives); a random stereo-noise hit
+    #: touches a cell once (rejected). 3 is the balance from the OCC_HITS sweep on
+    #: the gold sessions (drops the radial/flying noise materially vs 1 while the
+    #: room structure survives). RAISE for a cleaner/sparser map (slower to fill,
+    #: needs more re-observation); LOWER toward 1 to fill faster (noisier).
+    OCC_HITS = 3
+    #: Depth-map subsample stride: back-project every STRIDE-th pixel in u and v.
+    #: The occupancy grid only needs the room SHAPE, not every pixel, so a stride of
+    #: 4 (1/16 the rays) keeps the per-keyframe fuse cheap while surfaces still get
+    #: dense multi-keyframe support. LOWER (toward 1) for denser support (heavier
+    #: fuse); RAISE for a lighter, sparser fuse.
+    STRIDE = 4
+    #: Edge-reject threshold (m): drop "flying pixels" on a depth discontinuity (a
+    #: fg/bg edge back-projects to points floating BETWEEN the two surfaces). A
+    #: pixel is kept only if BOTH its vertical and horizontal depth gradient are
+    #: <= this. SAME idea as the shared geometry edge-reject; 0 disables it.
+    EDGE_MAX_M = 0.1
+    #: Per-cell hit-count ceiling. Without it a stationary dwell could pump one
+    #: cell's count arbitrarily high (no harm to occupancy, but it would dominate
+    #: any future confidence/decay logic + the colour normalisation). Capping keeps
+    #: the counts in a sane band; well above OCC_HITS so it never affects the gate.
+    HIT_CAP = 255
+    #: Hard cap on rendered voxels (render-load ceiling). The fusion keeps the
+    #: occupied count low, but a huge swept space could still exceed a light render;
+    #: if the occupied set is larger we keep the OCC_HITS-strongest (most
+    #: re-observed = most confident) voxels. 30k square points stays light in GL.
+    MAX_VOXELS = 30_000
 
     def __init__(self, vio_endpoint: str, slam_endpoint: str, K: np.ndarray, *,
                  connect_timeout_s: float = 10.0,
@@ -698,25 +721,39 @@ class IpcSlamMapSource(_KeyframeAccumulator):
         self._slam_ep = slam_endpoint
         self._K = np.asarray(K, dtype=np.float64).reshape(3, 3)
         self._slam_client: IPCPubSub | None = None
+        # PERSISTENT occupancy hit-count grid: {(ix,iy,iz) int -> hit_count int}.
+        # Accumulated across keyframes (NEVER rebuilt from scratch); guarded by the
+        # base's _lock together with the depth/pose dicts.
+        self._hits: dict[tuple[int, int, int], int] = {}
+        # The keyframe seqs already folded into _hits, so a rebuild only fuses the
+        # NEW keyframes (incremental). Cleared keyframes stay folded in (the grid is
+        # persistent), so an evicted seq is simply never re-fused.
+        self._fused_seqs: set[int] = set()
+        # Count of occupied cells at the last emit -> skip re-emitting an unchanged
+        # cloud (avoids re-uploading the whole scatter to GL every rebuild tick).
+        self._last_emit_occ = -1
         # Latest loop-closure-corrected camera positions from slam.map, keyed by
-        # seq. NOT used to position the cloud (the cloud builds from the VIO
-        # keyframe's own pose for a seam-free odom-frame map); retained as the
-        # source of truth for the future corrected-map variant + diagnostics.
+        # seq. NOT used to position the voxels (they build from the VIO keyframe's
+        # own pose for a seam-free odom-frame grid); retained as the source of truth
+        # for the future corrected-map variant + diagnostics.
         self._kf_corr_pos: dict[int, np.ndarray] = {}
 
     # ------------------------------------------------------------------ #
     def start_cloud(self, on_cloud) -> None:
-        """Connect both endpoints and stream fused clouds to ``on_cloud``.
+        """Connect both endpoints and stream voxel maps to ``on_cloud``.
 
         ``on_cloud(points (N,3) float32, colors (N,3) float32, cams (M,3)
         float32)`` is invoked from this source's REBUILD thread (the window
-        marshals it onto the GUI thread). On connect failure :attr:`error` is set
-        and the thread is NOT started (the window polls :attr:`error`).
+        marshals it onto the GUI thread). ``points`` are the occupied VOXEL CENTRES,
+        ``colors`` the green-by-height gradient, ``cams`` the keyframe camera
+        positions. On connect failure :attr:`error` is set and the thread is NOT
+        started (the window polls :attr:`error`). Method name kept (``start_cloud``)
+        so ``ui.main`` wires it unchanged.
         """
         self._cb = on_cloud
-        # Attach VIO's keyframe rings (consumer side) so the keyframe converter
-        # can read_copy the gray/depth arrays out of them. Missing rings == VIO
-        # not running -> surface a clear, device-agnostic reason.
+        # Attach VIO's keyframe rings (consumer side) so the keyframe converter can
+        # read_copy the depth array out of them. Missing rings == VIO not running
+        # -> surface a clear, device-agnostic reason.
         if not self._attach_or_fail():
             return
 
@@ -744,15 +781,20 @@ class IpcSlamMapSource(_KeyframeAccumulator):
 
     # ------------------------------------------------------------------ #
     def _on_evict_locked(self, seq: int) -> None:
-        """Drop this source's per-seq corrected-position state too (under lock)."""
+        """Drop this source's per-seq corrected-position state too (under lock).
+
+        The keyframe's depth/pose are dropped by the base; its hits STAY in the
+        persistent grid (already fused) -- we just never re-fuse an evicted seq.
+        """
         self._kf_corr_pos.pop(seq, None)
 
     def _on_slammap(self, wm) -> None:
         """SLAM recv thread: refresh the loop-closure-corrected positions.
 
         These are kept fresh for the future corrected-map variant + diagnostics
-        only; the cloud is positioned from each keyframe's own VIO pose (see
-        :meth:`_build`), so this does NOT gate or move the rendered map.
+        only; the voxels are quantised from each keyframe's own VIO pose (see
+        :meth:`_fuse_keyframe_locked`), so this does NOT move the rendered grid.
+        Marks dirty so the camera trail re-snaps (slam.map carries kf positions).
         """
         if wm is END:
             return
@@ -770,136 +812,161 @@ class IpcSlamMapSource(_KeyframeAccumulator):
         self._dirty.set()
 
     # ------------------------------------------------------------------ #
-    def _build(self):
-        """Build the sparse landmark cloud by TRACK-ID persistence (VIO poses).
+    def _fuse_keyframe_locked(self, depth: np.ndarray, R: np.ndarray,
+                              t: np.ndarray) -> None:
+        """Fold ONE keyframe's depth into the persistent hit-count grid (under lock).
 
-        Returns ``(points, colors, cams)`` (points/colors empty when no landmark
-        qualifies). EVERY VIO keyframe with a stashed gray/depth/track snapshot is
-        used -- positioned from its OWN VIO pose ``[R | t]`` (``_kf_R`` / ``_kf_t``),
-        NOT from the sparse ``slam.map`` subset. VIO emits a keyframe every
-        ``--kf-every`` frames (dense), whereas the SLAM backend only places a coarse
-        subset (~1 in ~18); gating the persistence run on that sparse subset meant a
-        KLT track (living tens of frames -> only ~2 SLAM keyframes) could NEVER reach
-        :data:`PERSIST_KF` consecutive, so the map stayed empty. Counting over the
-        DENSE VIO keyframes lets a track that persists ``PERSIST_KF`` successive
-        keyframes qualify. Using one pose source (the keyframe's own) for every
-        observation keeps a landmark's positions self-consistent -> no seams.
-
-        Track-id persistence (see class docstring):
-
-        1. Order the usable keyframes by ``seq`` and give each a 0-based sequential
-           index ``k`` (the index the consecutive-run gate counts in).
-        2. Per keyframe ``k``, per ``track_id`` in its ``inlier_ids``: find the
-           track's pixel (``track_ids`` -> ``track_px``), sample ``depth_m`` there,
-           back-project with the pinhole (``X=(u-cx)/fx*z``, ``Y=(v-cy)/fy*z``,
-           ``Z=z``) and transform to the world by ``[R_keyframe | t_keyframe]``.
-           Record ``(k, world_xyz, gray)`` under that ``track_id`` (skip ids with
-           no/invalid depth or off-grid pixel).
-        3. Per landmark, the SET of keyframe indices it was an inlier in -> its
-           longest run of CONSECUTIVE integers; KEEP only when the run reaches
-           :data:`PERSIST_KF`.
-        4. One output point per kept landmark = the MEDIAN of its world
-           observations (robust to a stray), with mean colour.
+        Back-projects the (denoised) depth to the world by the keyframe's OWN VIO
+        pose ``Xw = R Xc + t`` (strided + depth-gated + edge-rejected), quantises
+        each world hit to a :data:`VOXEL_M` cell, and INCREMENTS that cell's
+        hit_count (capped at :data:`HIT_CAP`). Vectorised: one back-projection per
+        keyframe, one ``np.unique`` over the hit cells, then a scatter add into the
+        persistent dict -- so a cell hit by many rays in ONE keyframe still counts as
+        a SINGLE keyframe observation (the +1 is per (keyframe, cell), the temporal
+        fusion the OCC_HITS gate relies on).
         """
-        with self._lock:
-            # Use EVERY VIO keyframe that carries a full track snapshot (gray/depth
-            # always present once stashed; track ids may be None on the wire). NO
-            # ``slam.map`` gate -- positions come from each keyframe's own VIO pose.
-            # Sort by SOURCE FRAME SEQ so the 0-based index ``k`` reflects true
-            # keyframe order regardless of dict insertion / eviction.
-            seqs = sorted(s for s in self._kf_gray
-                          if self._kf_inlier_ids.get(s) is not None
-                          and self._kf_track_ids.get(s) is not None
-                          and self._kf_track_px.get(s) is not None)
-            grays = [self._kf_gray[s] for s in seqs]
-            depths = [self._kf_depth[s] for s in seqs]
-            Rs = [self._kf_R[s] for s in seqs]
-            ts = [self._kf_t[s] for s in seqs]
-            track_ids = [self._kf_track_ids[s] for s in seqs]
-            track_px = [self._kf_track_px[s] for s in seqs]
-            inlier_ids = [self._kf_inlier_ids[s] for s in seqs]
-            # Cams = ALL VIO keyframe positions (even ones without a usable track
-            # snapshot) so the camera trail stays complete.
-            cam_ts = [self._kf_t[s] for s in self._kf_gray]
-        cams = (np.asarray(cam_ts, np.float32).reshape(-1, 3)
-                if cam_ts else np.zeros((0, 3), np.float32))
-        if not seqs:
-            empty = np.zeros((0, 3), np.float32)
-            return empty, empty, cams
-
+        d = np.asarray(depth, dtype=np.float32)
+        if d.ndim != 2:
+            return
+        h, w = d.shape
+        s = max(1, int(self.STRIDE))
+        # Per-pixel validity on the FULL grid first (so the edge gradient sees a
+        # native-resolution discontinuity), THEN subsample by stride -- matching the
+        # shared geometry helper's edge reject.
+        m = (np.isfinite(d) & (d >= self.MIN_DEPTH_M) & (d <= self.MAX_DEPTH_M))
+        if self.EDGE_MAX_M > 0.0:
+            dv = np.abs(np.diff(d, axis=0, append=d[-1:]))
+            dh = np.abs(np.diff(d, axis=1, append=d[:, -1:]))
+            m &= (dv <= self.EDGE_MAX_M) & (dh <= self.EDGE_MAX_M)
+        keep = m[::s, ::s]
+        if not np.any(keep):
+            return
         fx, fy = float(self._K[0, 0]), float(self._K[1, 1])
         cx, cy = float(self._K[0, 2]), float(self._K[1, 2])
+        us = np.arange(0, w, s, dtype=np.float64)
+        vs = np.arange(0, h, s, dtype=np.float64)
+        uu, vv = np.meshgrid(us, vs)
+        z = d[::s, ::s].astype(np.float64)
+        uu, vv, z = uu[keep], vv[keep], z[keep]                # flat (M,)
+        # Pinhole back-projection to the camera frame, then to the world by the
+        # keyframe's OWN pose, then quantise to integer voxel coords.
+        cam = np.stack([(uu - cx) * z / fx, (vv - cy) * z / fy, z], axis=1)
+        world = cam @ np.asarray(R, np.float64).reshape(3, 3).T \
+            + np.asarray(t, np.float64).reshape(3)             # (M,3)
+        keys = np.floor(world / float(self.VOXEL_M)).astype(np.int64)
+        # Collapse multi-ray hits within THIS keyframe to one +1 per cell, then add
+        # into the persistent grid (capped). One Python loop over the UNIQUE cells
+        # this keyframe touched (a few thousand at most), not the raw rays.
+        uniq = np.unique(keys, axis=0)
+        cap = int(self.HIT_CAP)
+        for cell in uniq:
+            k = (int(cell[0]), int(cell[1]), int(cell[2]))
+            c = self._hits.get(k, 0) + 1
+            self._hits[k] = c if c < cap else cap
 
-        # (2) Accumulate, per landmark id, every keyframe it was an inlier in:
-        #     {track_id -> ([k, ...], [world_xyz, ...], [gray, ...])}. We process
-        #     each keyframe VECTORISED over its inlier ids (numpy gather + a single
-        #     back-projection), then scatter the rows into the per-landmark lists.
-        kf_seen: dict[int, list[int]] = {}        # track_id -> [keyframe index k]
-        kf_xyz: dict[int, list[np.ndarray]] = {}  # track_id -> [world (3,)]
-        kf_gray_v: dict[int, list[float]] = {}    # track_id -> [gray in [0,1]]
-        for k in range(len(seqs)):
-            ids = np.asarray(track_ids[k]).ravel()
-            inl = np.asarray(inlier_ids[k]).ravel()
-            if ids.size == 0 or inl.size == 0:
-                continue
-            px = np.asarray(track_px[k], dtype=np.float64).reshape(-1, 2)
-            depth = np.asarray(depths[k], dtype=np.float32)
-            h, w = depth.shape
-            # Select this keyframe's inlier tracks (id-aligned pixel lookup).
-            sel = np.isin(ids, inl)
-            sel_ids = ids[sel]
-            sel_px = px[sel]
-            if sel_ids.size == 0:
-                continue
-            # Round pixels to the depth grid and gate to on-grid + valid depth.
-            u = np.round(sel_px[:, 0]).astype(np.int64)
-            v = np.round(sel_px[:, 1]).astype(np.int64)
-            on = (u >= 0) & (u < w) & (v >= 0) & (v < h)
-            if not np.any(on):
-                continue
-            u, v, sel_ids = u[on], v[on], sel_ids[on]
-            z = depth[v, u]
-            ok = (np.isfinite(z) & (z >= self.MIN_DEPTH_M)
-                  & (z <= self.MAX_DEPTH_M))
-            if not np.any(ok):
-                continue
-            u, v, z, sel_ids = u[ok], v[ok], z[ok], sel_ids[ok]
-            # Pinhole back-projection to the camera frame, then to world by the
-            # keyframe's own VIO pose [R_keyframe | t_keyframe] (Xw = R Xc + t).
-            cam = np.stack([(u - cx) * z / fx, (v - cy) * z / fy, z], axis=1)
-            world = cam @ Rs[k].T + ts[k]                       # (m, 3)
-            gray_k = grays[k]
-            gvals = (np.asarray(gray_k, dtype=np.float32)[v, u] / 255.0
-                     if gray_k is not None
-                     else np.full(z.size, 0.85, np.float32))
-            # Scatter each landmark's observation into its accumulator.
-            for j in range(sel_ids.size):
-                tid = int(sel_ids[j])
-                kf_seen.setdefault(tid, []).append(k)
-                kf_xyz.setdefault(tid, []).append(world[j])
-                kf_gray_v.setdefault(tid, []).append(float(gvals[j]))
+    # ------------------------------------------------------------------ #
+    def _build(self):
+        """Fold any NEW keyframes into the grid, then emit the occupied voxels.
 
-        # (3+4) Keep a landmark only if its longest run of SUCCESSIVE keyframe
-        #       indices reaches PERSIST_KF; emit the MEDIAN world point + mean
-        #       colour. ``longest_consecutive_run`` needs a sorted UNIQUE index
-        #       sequence (a keyframe that saw a track twice must count once).
-        pts_out: list[np.ndarray] = []
-        col_out: list[float] = []
-        for tid, ks in kf_seen.items():
-            run = longest_consecutive_run(sorted(set(ks)))
-            if run < self.PERSIST_KF:
-                continue
-            obs = np.asarray(kf_xyz[tid], dtype=np.float64)     # (n_obs, 3)
-            pts_out.append(np.median(obs, axis=0))
-            col_out.append(float(np.mean(kf_gray_v[tid])))
-        if not pts_out:
+        Returns ``(points, colors, cams)``:
+
+        * ``points`` ``(N,3)`` float32 -- the CENTRE of every OCCUPIED voxel
+          (``hit_count >= OCC_HITS``), capped at :data:`MAX_VOXELS` (keep the
+          most-re-observed when over). Optical-world frame (the window rotates it
+          to ENU, same as the trajectory).
+        * ``colors`` ``(N,3)`` float32 -- a GREEN gradient by HEIGHT (optical
+          ``+y`` is world-DOWN), so the floor/walls read like ModalAI's height-tinted
+          occupancy.
+        * ``cams`` ``(M,3)`` float32 -- ALL VIO keyframe camera positions (the path).
+
+        The fuse is INCREMENTAL: only keyframes not in :attr:`_fused_seqs` are
+        folded (the persistent grid already holds the rest), so this stays cheap as
+        keyframes accumulate.
+        """
+        with self._lock:
+            # (1) Fold the NEW keyframes into the persistent grid (incremental).
+            new_seqs = [s for s in self._kf_depth if s not in self._fused_seqs]
+            for seq in sorted(new_seqs):
+                self._fuse_keyframe_locked(self._kf_depth[seq],
+                                           self._kf_R[seq], self._kf_t[seq])
+                self._fused_seqs.add(seq)
+            # (2) Snapshot the occupied cells + the camera trail under the lock,
+            #     then build the arrays lock-free.
+            occ = [(k, c) for k, c in self._hits.items() if c >= self.OCC_HITS]
+            cam_ts = [self._kf_t[s] for s in self._kf_depth]
+        cams = (np.asarray(cam_ts, np.float32).reshape(-1, 3)
+                if cam_ts else np.zeros((0, 3), np.float32))
+        if not occ:
             empty = np.zeros((0, 3), np.float32)
             return empty, empty, cams
-        points = np.asarray(pts_out, dtype=np.float32)
-        # Mean gray -> grayscale RGB (the viewer takes (N,3) colour in [0,1]).
-        g = np.asarray(col_out, dtype=np.float32)[:, None]
-        colors = np.repeat(g, 3, axis=1).astype(np.float32)
-        return points, colors, cams
+
+        keys = np.asarray([k for k, _ in occ], dtype=np.int64)     # (N,3)
+        counts = np.asarray([c for _, c in occ], dtype=np.int64)   # (N,)
+        # Cap the render load: when over MAX_VOXELS keep the MOST re-observed cells
+        # (highest hit_count = most confident), so the cap never drops real
+        # structure before noise.
+        if keys.shape[0] > self.MAX_VOXELS:
+            sel = np.argpartition(counts, -self.MAX_VOXELS)[-self.MAX_VOXELS:]
+            keys, counts = keys[sel], counts[sel]
+        # Voxel centres: cell index * edge + half a cell (the cell's centre).
+        points = ((keys.astype(np.float32) + 0.5) * np.float32(self.VOXEL_M))
+        colors = self._green_by_height(points[:, 1])
+        return points.astype(np.float32), colors, cams
+
+    @staticmethod
+    def _green_by_height(y_opt: np.ndarray) -> np.ndarray:
+        """Optical ``+y`` (world-DOWN) per-voxel -> a GREEN height gradient (N,3).
+
+        ModalAI tints occupancy by height; we mimic that cheaply. Optical ``+y`` is
+        world-DOWN, so a LARGER ``y`` is LOWER (floor) and a SMALLER ``y`` is HIGHER
+        (ceiling). We normalise ``-y`` (so high = bright) across the current voxel
+        span and ramp a dark-green -> bright-green gradient with a slight blue lift
+        up high, all in [0,1]. Pure numpy, vectorised.
+        """
+        n = y_opt.shape[0]
+        if n == 0:
+            return np.zeros((0, 3), np.float32)
+        up = -np.asarray(y_opt, np.float32)            # height (up positive)
+        lo, hi = float(up.min()), float(up.max())
+        span = hi - lo
+        # Flat span (all one height) -> mid gradient; else normalise to [0,1].
+        h = (np.full(n, 0.5, np.float32) if span < 1e-6
+             else (up - lo) / span)
+        r = 0.05 + 0.10 * h                            # stays low (greenish)
+        g = 0.35 + 0.65 * h                            # dark -> bright green
+        b = 0.10 + 0.35 * h                            # slight blue lift up high
+        return np.clip(np.stack([r, g, b], axis=1), 0.0, 1.0).astype(np.float32)
+
+    # ------------------------------------------------------------------ #
+    def run(self) -> None:
+        """Coalesced rebuild loop with a "materially changed" emit guard.
+
+        Same throttle as the base, but skips the callback when the occupied-voxel
+        count did not change since the last emit -- so the GUI never re-uploads an
+        unchanged scatter to GL (the no-lag requirement). A new keyframe / slam.map
+        marks dirty; we rebuild (which folds new keyframes + counts occupied) and
+        emit ONLY if the occupied count moved.
+        """
+        period = 1.0 / self.REBUILD_HZ
+        while not self._stop.is_set():
+            if not self._dirty.wait(timeout=0.25):
+                continue
+            if self._stop.is_set():
+                break
+            self._dirty.clear()
+            try:
+                points, colors, cams = self._build()
+            except Exception:                          # noqa: BLE001
+                # A malformed keyframe must not kill the rebuild thread; skip it.
+                time.sleep(period)
+                continue
+            cb = self._cb
+            # Re-emit only when the occupied set MATERIALLY changed (count moved),
+            # so an idle dirty tick doesn't re-push the same cloud to GL.
+            if cb is not None and points.shape[0] != self._last_emit_occ:
+                self._last_emit_occ = int(points.shape[0])
+                cb(points, colors, cams)
+            self._stop.wait(period)
 
     # ------------------------------------------------------------------ #
     def _stop_extra_clients(self) -> None:
@@ -911,118 +978,6 @@ class IpcSlamMapSource(_KeyframeAccumulator):
                 client.stop()
             except Exception:                          # noqa: BLE001
                 pass
-
-
-# --------------------------------------------------------------------------- #
-# (3e) Floor-plan source (2D top-down occupancy raster) for FloorPlanWindow.
-# --------------------------------------------------------------------------- #
-class IpcFloorPlanSource(_KeyframeAccumulator):
-    """Build a 2D TOP-DOWN floor-plan raster of the room for FloorPlanWindow.
-
-    A LIGHT complement to the 3D landmark map (:class:`IpcSlamMapSource`):
-    instead of a 3D cloud (heavy GL, hard to read in perspective on this Mac),
-    this back-projects the SAME VIO keyframe
-    feed to world points and bins them onto the horizontal GROUND plane into a 2D
-    raster of the room's WALLS -- so the walls read as top-down marks (the room's
-    true shape, e.g. a square if the 4 walls were sensed) + the camera path,
-    rendered as a cheap 2D ``ImageItem`` (no ``GLViewWidget``). Pure CONSUMER of
-    the ``keyframe`` feed (no SLAM endpoint, no ``slam.map``); no new field, no
-    data-path change.
-
-    Reuses the inherited :class:`_KeyframeAccumulator` machinery WHOLESALE (the kf
-    ring attach + ``_on_keyframe`` stash + evict + the coalesced rebuild loop) --
-    only ONE VIO client, NO copy-paste of the SHM/recv code. This class adds ONLY
-    the 2D ground-plane wall build (delegated to :mod:`ui.viz.floor_plan`).
-
-    Build (:meth:`_build`, runs OFF the GUI thread):
-
-    1. Back-project EVERY stashed keyframe's (denoised) depth to world points by
-       its OWN VIO pose ``[R | t]`` (strided + the SAME depth gate + edge reject as
-       the 3D builders) -- :func:`~ui.viz.floor_plan.keyframes_to_ground_points`.
-    2. Bin the points onto the optical ``(x, z)`` GROUND plane (drop the vertical
-       optical ``+y``/DOWN axis), score each cell by its VERTICAL EXTENT
-       (``max_h - min_h``) and keep only the high-extent, well-supported cells as
-       WALL CELLS -- so the bright structure marks WHERE THE WALLS ARE, not the
-       swept-floor sensing horizon -- :func:`~ui.viz.floor_plan.build_floor_plan`.
-    3. Project ALL keyframe camera positions onto the SAME plane for the path
-       overlay.
-
-    The finished ``(rgb, path_px, cams, extent)`` go to the injected ``on_plan``
-    callback (the window marshals it onto the GUI thread via its thread-safe
-    ``submit``).
-
-    Connect-error model mirrors the other sources.
-    """
-
-    #: The 2D histogram build is CHEAP (a single ``np.add.at`` scatter, no triangle
-    #: stacking), so it can rebuild often -- 5 Hz keeps the plan snappy as keyframes
-    #: accumulate without burning CPU.
-    REBUILD_HZ = 5.0
-
-    def __init__(self, vio_endpoint: str, K: np.ndarray, *,
-                 connect_timeout_s: float = 10.0,
-                 width: int | None = None, height: int | None = None) -> None:
-        super().__init__(vio_endpoint, name=f"floor-plan-src-{vio_endpoint}",
-                         connect_timeout_s=connect_timeout_s,
-                         width=width, height=height)
-        self._K = np.asarray(K, dtype=np.float64).reshape(3, 3)
-
-    # ------------------------------------------------------------------ #
-    def start_plan(self, on_plan) -> None:
-        """Connect VIO's ``keyframe`` and stream floor plans to ``on_plan``.
-
-        ``on_plan(rgb (H,W,3) uint8, path_px (M,2) float32, cams (M,3) float32,
-        extent FloorPlanExtent)`` is invoked from this source's REBUILD thread (the
-        window marshals it onto the GUI thread). On connect failure :attr:`error`
-        is set and the thread is NOT started (the window polls it).
-        """
-        self._cb = on_plan
-        if not self._attach_or_fail():
-            return
-        vio_client = self._make_keyframe_client()
-        try:
-            vio_client.start()
-        except Exception as e:                                     # noqa: BLE001
-            self.error = f"Floor-plan stream connect failed: {e}"
-            try:
-                vio_client.stop()
-            except Exception:                                      # noqa: BLE001
-                pass
-            self._vio_client = None
-            if self._vio_rings is not None:
-                self._vio_rings.close()
-                self._vio_rings = None
-            return
-        self.start()                                  # spin the rebuild thread
-
-    # ------------------------------------------------------------------ #
-    def _build(self):
-        """Back-project the keyframes -> bin onto the ground plane -> raster.
-
-        Returns ``(rgb, path_px, cams, extent)``: the 2D occupancy raster, the
-        camera path projected to raster pixels, ALL VIO keyframe camera positions
-        (optical world) and the world<->pixel extent. Every stashed keyframe's
-        depth is used, back-projected by its OWN VIO pose; the floor-plan math is
-        the pure-numpy :mod:`ui.viz.floor_plan` (no GL, no Qt).
-        """
-        with self._lock:
-            # gray is unused for the plan (occupancy, not colour); the build needs
-            # only depth + each keyframe's own pose. Sort by source seq for a stable
-            # build order (the order doesn't affect the histogram, but keeps the
-            # camera path in capture order).
-            seqs = sorted(self._kf_depth)
-            depths = [self._kf_depth[s] for s in seqs]
-            Rs = [self._kf_R[s] for s in seqs]
-            ts = [self._kf_t[s] for s in seqs]
-            cam_ts = [self._kf_t[s] for s in self._kf_gray]
-        cams = (np.asarray(cam_ts, np.float32).reshape(-1, 3)
-                if cam_ts else np.zeros((0, 3), np.float32))
-
-        # Back-project every keyframe's gated, strided depth to world points, then
-        # bin onto the ground plane into the occupancy raster + camera path.
-        points = floor_plan.keyframes_to_ground_points(depths, Rs, ts, self._K)
-        rgb, path_px, extent = floor_plan.floor_plan_with_path(points, cams)
-        return rgb, path_px, cams, extent
 
 
 # --------------------------------------------------------------------------- #
@@ -1047,21 +1002,7 @@ def ipc_slam_map_factory(vio_endpoint: str, slam_endpoint: str, K: np.ndarray,
     Binds the VIO endpoint (the ``keyframe`` publisher + its kf rings), the SLAM
     endpoint (the ``slam.map`` corrected poses) and the rectified-left ``K`` from
     the retained calib bundle -- so the caller (``ui.main``) just opens MapWindow
-    and starts the returned source.
+    and starts the returned occupancy-voxel source.
     """
     return lambda: IpcSlamMapSource(vio_endpoint, slam_endpoint, K,
                                     width=width, height=height)
-
-
-def ipc_floor_plan_factory(vio_endpoint: str, K: np.ndarray,
-                           width: int, height: int):
-    """Return a zero-arg factory building an :class:`IpcFloorPlanSource`.
-
-    Binds the VIO endpoint (the ``keyframe`` publisher + its kf rings) and the
-    rectified-left ``K`` from the retained calib bundle -- so the caller
-    (``ui.main``) just opens FloorPlanWindow and starts the returned source. No
-    SLAM endpoint: the floor plan builds from the keyframe depth + each keyframe's
-    own VIO pose only (the same ``keyframe`` feed the SLAM-map source uses).
-    """
-    return lambda: IpcFloorPlanSource(vio_endpoint, K,
-                                      width=width, height=height)

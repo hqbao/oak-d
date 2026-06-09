@@ -34,6 +34,10 @@ and exercises each one offscreen:
 * **Visualize -> keypoint** -- open the
   :class:`~ui.qt.keypoints_window.KeypointTrackWindow` and assert >= 1
   ``KeypointSample`` arrives, then close.
+* **Visualize -> SLAM Map (3D room)** -- accumulate keyframes through an
+  :class:`~ui.modules.ipc_sources.IpcSlamMapSource`, run its temporal occupancy
+  fusion (``_build``), assert occupied voxel centres + green-by-height colours,
+  and that :class:`~ui.qt.map_window.MapWindow` ingests them without raising.
 * **Calibration -> Gyroscope Bias** -- driven at the adapter seam:
   :func:`test_imu_raw_source` publishes a known ``WireImuRaw`` batch on a test IPC
   server's ``imu.raw`` and asserts the :class:`~ui.modules.ipc_sources.IpcImuRawSource`
@@ -367,34 +371,37 @@ def _drain_samples(work_queue: "queue.Queue", timeout_s: float,
     return out
 
 
-def attach_floor_plan_source(vio_ep: str, bundle):
-    """Attach an :class:`IpcFloorPlanSource` to VIO's ``keyframe`` feed (no build).
+def attach_slam_map_source(vio_ep: str, slam_ep: str, bundle):
+    """Attach an :class:`IpcSlamMapSource` to VIO's ``keyframe`` feed (no build).
 
-    Returns the attached, subscribed source so the caller can let it accumulate
-    keyframes in the BACKGROUND WHILE the replay/VIO is still alive, then build
-    the plan + ``stop()`` it afterwards. VIO shuts down once the replay sends END,
-    so the floor-plan client must be up before that happens -- attaching it up
-    front is what makes the build see live kf rings.
+    Returns the attached, subscribed occupancy-voxel source so the caller can let
+    it accumulate keyframes in the BACKGROUND WHILE the replay/VIO is still alive,
+    then fuse + build the voxel map + ``stop()`` it afterwards. VIO shuts down once
+    the replay sends END, so the keyframe client must be up before that happens --
+    attaching it up front is what makes the build see live kf rings. (Only VIO's
+    ``keyframe`` client is started here; slam.map only re-colours the camera trail,
+    which the voxel build does not need for this coverage.)
     """
-    from ui.modules import IpcFloorPlanSource
+    from ui.modules import IpcSlamMapSource
 
     W, H, K = int(bundle.width), int(bundle.height), bundle.K
-    src = IpcFloorPlanSource(vio_ep, K, width=W, height=H, connect_timeout_s=20.0)
+    src = IpcSlamMapSource(vio_ep, slam_ep, K, width=W, height=H,
+                           connect_timeout_s=20.0)
     _check(src._attach_or_fail(),
-           f"floor-plan source attached VIO kf rings ({src.error})")
+           f"slam-map source attached VIO kf rings ({src.error})")
     client = src._make_keyframe_client()
     client.start()
     return src
 
 
-def build_floor_plan_from(src):
-    """Run the floor-plan source's OFF-thread ``_build`` ONCE and assert it.
+def build_slam_map_from(src):
+    """Run the occupancy-voxel source's OFF-thread ``_build`` ONCE and assert it.
 
-    Asserts the occupancy raster is valid (a real ``(H,W,3)`` uint8 image, a sane
-    world<->pixel extent, one camera path point per keyframe, some lit cell), then
-    returns ``(rgb, path_px, cams, extent)`` for the caller to feed the window.
-    Confirms the shared ``_KeyframeAccumulator`` base populates a SECOND source with
-    NO extra SHM/recv wiring. The caller ``stop()``s the source.
+    Asserts the persistent occupancy fusion produced occupied voxels (voxel centres
+    + green-by-height colours of matching length, one camera-path point per
+    keyframe), then returns ``(points, colors, cams)`` for the caller to feed the
+    window. Confirms the shared ``_KeyframeAccumulator`` base feeds the occupancy
+    map with the kf depth/pose feed. The caller ``stop()``s the source.
     """
     # Give the (already-subscribed) source time to drain keyframes out of VIO's kf
     # rings before we build -- capture has drained by now in the caller; this just
@@ -403,20 +410,25 @@ def build_floor_plan_from(src):
     while time.monotonic() < deadline and len(src._kf_depth) < 3:
         time.sleep(0.2)
     n_kf = len(src._kf_depth)
-    _check(n_kf >= 1, f"floor-plan source accumulated >=1 keyframe (got {n_kf})")
-    rgb, path_px, cams, extent = src._build()
-    _check(rgb.ndim == 3 and rgb.shape[2] == 3 and rgb.dtype == np.uint8,
-           f"floor-plan raster is (H,W,3) uint8 ({rgb.shape}, {rgb.dtype})")
-    _check(extent.width == rgb.shape[1] and extent.height == rgb.shape[0],
-           "floor-plan extent matches the raster dimensions")
-    _check(extent.cell_m > 0.0, f"floor-plan cell size is positive ({extent.cell_m})")
-    _check(len(path_px) == len(cams),
-           f"one camera-path pixel per keyframe ({len(path_px)} vs {len(cams)})")
-    # Some cell must be lit above the colormap's background floor (the room
-    # actually built, not an all-empty raster).
-    _check(int(rgb.max()) > 60,
-           f"floor-plan raster has lit (occupied) cells (max={int(rgb.max())})")
-    return rgb, path_px, cams, extent
+    _check(n_kf >= 1, f"slam-map source accumulated >=1 keyframe (got {n_kf})")
+    # This smoke run accumulates only a handful of keyframes (small --max-frames),
+    # so relax the occupancy gate to OCC_HITS=1 to PROVE the fuse -> build -> emit
+    # path produces voxels the window ingests; the >= OCC_HITS noise-rejection
+    # across many keyframes is proven separately in ui.tests.occupancy_selftest.
+    src.OCC_HITS = 1
+    points, colors, cams = src._build()
+    _check(points.ndim == 2 and points.shape[1] == 3
+           and points.dtype == np.float32,
+           f"voxel centres are (N,3) float32 ({points.shape}, {points.dtype})")
+    _check(colors.shape == points.shape and colors.dtype == np.float32,
+           f"voxel colours match the centres ({colors.shape} vs {points.shape})")
+    _check(cams.ndim == 2 and cams.shape[1] == 3 and len(cams) == n_kf,
+           f"one camera-path point per keyframe ({len(cams)} vs {n_kf})")
+    # The occupancy fusion must have produced some occupied voxels (the room
+    # actually built, not an all-empty grid) once a few keyframes agree.
+    _check(points.shape[0] > 0,
+           f"occupancy fusion produced occupied voxels (got {points.shape[0]})")
+    return points, colors, cams
 
 
 def test_menus(args) -> None:
@@ -534,34 +546,37 @@ def test_menus(args) -> None:
         print(f"    [ok] keypoint: {len(ksamples)} samples, SEQ "
               f"{k0.seq}..{ksamples[-1].seq}, max trk {max_trk}")
 
-        # Attach the Floor-Plan source's keyframe client NOW, so it accumulates
-        # keyframes in the background while VIO is still alive -- VIO shuts down
-        # once the replay ENDs, so its kf rings must be attached before then. We
-        # build + assert it in (e).
-        floor_src = attach_floor_plan_source(vio_ep, bundle)
+        # Attach the SLAM-Map (occupancy-voxel) source's keyframe client NOW, so it
+        # accumulates keyframes in the background while VIO is still alive -- VIO
+        # shuts down once the replay ENDs, so its kf rings must be attached before
+        # then. We fuse + build + assert it in (e).
+        slam_src = attach_slam_map_source(vio_ep, vio_ep, bundle)
 
-        # ---------- (e) Visualize -> Floor Plan (top-down) ----------
-        # Build the 2D occupancy raster from the keyframes the floor-plan source
-        # accumulated above, and assert FloorPlanWindow ingests it without raising.
-        # This window is a 2D PlotWidget (NO GLViewWidget) so it renders fine
-        # offscreen.
-        from ui.qt.floor_plan_window import FloorPlanWindow
+        # ---------- (e) Visualize -> SLAM Map (3D room) ----------
+        # Build the occupancy-voxel map from the keyframes the source accumulated
+        # above (temporal occupancy fusion -> occupied voxel centres + green-by-
+        # height colours), and assert MapWindow ingests it without raising. The
+        # GLViewWidget can't actually render offscreen here, but update() touching
+        # its GL items + the source's fusion math are what we exercise.
+        from ui.qt.map_window import MapWindow
         try:
-            frgb, fpath, fcams, fext = build_floor_plan_from(floor_src)
+            mpts, mcols, mcams = build_slam_map_from(slam_src)
         finally:
-            floor_src.stop()
-        fwin = FloorPlanWindow()
-        # update() touches the plot items; it must not raise on the GUI thread.
-        fwin.update(frgb, fpath, fcams, fext)
-        # Empty inputs exercise the early-return guard (no crash on a blank plan).
-        fwin.update(np.zeros((1, 1, 3), np.uint8), np.zeros((0, 2), np.float32),
-                    np.zeros((0, 3), np.float32), fext)
-        fwin.update(None, None, None, None)
+            slam_src.stop()
+        mwin = MapWindow(title="SLAM Map (3D room)")
+        # update() touches the GL scatter items; it must not raise on the GUI
+        # thread (GL paint is deferred; offscreen it just won't draw).
+        mwin.update(mpts, mcols, mcams)
+        # Empty inputs exercise the early-return / guard paths (no crash on a blank
+        # map or a colour/point length mismatch).
+        mwin.update(np.zeros((0, 3), np.float32), np.zeros((0, 3), np.float32),
+                    np.zeros((0, 3), np.float32))
+        mwin.update(None, None, None)
         app.processEvents()
-        fwin.close()
+        mwin.close()
         app.processEvents()
-        print(f"    [ok] floor-plan: {fext.width}x{fext.height} cells, "
-              f"{len(fcams)} cams on the path")
+        print(f"    [ok] slam-map: {len(mpts)} occupied voxels, "
+              f"{len(mcams)} cams on the path")
     finally:
         for w in (triplet_win, keypoint_win):
             if w is not None:

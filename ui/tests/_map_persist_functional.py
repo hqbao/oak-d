@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
-"""Functional probe: IpcSlamMapSource persistence-filter on a real replay.
+"""Functional probe: IpcSlamMapSource occupancy fusion on a real replay.
 
-Boots imu_camera(replay) + vio + slam over IPC on the corridor_60s session,
-drives a real :class:`~ui.modules.ipc_sources.IpcSlamMapSource` so it accumulates
-the per-keyframe gray/depth + VIO poses + tracks, then runs ``_build_cloud`` at
-several ``PERSIST_KF`` thresholds -- reporting the output point count + rebuild
-time at each. The cloud positions every landmark from the keyframe's own VIO pose
-over the DENSE VIO keyframe set (not the sparse slam.map subset), so the map
-populates. This is a developer/tester probe (not part of the assertion selftest);
-it prints numbers for the report.
+Boots imu_camera(replay) + vio + slam over IPC, drives a real
+:class:`~ui.modules.ipc_sources.IpcSlamMapSource` so it accumulates the
+per-keyframe depth + VIO poses, folds them into the PERSISTENT per-voxel
+hit-count grid (temporal occupancy fusion), then reports the OCCUPIED-voxel count
+at several ``OCC_HITS`` thresholds + the build (re-emit) time at each. The voxels
+are quantised from each keyframe's own VIO pose over the DENSE VIO keyframe set
+(not the sparse slam.map subset), so the grid populates.
+
+This is a developer/tester probe (not part of the assertion selftest); it prints
+numbers for the report. The OCC_HITS sweep proves the fusion both CLEANS the map
+(noise rejected) and SHRINKS the voxel count (vs OCC_HITS=1).
 
 Run::
 
@@ -63,10 +66,10 @@ def main() -> int:
         _await_calib_bundle(slam_ep, timeout_s=20.0)
         W, H = int(bundle.width), int(bundle.height)
         print(f"  capture {W}x{H}, kf_every={args.kf_every}, "
-              f"max_frames={args.max_frames}")
+              f"max_frames={args.max_frames}, VOXEL_M={IpcSlamMapSource.VOXEL_M}")
 
         # Drive a REAL source so it accumulates keyframes + corrected poses, but
-        # give it a no-op cloud sink (we call _build_cloud ourselves below).
+        # give it a no-op sink (we call _build ourselves below).
         src = IpcSlamMapSource(vio_ep, slam_ep, bundle.K, width=W, height=H,
                                connect_timeout_s=20.0)
         src.start_cloud(lambda p, c, cams: None)
@@ -81,24 +84,41 @@ def main() -> int:
         time.sleep(1.0)                          # let the last keyframes drain
 
         with src._lock:                          # noqa: SLF001 (probe)
-            n_kf = len(src._kf_gray)
-            # slam.map only places a SPARSE subset; the cloud no longer gates on it
-            # (positions come from each keyframe's own VIO pose), so this is just a
-            # diagnostic of how sparse SLAM's keyframe set is vs the VIO set.
-            n_placed = sum(1 for s in src._kf_gray if s in src._kf_corr_pos)
-        print(f"  accumulated VIO keyframes: {n_kf} "
-              f"({n_placed} also placed by slam.map)\n")
+            n_kf = len(src._kf_depth)
+        print(f"  accumulated VIO keyframes: {n_kf}\n")
 
-        # Sweep PERSIST_KF; time only the build (input is identical each time).
-        for persist in (3, 6, 10):
-            src.PERSIST_KF = persist             # instance override of the const
-            # Warm + timed run (numpy unique JIT-free, but be fair: 2 runs).
-            src._build_cloud()                   # noqa: SLF001 warm
+        # Fold every keyframe into the persistent grid ONCE (the real run does this
+        # incrementally as keyframes arrive). Time the fuse + report the grid size.
+        t0 = time.perf_counter()
+        src._build()                             # noqa: SLF001 (fold + count)
+        fuse_dt = time.perf_counter() - t0
+        with src._lock:                          # noqa: SLF001
+            n_cells = len(src._hits)
+        print(f"  persistent grid: {n_cells} touched cells  "
+              f"(initial fuse {fuse_dt * 1e3:7.1f} ms)\n")
+
+        # Sweep OCC_HITS; the grid is already fused, so _build just re-counts the
+        # occupied set + emits -- time that (the live per-tick cost). The count at
+        # OCC_HITS=1 == every touched cell; higher thresholds DROP the count
+        # (proving the temporal noise filter both cleans + shrinks the map).
+        print("  OCC_HITS sweep (occupied = raw cells >= gate; rendered = capped):")
+        with src._lock:                          # noqa: SLF001
+            grid = dict(src._hits)
+        for occ in (1, 2, 3, 5):
+            # Raw occupied count BEFORE the MAX_VOXELS render cap -- this is the
+            # number that proves the temporal fusion shrinks the map as the gate
+            # rises (the rendered count below is then clamped for the render load).
+            raw = sum(1 for c in grid.values() if c >= occ)
+            src.OCC_HITS = occ                   # instance override of the const
+            src._last_emit_occ = -1              # noqa: SLF001 force a re-count
+            src._build()                         # noqa: SLF001 warm
             t0 = time.perf_counter()
-            pts, cols, cams = src._build_cloud() # noqa: SLF001
+            pts, cols, cams = src._build()       # noqa: SLF001
             dt = time.perf_counter() - t0
-            print(f"  PERSIST_KF={persist:>2}: {pts.shape[0]:>7} points  "
-                  f"({cams.shape[0]} cams)  rebuild={dt * 1e3:7.1f} ms")
+            print(f"    OCC_HITS={occ:>2}: occupied={raw:>7}  "
+                  f"rendered={pts.shape[0]:>7}  ({cams.shape[0]} cams)  "
+                  f"rebuild={dt * 1e3:6.1f} ms  "
+                  f"render<=30k? {'yes' if pts.shape[0] <= 30_000 else 'NO'}")
         return 0
     finally:
         if src is not None:

@@ -83,8 +83,7 @@ long-lived trajectory sources use:
 | Camera + Depth + IMU triplet  | `IpcTripletWorker`           | capture · `imucam.sample`, `frame.depth` |
 | Keypoint Depth Tracker        | `IpcKeypointWorker`          | capture · `frame.depth`  +  vio · `frame.tracks`, `frame.inliers` |
 | Gyro Fusion (strip chart)     | `IpcGyroFuseSource`          | vio · `frame.gyrofuse` |
-| SLAM Map (landmarks)          | `IpcSlamMapSource`           | vio · `keyframe` (gray/depth/`track_ids`/`track_px`/`inlier_ids` via VIO's kf rings) + slam · `slam.map` (corrected poses) |
-| Floor Plan (top-down)         | `IpcFloorPlanSource`         | vio · `keyframe` (depth via VIO's kf rings) |
+| SLAM Map (3D room, voxel occupancy) | `IpcSlamMapSource`     | vio · `keyframe` (denoised depth via VIO's kf rings) + slam · `slam.map` (corrected poses) |
 
 The crucial design rule: **nothing but `imu_camera` opens the OAK-D**. The UI never
 fights capture for the device, and the UI process imports no depthai — it is
@@ -423,41 +422,32 @@ The menu is plain Qt (`QMenuBar` / `QAction`); `ui.main` calls
 - **Visualize** — **"Camera + Depth + IMU (triplet)…"** (`SyncedViewWindow`, driven
   by `IpcTripletWorker`), **"Keypoint Depth Tracker…"** (`KeypointTrackWindow`, driven
   by `IpcKeypointWorker`), **"Gyro Fusion (strip chart)…"** (`GyroFuseWindow`, driven
-  by `IpcGyroFuseSource`), and **"SLAM Map (landmarks)…"** (`MapWindow`, driven by
-  `IpcSlamMapSource` — the **sparse, ID-based landmark map**: ONE point per KLT track id
-  that was a PnP INLIER across ≥ `PERSIST_KF` (=20) SUCCESSIVE keyframes, re-snapped to
-  SLAM's loop-corrected poses, in the same ENU frame as `Viewer3D`; the gate is a
-  **longest-consecutive-keyframe-run** filter — `ui/viz/map_cloud.py::longest_consecutive_run`,
-  UI-only — so only consistently-tracked, motion-validated points show, NOT a dense
-  reconstruction), and **"Floor Plan (top-down)…"**
-  (`FloorPlanWindow`, driven by `IpcFloorPlanSource` — a **LIGHT 2D top-down
-  WALL raster**, NOT OpenGL). The floor plan is a cheap, readable alternative
-  to the 3D maps (heavy GL on a Mac, noisy in perspective): it back-projects each
-  keyframe's depth by its own VIO pose, drops the world-vertical optical-`+y` axis
-  to bin the points onto the optical `(x,z)` GROUND plane, then renders the **WALL
-  CELLS DIRECTLY** — a cell is a wall cell when its points span a tall vertical
-  column (`extent_m = max_h − min_h ≥ WALL_EXTENT_M`, the *wall = high vertical
-  extent* detector that excludes the flat floor) AND it has enough ray support
-  (`MIN_CELL_COUNT`). Those cells **are** the walls (thin marks, drawn directly),
-  cleaned of speckle by a *light* 2D `cv2` pass — a tiny `MORPH_OPEN` drops 1-cell
-  specks, `connectedComponentsWithStats` drops isolated noise blobs. Crucially it
-  **does NOT** `MORPH_CLOSE` or take a `MORPH_GRADIENT` outline: an earlier version
-  outlined the whole occupied region, but the camera sits ~centre and rotates, so
-  its limited-range noisy depth fills a roughly circular disc whose outline is just
-  the **sensing horizon** (a circle), not the walls. Rendering wall cells directly
-  lets the room's true shape emerge (a square if the 4 walls were sensed; partial
-  walls if only part was — honest). *Honest caveat on the gold OAK-D stereo: the
-  fused per-cell vertical span is large at nearly every cell (noisy/flying points +
-  real floor/ceiling/clutter fill the column across the swept disc), so the gate
-  cannot cleanly isolate walls on that data — `WALL_EXTENT_M` is tuned (~2.0 m) to
-  be selective rather than to draw a perfect square; on cleaner per-pixel depth (the
-  VL53 ToF target) the same gate resolves walls.* The bright wall cells are drawn
-  over a faint raw-occupancy context wash, with the **camera path** + latest-pose
-  marker on top. It uses a 2D pyqtgraph `PlotWidget` (`ImageItem` + `PlotDataItem`)
-  — **no `GLViewWidget`** — so it never stutters the UI, and the raster can be
-  written to a PNG with pure numpy/cv2 for offscreen visual verification. The builder
-  math is the pure-numpy+cv2 `ui/viz/floor_plan.py` (no Qt/GL). Each window is cached
-  so repeated opens reuse the one IPC source.
+  by `IpcGyroFuseSource`), and **"SLAM Map (3D room)…"** (`MapWindow`, driven by
+  `IpcSlamMapSource` — a **ModalAI/VOXL-style VOXEL OCCUPANCY map**: the room as clean
+  green voxel cubes (floor grid + walls + furniture as blocky voxels), in the same ENU
+  frame as `Viewer3D`). It is built by **temporal occupancy fusion** (OctoMap-style):
+  a **persistent** per-voxel **hit-count grid** that accumulates across keyframes. As
+  each keyframe arrives its denoised depth is back-projected by its own VIO pose
+  (strided + depth-gated + edge-rejected), every hit is quantised to a `VOXEL_M`
+  (≈0.10 m) cell, and that cell's count is **incremented** once per `(keyframe, cell)`
+  (never rebuilt from scratch — only the not-yet-fused keyframes are folded forward,
+  tracked by `_fused_seqs`). A cell is **OCCUPIED** (rendered) only once
+  `hit_count ≥ OCC_HITS` (=3) — the temporal noise filter: a real surface is
+  re-observed by many keyframes (survives), random stereo noise hits a cell once or
+  twice (rejected). That fusion both **cleans** the map and keeps the voxel count (and
+  render load) low. On the gold sessions the occupied count drops materially as the
+  gate rises (lab_loop_30s: 104k → 50k → 32k → 15k at OCC_HITS 1/2/3/5; corridor_60s:
+  134k → 58k → 33k → 13k), with the off-thread rebuild ~5–25 ms. **Render is
+  deliberately LIGHT** (every prior 3D GL map lagged): the voxels are a single
+  `GLScatterPlotItem` of large **square world-unit points** (`pxMode=False`,
+  `size` = the voxel edge) — far cheaper than an N-cube `GLMeshItem` — coloured by a
+  **green-by-height** gradient, **capped** at `MAX_VOXELS` (=30k; most-re-observed
+  win), rebuilt off the GUI thread, and re-emitted **only when the occupied set
+  materially changed** (so GL never re-uploads an unchanged cloud). All tunables
+  (`VOXEL_M`, `OCC_HITS`, `STRIDE`, depth gate, `MAX_VOXELS`) are exposed + commented.
+  *Future v2 (not implemented): free-space ray-carving (OctoMap miss updates) to clear
+  flying voxels a later ray sees through.* Each window is cached so repeated opens
+  reuse the one IPC source.
 - **Calibration** — **"Gyroscope Bias…"** (`GyroCalibDialog`) and **"Accelerometer
   (6-position)…"** (`AccelCalibDialog`). Each opens with a fresh `IpcImuRawSource`
   injected as its `stream`; the menu handler owns the stream and closes it in its
@@ -480,13 +470,15 @@ only the capture rings it needs, and surfaces a connect failure (capture down) a
 clear reason rather than a raw shared-memory path error.
 
 Beside these three duck-typed adapters, the same module hosts the **keyframe-map
-builder** sources — `IpcSlamMapSource` (sparse landmark cloud) and `IpcFloorPlanSource`
-(2D top-down WALL raster). Both subclass a shared `_KeyframeAccumulator` base
-(VIO `keyframe` ring attach + stash + evict + a coalesced off-GUI rebuild loop), so
-each adds **only** its own build (`_build`) with **no copy-paste** of the SHM/recv
-wiring; the floor-plan build
-delegates to the pure-numpy+cv2 `ui/viz/floor_plan.py` so its projection + wall-cell
-detection + speckle cleanup are testable headless.
+builder** source — `IpcSlamMapSource` (the voxel occupancy map). It subclasses a
+shared `_KeyframeAccumulator` base (VIO `keyframe` ring attach + stash + evict + a
+coalesced off-GUI rebuild loop), adding **only** the `slam.map` client + the temporal
+occupancy fusion + the voxel build (`_fuse_keyframe_locked` / `_build`), with **no
+copy-paste** of the SHM/recv wiring. The base is kept as a separate seam (rather than
+folded into the one current source) because it is the natural attach point for a
+second keyframe-fed map view and keeps the SHM/recv plumbing isolated from the map
+maths. The occupancy fusion is unit-tested headless (`ui/tests/occupancy_selftest.py`)
+and probed on the gold replays (`ui/tests/_map_persist_functional.py`).
 
 ### 6.4 Calibration semantic — "saves for the NEXT capture start"
 

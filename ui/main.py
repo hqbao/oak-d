@@ -576,11 +576,10 @@ def run_ui(*, vio_endpoint: str = DEFAULT_VIO_ENDPOINT,
     from ui.qt.keypoints_window import KeypointTrackWindow
     from ui.qt.gyrofuse_window import GyroFuseWindow
     from ui.qt.map_window import MapWindow
-    from ui.qt.floor_plan_window import FloorPlanWindow
     from ui.qt.calib_dialogs import GyroCalibDialog, AccelCalibDialog
     from ui.modules import (
         IpcImuRawSource, IpcGyroFuseSource, ipc_triplet_factory,
-        ipc_keypoint_factory, ipc_slam_map_factory, ipc_floor_plan_factory,
+        ipc_keypoint_factory, ipc_slam_map_factory,
     )
 
     # 1. Wait for VIO + SLAM to be ready (and learn the capture resolution).
@@ -795,13 +794,16 @@ def run_ui(*, vio_endpoint: str = DEFAULT_VIO_ENDPOINT,
     gyrofuse_act.triggered.connect(_open_gyrofuse)
     vis_menu.addAction(gyrofuse_act)
 
-    # SLAM Map (3D room): the room reconstructed from EVERY keyframe -- the fused
-    # back-projected keyframe depth cloud + keyframe camera positions, in the same
-    # ENU frame as the main Viewer3D. The IpcSlamMapSource consumes VIO's
-    # ``keyframe`` (gray/depth via VIO's kf rings) + SLAM's ``slam.map`` (corrected
-    # poses) and re-fuses on each correction; its callback hands each fused cloud
-    # to the window via the thread-safe `submit` (a queued signal onto the GUI
-    # thread). Cached on `win`; the source is stopped in run_ui's teardown.
+    # SLAM Map (3D room): a ModalAI/VOXL-style VOXEL OCCUPANCY map of the room
+    # (clean green voxel cubes -- floor grid + walls + furniture), in the same ENU
+    # frame as the main Viewer3D. The IpcSlamMapSource consumes VIO's ``keyframe``
+    # (denoised depth via VIO's kf rings) + SLAM's ``slam.map`` (corrected poses)
+    # and runs TEMPORAL OCCUPANCY FUSION (a persistent per-voxel hit-count grid;
+    # a cell is occupied only once >= OCC_HITS keyframes hit it, so noise is
+    # rejected and the voxel count stays low). Its callback hands each fresh voxel
+    # set to the window via the thread-safe `submit` (a queued signal onto the GUI
+    # thread); the window renders light square world-unit points. Cached on `win`;
+    # the source is stopped in run_ui's teardown.
     def _open_slam_map() -> None:
         if getattr(win, "_slam_map_win", None) is None:
             win._slam_map_win = MapWindow(title="SLAM Map (3D room)")
@@ -828,42 +830,6 @@ def run_ui(*, vio_endpoint: str = DEFAULT_VIO_ENDPOINT,
     slam_map_act = QAction("SLAM Map (3D room)…", win)
     slam_map_act.triggered.connect(_open_slam_map)
     vis_menu.addAction(slam_map_act)
-
-    # Floor Plan (top-down): the SAME mapped space, but rendered as a LIGHT 2D
-    # top-down WALL raster (NO OpenGL) -- the walls read as top-down marks (the
-    # room's true shape) + the camera path -- so the room layout is clear AND the
-    # view never stutters (the 3D maps are heavy GL on this Mac and noisy in
-    # perspective). The IpcFloorPlanSource consumes VIO's ``keyframe`` (depth via
-    # VIO's kf rings) only, back-projects each keyframe's depth by its own VIO pose,
-    # drops the world-vertical axis to bin the points onto the ground plane, and
-    # keeps the high-vertical-extent cells as walls; its callback hands each raster
-    # thread-safe `submit` (a queued signal onto the GUI thread). Cached on `win`;
-    # the source is stopped in run_ui's teardown (mirrors the SLAM-Map entry).
-    def _open_floor_plan() -> None:
-        if getattr(win, "_floor_plan_win", None) is None:
-            win._floor_plan_win = FloorPlanWindow(title="Floor Plan (top-down)")
-        fwin = win._floor_plan_win
-        # (Re)start the source on every open (one-shot per run, like the 3D maps):
-        # stop a prior one before spawning a fresh one.
-        old = getattr(win, "_floor_plan_src", None)
-        if old is not None:
-            try:
-                old.stop()
-            except Exception:                                      # noqa: BLE001
-                pass
-        src = ipc_floor_plan_factory(vio_endpoint, vio_bundle.K, W, H)()
-        win._floor_plan_src = src
-        src.start_plan(fwin.submit)
-        if src.error:
-            win.statusBar().showMessage(f"Floor plan: {src.error}", 4000)
-        fwin.show()
-        fwin.raise_()
-        fwin.activateWindow()
-        win.statusBar().showMessage("Floor Plan (top-down) opened.", 2500)
-
-    floor_plan_act = QAction("Floor Plan (top-down)…", win)
-    floor_plan_act.triggered.connect(_open_floor_plan)
-    vis_menu.addAction(floor_plan_act)
 
     # Calibration: each wizard gets a FRESH IPC IMU source (capture's raw imu.raw)
     # and a modal dialog. We inject `stream=src`, which sets the dialog's
@@ -957,21 +923,19 @@ def run_ui(*, vio_endpoint: str = DEFAULT_VIO_ENDPOINT,
         # process alive after `app.exec()` returns.
         vio_source.stop()
         tracker.stop()
-        # The SLAM-map + Floor-plan sources are standalone threads (their windows
-        # are plain QMainWindows with no closeEvent worker-stop), so stop them
-        # explicitly here.
-        for _src_attr in ("_slam_map_src", "_floor_plan_src"):
-            _src = getattr(win, _src_attr, None)
-            if _src is not None:
-                try:
-                    _src.stop()
-                except Exception:                                  # noqa: BLE001
-                    pass
+        # The SLAM-map source is a standalone thread (its window is a plain
+        # QMainWindow with no closeEvent worker-stop), so stop it explicitly here.
+        _src = getattr(win, "_slam_map_src", None)
+        if _src is not None:
+            try:
+                _src.stop()
+            except Exception:                                      # noqa: BLE001
+                pass
         # Close any Visualize child windows so their IPC workers stop cleanly
         # (closeEvent stops the worker). The calib dialogs are modal + scoped to
         # their handler's `finally`, so there's nothing to clean up for them here.
         for _attr in ("_triplet_win", "_keypoints_win", "_gyrofuse_win",
-                      "_slam_map_win", "_floor_plan_win"):
+                      "_slam_map_win"):
             _w = getattr(win, _attr, None)
             if _w is not None:
                 try:
