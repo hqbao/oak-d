@@ -3,10 +3,12 @@
 
 Boots imu_camera(replay) + vio + slam over IPC on the corridor_60s session,
 drives a real :class:`~ui.modules.ipc_sources.IpcSlamMapSource` so it accumulates
-the per-keyframe gray/depth + corrected poses, then runs ``_build_cloud`` at
+the per-keyframe gray/depth + VIO poses + tracks, then runs ``_build_cloud`` at
 several ``PERSIST_KF`` thresholds -- reporting the output point count + rebuild
-time at each. This is a developer/tester probe (not part of the assertion
-selftest); it prints numbers for the report.
+time at each. The cloud positions every landmark from the keyframe's own VIO pose
+over the DENSE VIO keyframe set (not the sparse slam.map subset), so the map
+populates. This is a developer/tester probe (not part of the assertion selftest);
+it prints numbers for the report.
 
 Run::
 
@@ -80,12 +82,15 @@ def main() -> int:
 
         with src._lock:                          # noqa: SLF001 (probe)
             n_kf = len(src._kf_gray)
+            # slam.map only places a SPARSE subset; the cloud no longer gates on it
+            # (positions come from each keyframe's own VIO pose), so this is just a
+            # diagnostic of how sparse SLAM's keyframe set is vs the VIO set.
             n_placed = sum(1 for s in src._kf_gray if s in src._kf_corr_pos)
-        print(f"  accumulated keyframes: {n_kf} "
-              f"({n_placed} placed by slam.map)\n")
+        print(f"  accumulated VIO keyframes: {n_kf} "
+              f"({n_placed} also placed by slam.map)\n")
 
         # Sweep PERSIST_KF; time only the build (input is identical each time).
-        for persist in (5, 10, 20):
+        for persist in (3, 6, 10):
             src.PERSIST_KF = persist             # instance override of the const
             # Warm + timed run (numpy unique JIT-free, but be fair: 2 runs).
             src._build_cloud()                   # noqa: SLF001 warm

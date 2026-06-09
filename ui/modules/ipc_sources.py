@@ -395,29 +395,31 @@ class IpcSlamMapSource(threading.Thread):
     * ``keyframe`` (VIO) -> per keyframe ``seq`` we keep its gray image + metric
       depth (``read_copy``-ed out of VIO's kf rings by the converter), the ids +
       pixels of its KLT tracks (``track_ids`` / ``track_px``), the subset PnP kept
-      as INLIERS this frame (``inlier_ids``) and the ROTATION of its
-      ``T_world_cam``. The keyframe rate is low (kf_every), so a bounded dict of
-      the last :data:`MAX_KEYFRAMES` keyframes caps memory.
-    * ``slam.map`` (SLAM) -> the CONTINUOUS per-keyframe CORRECTED positions,
-      keyed by source frame seq (``kf_seqs`` aligned with ``kf_positions``). We use
-      these corrected translations -- not the raw VIO keyframe pose -- so the map
-      re-snaps after every loop closure.
+      as INLIERS this frame (``inlier_ids``) and the FULL POSE (rotation AND
+      translation) of its ``T_world_cam``. The keyframe rate is low (kf_every), so a
+      bounded dict of the last :data:`MAX_KEYFRAMES` keyframes caps memory.
+    * ``slam.map`` (SLAM) -> the CONTINUOUS per-keyframe loop-closure-corrected
+      positions, keyed by source frame seq. Retained (and kept fresh) as the source
+      of truth for a future corrected-map variant + diagnostics, but it does NOT
+      position the cloud: the SLAM backend only places a SPARSE subset of keyframes
+      (~1 in ~18), so gating on it starved the persistence run (see below).
 
-    The fused pose per keyframe is therefore ``[R_keyframe | t_corrected]``:
-    SLAM's overlay carries only the corrected camera POSITION (a ``(3,)`` per
-    keyframe), so we keep each keyframe's own rotation and swap in the corrected
-    translation. That is enough to re-anchor every back-projected landmark to the
-    loop-corrected map (orientation drift between corrections is negligible at
-    keyframe spacing).
+    The cloud positions every keyframe from its OWN VIO pose ``[R_keyframe |
+    t_keyframe]`` (``_kf_R`` / ``_kf_t``), so a landmark's observations across
+    keyframes never mix two pose sources -> a consistent, seam-free odom-frame map.
+    (Re-anchoring to the loop-corrected ``slam.map`` translations is a deliberate
+    later step; positioning from one source first is what makes the map populate.)
 
     Cloud build (TRACK-ID persistence -- see :meth:`_build_cloud`):
 
-    1. Order the kept keyframes by ``seq`` and give each a 0-based sequential
-       index ``k`` -- the index the consecutive-run gate counts in.
+    1. Order ALL VIO keyframes (every ``--kf-every`` frames) by ``seq`` and give
+       each a 0-based sequential index ``k`` -- the index the consecutive-run gate
+       counts in. Counting over the DENSE VIO keyframes (not the sparse ``slam.map``
+       subset) is what lets a KLT track reach :data:`PERSIST_KF` consecutive.
     2. For each keyframe ``k`` and each ``track_id`` in its ``inlier_ids``: look up
        the track's pixel (``track_ids`` -> ``track_px``), sample ``depth_m`` there,
        back-project with the pinhole and transform to the world by
-       ``[R_keyframe | t_corrected]``; record ``(k, world_xyz, gray)`` under that
+       ``[R_keyframe | t_keyframe]``; record ``(k, world_xyz, gray)`` under that
        ``track_id``. So we accumulate, per landmark, every keyframe it was an
        inlier in (with a world observation + colour).
     3. For each landmark, take the SET of keyframe indices it was an inlier in and
@@ -502,10 +504,14 @@ class IpcSlamMapSource(threading.Thread):
         self._kf_gray: dict[int, np.ndarray] = {}
         self._kf_depth: dict[int, np.ndarray] = {}
         self._kf_R: dict[int, np.ndarray] = {}        # (3,3) keyframe rotation
+        self._kf_t: dict[int, np.ndarray] = {}        # (3,) VIO keyframe translation
         self._kf_track_ids: dict[int, np.ndarray] = {}   # (N,) track ids
         self._kf_track_px: dict[int, np.ndarray] = {}    # (N,2) pixels, id-aligned
         self._kf_inlier_ids: dict[int, np.ndarray] = {}  # (M,) PnP inlier ids
-        # Latest corrected camera positions from slam.map, keyed by seq.
+        # Latest loop-closure-corrected camera positions from slam.map, keyed by
+        # seq. NOT used to position the cloud (the cloud builds from the VIO
+        # keyframe's own pose for a seam-free odom-frame map); retained as the
+        # source of truth for the future corrected-map variant + diagnostics.
         self._kf_corr_pos: dict[int, np.ndarray] = {}
 
     # ------------------------------------------------------------------ #
@@ -567,13 +573,14 @@ class IpcSlamMapSource(threading.Thread):
 
     # ------------------------------------------------------------------ #
     def _on_keyframe(self, wm) -> None:
-        """VIO recv thread: stash one keyframe's gray/depth + rotation + tracks.
+        """VIO recv thread: stash one keyframe's gray/depth + FULL pose + tracks.
 
         The landmark map is built from the PnP-inlier track ids of each keyframe
         (pixels back-projected through the depth map, gray for colour), so we keep
-        the gray/depth grid, the keyframe's rotation, and the track snapshot
-        (``track_ids`` / ``track_px`` / ``inlier_ids``). The corrected translation
-        comes from ``slam.map``.
+        the gray/depth grid, the keyframe's pose (rotation AND translation), and
+        the track snapshot (``track_ids`` / ``track_px`` / ``inlier_ids``). The
+        cloud positions from the VIO keyframe's OWN pose so every observation of a
+        landmark uses one consistent odom-frame pose source (no seams).
         """
         if wm is END:
             return
@@ -581,13 +588,18 @@ class IpcSlamMapSource(threading.Thread):
         if kf is END:                                 # WireEnd -> local END
             return
         seq = int(kf.seq)
-        R = np.asarray(kf.T_world_cam, dtype=np.float64)[:3, :3].copy()
+        # Split the (4,4) VIO world<-cam pose into rotation + translation; the
+        # cloud builds from BOTH (Xw = R Xc + t) so positions stay self-consistent.
+        T = np.asarray(kf.T_world_cam, dtype=np.float64)
+        R = T[:3, :3].copy()
+        t = T[:3, 3].copy()
         # The track snapshot is OPTIONAL on the wire (a keyframe may carry None);
         # store it as-is and let _build_cloud skip keyframes lacking it.
         with self._lock:
             self._kf_gray[seq] = kf.gray_left          # already a private copy
             self._kf_depth[seq] = kf.depth_m
             self._kf_R[seq] = R
+            self._kf_t[seq] = t
             self._kf_track_ids[seq] = kf.track_ids
             self._kf_track_px[seq] = kf.track_px
             self._kf_inlier_ids[seq] = kf.inlier_ids
@@ -595,7 +607,12 @@ class IpcSlamMapSource(threading.Thread):
         self._dirty.set()
 
     def _on_slammap(self, wm) -> None:
-        """SLAM recv thread: refresh the corrected per-keyframe positions."""
+        """SLAM recv thread: refresh the loop-closure-corrected positions.
+
+        These are kept fresh for the future corrected-map variant + diagnostics
+        only; the cloud is positioned from each keyframe's own VIO pose (see
+        :meth:`_build_cloud`), so this does NOT gate or move the rendered map.
+        """
         if wm is END:
             return
         smap = to_local(topics.SLAM_MAP, wm, RingRegistry())   # POD, no rings
@@ -621,18 +638,27 @@ class IpcSlamMapSource(threading.Thread):
             self._kf_gray.pop(seq, None)
             self._kf_depth.pop(seq, None)
             self._kf_R.pop(seq, None)
+            self._kf_t.pop(seq, None)
             self._kf_track_ids.pop(seq, None)
             self._kf_track_px.pop(seq, None)
             self._kf_inlier_ids.pop(seq, None)
+            self._kf_corr_pos.pop(seq, None)
 
     # ------------------------------------------------------------------ #
     def _build_cloud(self):
-        """Build the sparse landmark cloud by TRACK-ID persistence (CORRECTED poses).
+        """Build the sparse landmark cloud by TRACK-ID persistence (VIO poses).
 
         Returns ``(points, colors, cams)`` (points/colors empty when no landmark
-        qualifies). Only keyframes that have BOTH a stashed gray/depth/track
-        snapshot AND a corrected position from slam.map are used -- a keyframe SLAM
-        hasn't placed yet is skipped (not drawn at a stale raw pose).
+        qualifies). EVERY VIO keyframe with a stashed gray/depth/track snapshot is
+        used -- positioned from its OWN VIO pose ``[R | t]`` (``_kf_R`` / ``_kf_t``),
+        NOT from the sparse ``slam.map`` subset. VIO emits a keyframe every
+        ``--kf-every`` frames (dense), whereas the SLAM backend only places a coarse
+        subset (~1 in ~18); gating the persistence run on that sparse subset meant a
+        KLT track (living tens of frames -> only ~2 SLAM keyframes) could NEVER reach
+        :data:`PERSIST_KF` consecutive, so the map stayed empty. Counting over the
+        DENSE VIO keyframes lets a track that persists ``PERSIST_KF`` successive
+        keyframes qualify. Using one pose source (the keyframe's own) for every
+        observation keeps a landmark's positions self-consistent -> no seams.
 
         Track-id persistence (see class docstring):
 
@@ -641,7 +667,7 @@ class IpcSlamMapSource(threading.Thread):
         2. Per keyframe ``k``, per ``track_id`` in its ``inlier_ids``: find the
            track's pixel (``track_ids`` -> ``track_px``), sample ``depth_m`` there,
            back-project with the pinhole (``X=(u-cx)/fx*z``, ``Y=(v-cy)/fy*z``,
-           ``Z=z``) and transform to the world by ``[R_keyframe | t_corrected]``.
+           ``Z=z``) and transform to the world by ``[R_keyframe | t_keyframe]``.
            Record ``(k, world_xyz, gray)`` under that ``track_id`` (skip ids with
            no/invalid depth or off-grid pixel).
         3. Per landmark, the SET of keyframe indices it was an inlier in -> its
@@ -651,26 +677,25 @@ class IpcSlamMapSource(threading.Thread):
            observations (robust to a stray), with mean colour.
         """
         with self._lock:
-            corr = dict(self._kf_corr_pos)
-            # Keep only keyframes with a corrected position AND a full snapshot
-            # (gray/depth always present once stashed; track ids may be None on the
-            # wire). Sort by SOURCE FRAME SEQ so the 0-based index ``k`` reflects
-            # true keyframe order regardless of dict insertion / eviction.
+            # Use EVERY VIO keyframe that carries a full track snapshot (gray/depth
+            # always present once stashed; track ids may be None on the wire). NO
+            # ``slam.map`` gate -- positions come from each keyframe's own VIO pose.
+            # Sort by SOURCE FRAME SEQ so the 0-based index ``k`` reflects true
+            # keyframe order regardless of dict insertion / eviction.
             seqs = sorted(s for s in self._kf_gray
-                          if s in corr
-                          and self._kf_inlier_ids.get(s) is not None
+                          if self._kf_inlier_ids.get(s) is not None
                           and self._kf_track_ids.get(s) is not None
                           and self._kf_track_px.get(s) is not None)
             grays = [self._kf_gray[s] for s in seqs]
             depths = [self._kf_depth[s] for s in seqs]
             Rs = [self._kf_R[s] for s in seqs]
-            ts = [corr[s] for s in seqs]
+            ts = [self._kf_t[s] for s in seqs]
             track_ids = [self._kf_track_ids[s] for s in seqs]
             track_px = [self._kf_track_px[s] for s in seqs]
             inlier_ids = [self._kf_inlier_ids[s] for s in seqs]
-            # Cams = ALL placed keyframes (even ones without a usable track
+            # Cams = ALL VIO keyframe positions (even ones without a usable track
             # snapshot) so the camera trail stays complete.
-            cam_ts = [corr[s] for s in self._kf_gray if s in corr]
+            cam_ts = [self._kf_t[s] for s in self._kf_gray]
         cams = (np.asarray(cam_ts, np.float32).reshape(-1, 3)
                 if cam_ts else np.zeros((0, 3), np.float32))
         if not seqs:
@@ -715,7 +740,7 @@ class IpcSlamMapSource(threading.Thread):
                 continue
             u, v, z, sel_ids = u[ok], v[ok], z[ok], sel_ids[ok]
             # Pinhole back-projection to the camera frame, then to world by the
-            # fused pose [R_keyframe | t_corrected] (Xw = R Xc + t).
+            # keyframe's own VIO pose [R_keyframe | t_keyframe] (Xw = R Xc + t).
             cam = np.stack([(u - cx) * z / fx, (v - cy) * z / fy, z], axis=1)
             world = cam @ Rs[k].T + ts[k]                       # (m, 3)
             gray_k = grays[k]
