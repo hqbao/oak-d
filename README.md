@@ -372,14 +372,26 @@ The menu bar renders **in-window on every platform** (`setNativeMenuBar(False)`)
     `[L_MIN, L_MAX]`. The grid is never rebuilt from scratch, only folded forward
     (`_fused_seqs`).
   - **This is the self-cleaning bit the user asked for:** a voxel that stereo noise
-    wrongly added (e.g. the garbage cone on a textureless ceiling) is later **crossed**
-    by rays from new viewpoints (the camera can now see *through* it), so its log-odds
-    is driven back **below** `L_OCC_THRESH` and the voxel **disappears** — the map
-    removes already-added points once they're detected invalid. A cell is **OCCUPIED**
-    (rendered) when `log_odds ≥ L_OCC_THRESH`. On the gold `corridor_60s` (whole
-    replay) carving removes **~40 %** of the occupied voxels vs the no-carving build
-    (332k → 199k) — lower, cleaner — and the per-keyframe fuse stays **~38 ms mean /
-    ~56 ms max** off the GUI thread.
+    wrongly added (e.g. the garbage cone on a textureless ceiling) **in reachable free
+    space** is later **crossed** by rays from new viewpoints (the camera can now see
+    *through* it), so its log-odds is driven back **below** `L_OCC_THRESH` and the voxel
+    **disappears** — the map removes already-added points once they're detected invalid.
+  - **A SEPARATE, higher RENDER confidence gate handles the noise carving _can't_
+    reach:** the spray *behind a wall* is never crossed (rays stop at the wall surface;
+    nothing carves the space behind it), but it is only ever hit once or twice =
+    **LOW** log-odds, whereas the wall is a consistently-observed surface re-hit by many
+    rays = **HIGH** log-odds that saturates near `L_MAX`. So the occupancy UPDATE math
+    is left untouched (a cell is **internally OCCUPIED** when `log_odds ≥ L_OCC_THRESH`
+    so carving keeps working), but the VIEW **renders only `log_odds ≥ L_DISPLAY`** (a
+    new tunable set **higher**, default **+2.0** vs `L_OCC_THRESH`=+0.5). The wall clears
+    `L_DISPLAY` and stays crisp; the behind-wall spray stays below it and drops out of
+    the view. The gate was chosen from a PNG sweep on `corridor_60s` (top-down + side
+    views at `L_DISPLAY` ∈ {+0.5, +1.5, +2.0, +2.5}; voxel count 190k → 77k → 52k → 46k):
+    +2.0 removes the behind-wall tail while keeping the wall solid; +2.5 starts thinning
+    the real surface for little further gain (`ui/tests/_map_display_sweep.py`).
+  - On the gold `corridor_60s` (whole replay) carving removes **~40 %** of the occupied
+    voxels vs the no-carving build (332k → 199k) — lower, cleaner — and the per-keyframe
+    fuse stays **~38 ms mean / ~56 ms max** off the GUI thread.
   - *Render is deliberately LIGHT* (every prior 3D GL map lagged): the voxels are a
     single `GLScatterPlotItem` of large **SQUARE world-unit points** (`pxMode=False`,
     `size` = the voxel edge) — far cheaper to upload + paint than an N-cube
@@ -391,7 +403,7 @@ The menu bar renders **in-window on every platform** (`setNativeMenuBar(False)`)
     and the source re-emits **only when the occupied set materially changed** — so the
     GUI never re-uploads an unchanged cloud.
   - All tunables (`VOXEL_M`, `STRIDE`, depth gate; `L_OCC`/`L_FREE`/`L_MIN`/`L_MAX`/
-    `L_OCC_THRESH`; `MAX_VOXELS`) are exposed + commented on `IpcSlamMapSource`
+    `L_OCC_THRESH`/`L_DISPLAY`; `MAX_VOXELS`) are exposed + commented on `IpcSlamMapSource`
     (`ui/modules/ipc_sources.py`). Carving cost is mitigated by the vectorised DDA, the
     `STRIDE` ray cap, and the `MAX_DEPTH_M` carve-range cap. The window reuses the
     shared VIO `keyframe` feed via the `_KeyframeAccumulator` base (the SHM ring attach

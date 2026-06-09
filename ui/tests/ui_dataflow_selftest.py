@@ -411,11 +411,17 @@ def build_slam_map_from(src):
         time.sleep(0.2)
     n_kf = len(src._kf_depth)
     _check(n_kf >= 1, f"slam-map source accumulated >=1 keyframe (got {n_kf})")
-    # This smoke run just PROVES the fuse -> build -> emit path produces voxels the
-    # window ingests. The log-odds fusion occupies a cell from a single un-carved
-    # hit (L_OCC=0.85 > L_OCC_THRESH=0.5), so even a handful of keyframes yields
-    # occupied voxels; the free-space ray CARVING (noise removal) across many
-    # keyframes is proven separately in ui.tests.occupancy_selftest.
+    # This smoke run just PROVES the fuse -> build -> emit path runs and the window
+    # ingests its output. The log-odds fusion occupies a grid cell from a single
+    # un-carved hit (L_OCC=0.85 > L_OCC_THRESH=0.5), so even a handful of keyframes
+    # FUSES the grid (the INTERNAL occupied set is non-empty); we assert THAT here.
+    # The RENDER, however, is gated HIGHER at L_DISPLAY (only HIGH-confidence,
+    # many-times-re-observed surfaces show -- the behind-wall noise filter), so with
+    # only a few keyframes the RENDERED count may legitimately be 0; the displayed
+    # count + the wall/noise separation are proven on the FULL corridor in
+    # ui.tests._map_display_sweep, and the carving (noise removal) in
+    # ui.tests.occupancy_selftest. So here we check the build's OUTPUT shapes (always
+    # valid) + that fusion actually happened (internal occupied set non-empty).
     points, colors, cams = src._build()
     _check(points.ndim == 2 and points.shape[1] == 3
            and points.dtype == np.float32,
@@ -424,10 +430,15 @@ def build_slam_map_from(src):
            f"voxel colours match the centres ({colors.shape} vs {points.shape})")
     _check(cams.ndim == 2 and cams.shape[1] == 3 and len(cams) == n_kf,
            f"one camera-path point per keyframe ({len(cams)} vs {n_kf})")
-    # The occupancy fusion must have produced some occupied voxels (the room
-    # actually built, not an all-empty grid) once a few keyframes agree.
-    _check(points.shape[0] > 0,
-           f"occupancy fusion produced occupied voxels (got {points.shape[0]})")
+    # The occupancy fusion must have folded the keyframes into the grid (the room
+    # actually built, not an all-empty grid) -- assert the INTERNAL occupied set
+    # (>= L_OCC_THRESH), which a single hit clears, rather than the higher RENDER
+    # gate that a few keyframes need not yet reach.
+    with src._lock:                                            # noqa: SLF001
+        n_internal = sum(1 for lo in src._log.values()        # noqa: SLF001
+                         if lo >= src.L_OCC_THRESH)
+    _check(n_internal > 0,
+           f"occupancy fusion produced internally-occupied voxels (got {n_internal})")
     return points, colors, cams
 
 

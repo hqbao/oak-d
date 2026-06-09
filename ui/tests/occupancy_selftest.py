@@ -17,6 +17,11 @@ hand-checkable) and assert:
   OCCUPIED (log_odds > 0),
 * CARVING REMOVES A VOXEL: a cell hit once (+L_OCC) then crossed by 2 rays (+2*L_FREE)
   drops BELOW L_OCC_THRESH and is no longer occupied (the core behaviour),
+* the RENDER CONFIDENCE GATE separates the wall from the behind-wall spray: a
+  HIGH-confidence voxel (re-hit many times -> log_odds >= L_DISPLAY) RENDERS, while a
+  LOW-confidence-but-occupied voxel (log_odds in [L_OCC_THRESH, L_DISPLAY), e.g. the
+  behind-wall noise carving can't reach) is in the internal occupied set but is NOT
+  rendered -- and crucially the grid KEEPS that low evidence so carving still works,
 * log-odds are CLAMPED to [L_MIN, L_MAX] (so a long dwell can't pin a cell un-carvably
   high, and free evidence can't run off to -inf),
 * fusion is INCREMENTAL (a new keyframe only folds itself; never rebuilds),
@@ -81,6 +86,32 @@ def _occupied_cells(src: IpcSlamMapSource) -> set:
     """The set of integer cell keys currently OCCUPIED (log_odds >= L_OCC_THRESH)."""
     th = src.L_OCC_THRESH
     return {k for k, lo in src._log.items() if lo >= th}        # noqa: SLF001
+
+
+def _rendered_cells(src: IpcSlamMapSource) -> set:
+    """The set of cell keys ``_build`` would RENDER (log_odds >= L_DISPLAY).
+
+    Recovers the integer voxel keys from the emitted voxel CENTRES so the test
+    asserts the actual render output, not just the internal grid.
+    """
+    pts, _, _ = src._build()                                    # noqa: SLF001
+    if pts.shape[0] == 0:
+        return set()
+    keys = np.round(pts / src.VOXEL_M - 0.5).astype(int)
+    return {tuple(int(c) for c in k) for k in keys}
+
+
+def _seed_to_display(src: IpcSlamMapSource, cell: tuple, *,
+                     hits: int) -> None:
+    """Push ``cell`` up by ``hits`` HIT updates (clamped), as repeated keyframes would.
+
+    Lets a test build a cell to a chosen confidence (e.g. enough hits to clear
+    L_DISPLAY for a 'wall', or just one/two for low-confidence 'behind-wall noise').
+    """
+    lmin, lmax = src.L_MIN, src.L_MAX
+    for _ in range(hits):
+        v = src._log.get(cell, 0.0) + src.L_OCC                 # noqa: SLF001
+        src._log[cell] = max(lmin, min(lmax, v))                # noqa: SLF001
 
 
 # --------------------------------------------------------------------------- #
@@ -189,6 +220,59 @@ def test_carving_removes_a_crossed_voxel() -> None:
            f"={src.L_OCC_THRESH} (carving wins)")
 
 
+def test_render_confidence_gate_separates_wall_from_spray() -> None:
+    """The RENDER gate L_DISPLAY shows a HIGH-confidence wall but NOT a low-confidence
+    behind-wall voxel -- while the grid KEEPS the low evidence so carving still works.
+
+    This is the principled fix for the behind-the-wall noise: carving cannot reach the
+    space behind the wall (rays stop at the surface), so we separate by CONFIDENCE.
+    A consistently-observed wall is re-hit many times -> log_odds >= L_DISPLAY -> it
+    renders. The sporadic behind-wall spray is hit only once or twice -> its log_odds
+    stays in [L_OCC_THRESH, L_DISPLAY) -> it is in the INTERNAL occupied set but is
+    filtered OUT of the render.
+    """
+    print("\n  render gate: a high-confidence wall renders; a low-confidence "
+          "behind-wall voxel does NOT")
+    src = _make_source()
+    # Sanity on the tuning itself: the render gate must sit strictly ABOVE the internal
+    # occupied threshold (a separate, higher gate), and high enough that 1-2 hits do
+    # NOT clear it (so sporadic noise is filtered) while it stays under L_MAX (so a
+    # re-observed surface can climb past it and render).
+    _check(src.L_DISPLAY > src.L_OCC_THRESH,
+           f"L_DISPLAY ({src.L_DISPLAY}) is a SEPARATE, higher gate than "
+           f"L_OCC_THRESH ({src.L_OCC_THRESH})")
+    _check(2.0 * src.L_OCC < src.L_DISPLAY < src.L_MAX,
+           f"L_DISPLAY ({src.L_DISPLAY}) filters 1-2 hits (2*L_OCC="
+           f"{2.0 * src.L_OCC:.2f}) yet is reachable (< L_MAX={src.L_MAX})")
+
+    wall = (3, 0, 5)        # a consistently-observed surface: re-hit many times
+    spray = (9, 0, 5)       # behind-wall stereo noise: hit only twice (low confidence)
+    # The wall is hit enough times to clear L_DISPLAY; the spray only twice (so it sits
+    # below L_DISPLAY but above L_OCC_THRESH -> internally occupied, NOT rendered).
+    _seed_to_display(src, wall, hits=6)
+    _seed_to_display(src, spray, hits=2)
+
+    _check(src._log[wall] >= src.L_DISPLAY,                     # noqa: SLF001
+           f"the re-hit wall cleared L_DISPLAY ({src._log[wall]:.2f} "  # noqa: SLF001
+           f">= {src.L_DISPLAY})")
+    _check(src.L_OCC_THRESH <= src._log[spray] < src.L_DISPLAY,  # noqa: SLF001
+           f"the behind-wall spray is occupied but LOW-confidence "
+           f"({src._log[spray]:.2f} in [{src.L_OCC_THRESH}, {src.L_DISPLAY}))")  # noqa: SLF001
+
+    # Internal occupied set holds BOTH (the UPDATE math / grid is unchanged) ...
+    occ = _occupied_cells(src)
+    _check(wall in occ and spray in occ,
+           "BOTH cells are in the INTERNAL occupied set (grid keeps the low "
+           "evidence so carving still works)")
+    # ... but the RENDER shows ONLY the high-confidence wall.
+    rendered = _rendered_cells(src)
+    _check(wall in rendered,
+           "the HIGH-confidence wall RENDERS (log_odds >= L_DISPLAY)")
+    _check(spray not in rendered,
+           "the LOW-confidence behind-wall voxel does NOT render (filtered by "
+           "L_DISPLAY) even though it is internally occupied")
+
+
 def test_logodds_clamped_to_band() -> None:
     print("\n  carving: log_odds is clamped to [L_MIN, L_MAX] (un-carvable-high "
           "prevented)")
@@ -267,31 +351,43 @@ def test_fuse_carves_through_a_planted_noise_voxel() -> None:
 def test_fusion_is_incremental_and_centres_correct() -> None:
     print("\n  occupancy: fusion is incremental; emitted points are voxel CENTRES")
     src = _make_source()
-    # A plane at the identity pose -> a wall of hit voxels. Fold it once.
+    # Fold the FIRST plane keyframe (seq 0). One hit only reaches L_OCC=0.85 < the
+    # RENDER gate L_DISPLAY, so the wall is in the grid but not yet displayed -- the
+    # cell IS occupied internally, proving fusion happened.
     _identity_kf(src, seq=0, depth_val=2.0)
-    pts1, cols1, _ = src._build()                               # noqa: SLF001
+    src._build()                                                # noqa: SLF001
     with src._lock:                                             # noqa: SLF001
         fused_1 = set(src._fused_seqs)
         grid_1 = dict(src._log)
-    _check(pts1.shape[0] > 0, "first keyframe produced occupied voxels")
-    _check(cols1.shape == pts1.shape, "colours align with the voxel centres")
+    _check(len(_occupied_cells(src)) > 0,
+           "first keyframe produced internally-occupied voxels (fusion happened)")
     _check(fused_1 == {0}, f"seq 0 marked fused (got {fused_1})")
 
-    # The emitted points are the occupied cells' CENTRES: (idx + 0.5) * VOXEL_M.
+    # Re-observe the SAME plane a few more times so the wall cells climb past the
+    # RENDER gate L_DISPLAY and the build emits them -- then check the emitted points
+    # are the cells' CENTRES: (idx + 0.5) * VOXEL_M.
+    for seq in range(1, 4):
+        _identity_kf(src, seq=seq, depth_val=2.0)
+        pts1, cols1, _ = src._build()                           # noqa: SLF001
+    _check(pts1.shape[0] > 0,
+           "after a few re-observations the wall clears L_DISPLAY and RENDERS")
+    _check(cols1.shape == pts1.shape, "colours align with the voxel centres")
+
     vm = src.VOXEL_M
     keys = np.round(pts1 / vm - 0.5).astype(int)
     recon = (keys.astype(np.float32) + 0.5) * np.float32(vm)
     _check(np.allclose(pts1, recon, atol=1e-5),
            "every emitted point is a voxel centre (idx+0.5)*VOXEL_M")
 
-    # Fold a SECOND identical keyframe: the SAME hit cells are re-observed (their
-    # log-odds rises, saturating at L_MAX) and seq 0 is NOT re-fused (incremental).
-    _identity_kf(src, seq=1, depth_val=2.0)
+    # Fold ANOTHER identical keyframe: the SAME hit cells are re-observed (their
+    # log-odds rises, saturating at L_MAX) and earlier seqs are NOT re-fused
+    # (incremental).
+    _identity_kf(src, seq=4, depth_val=2.0)
     src._build()                                                # noqa: SLF001
     with src._lock:                                             # noqa: SLF001
         fused_2 = set(src._fused_seqs)
         grid_2 = dict(src._log)
-    _check(fused_2 == {0, 1}, f"both seqs marked fused (got {fused_2})")
+    _check(fused_2 == {0, 1, 2, 3, 4}, f"all seqs marked fused (got {fused_2})")
     # Re-observed hit cells climbed (or saturated) -- never dropped -- proving the
     # second keyframe ADDED evidence rather than rebuilding from scratch.
     re_hit = [k for k in grid_1 if grid_1[k] > 0 and k in grid_2]
@@ -305,15 +401,17 @@ def test_max_voxels_safety_cap_is_fair() -> None:
     src.MAX_VOXELS = 100
     # The bug was a "keep top-N by confidence" cap that permanently favoured the
     # long-dwelt START area and starved the newest (low-confidence) areas. Model
-    # that: 50 "old/start" cells at near-max log-odds + 150 "new area" cells just
-    # over threshold. ALL 200 are occupied; the 100-cap must trip and -- crucially --
-    # the kept set must include NEW-area cells (a fair random subsample), NOT only
-    # the 50 high-confidence start cells.
+    # that: 50 "old/start" cells at near-max log-odds + 150 "new area" cells just over
+    # the RENDER gate L_DISPLAY. ALL 200 are DISPLAYABLE; the 100-cap must trip and --
+    # crucially -- the kept set must include NEW-area cells (a fair random subsample),
+    # NOT only the 50 high-confidence start cells. (Both groups sit at/above L_DISPLAY
+    # so they actually render; the fairness is about the SAFETY-cap subsample, not the
+    # display gate.)
     grid = {}
     for i in range(50):
         grid[(i, 0, 5)] = src.L_MAX                 # old/start: re-observed often
     for i in range(150):
-        grid[(1000 + i, 0, 5)] = src.L_OCC_THRESH + 1e-3   # new area: just occupied
+        grid[(1000 + i, 0, 5)] = src.L_DISPLAY + 1e-3   # new area: just displayable
     src._log = grid                                            # noqa: SLF001
     src._fused_seqs = {0}                                      # noqa: SLF001
     pts, cols, _ = src._build()                                # noqa: SLF001
@@ -357,15 +455,20 @@ def test_map_grows_with_new_areas() -> None:
     counts, x_spans = [], []
     seq = 0
     # Walk the camera down +x in 1.5 m steps (> the plane's x-footprint so each
-    # station's hits land in a fresh column). One keyframe per station already lifts
-    # its hit cells above L_OCC_THRESH (L_OCC=0.85 > 0.5), so the count + extent must
-    # both keep growing as we explore new stations.
+    # station's hits land in a fresh column). We DWELL a few keyframes per station
+    # (re-observing the same plane) so its hit cells climb past the RENDER gate
+    # L_DISPLAY (a single hit at L_OCC=0.85 is below L_DISPLAY -- the deliberate
+    # confidence filter), so each station's wall becomes DISPLAYABLE; the count +
+    # extent must both keep growing as we explore new stations.
+    dwell = 3                                          # keyframes per station
     for station in range(6):
         tx = 1.5 * station
-        _planar_kf(seq, tx)
-        seq += 1
-        pts, _, cams = src._build()                             # noqa: SLF001
-        _check(pts.shape[0] > 0, f"station {station}: some voxels occupied")
+        for _ in range(dwell):
+            _planar_kf(seq, tx)
+            seq += 1
+            pts, _, cams = src._build()                         # noqa: SLF001
+        _check(pts.shape[0] > 0,
+               f"station {station}: voxels DISPLAYABLE after dwell")
         counts.append(pts.shape[0])
         x_spans.append(float(pts[:, 0].max() - pts[:, 0].min()))
         _check(cams.shape[0] == seq,
@@ -431,6 +534,7 @@ def main() -> int:
     test_dda_diagonal_is_6connected_no_gaps()
     test_single_ray_free_between_occupied_end()
     test_carving_removes_a_crossed_voxel()
+    test_render_confidence_gate_separates_wall_from_spray()
     test_logodds_clamped_to_band()
     test_fuse_carves_through_a_planted_noise_voxel()
     test_fusion_is_incremental_and_centres_correct()

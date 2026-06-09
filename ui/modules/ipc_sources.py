@@ -662,10 +662,18 @@ class IpcSlamMapSource(_KeyframeAccumulator):
        never rebuild it from scratch. A set :attr:`_fused_seqs` records which seqs
        are already folded in, so a rebuild only folds the not-yet-fused keyframes
        (cheap, incremental).
-    2. A cell is OCCUPIED when ``log_odds >= L_OCC_THRESH``. Render emits one voxel
-       per occupied cell. A noise voxel that gets carved by later crossing rays
-       drops below the threshold and DISAPPEARS from the render.
-    3. Output: ALL occupied voxel CENTRES (the cell index * VOXEL_M + half a cell)
+    2. A cell is OCCUPIED (the internal fusion notion) when ``log_odds >=
+       L_OCC_THRESH``. RENDER, however, is gated SEPARATELY and HIGHER at
+       ``log_odds >= L_DISPLAY``: the UPDATE math (carving) is unchanged -- the grid
+       keeps every cell's low/near-zero evidence so a later crossing ray can still
+       carve it -- but the VIEW shows only HIGH-confidence surfaces. A real wall is
+       re-hit by many consistent rays so its log_odds climbs and SATURATES well above
+       L_DISPLAY and renders; behind-the-wall stereo spray (which carving CANNOT reach,
+       because rays stop at the wall surface and nothing crosses the space behind it)
+       is hit only once or twice, stays below L_DISPLAY, and is filtered out of the
+       view. A noise voxel in REACHABLE free space is additionally carved by later
+       crossing rays back below even L_OCC_THRESH and disappears outright.
+    3. Output: ALL DISPLAYABLE voxel CENTRES (the cell index * VOXEL_M + half a cell)
        + a GREEN gradient colour by HEIGHT (derived from the cell's world ``y``,
        the optical DOWN axis). We render the WHOLE occupied set so the map GROWS as
        the camera explores; carving keeps it CLEAN (noise removed) and a bounded
@@ -735,26 +743,53 @@ class IpcSlamMapSource(_KeyframeAccumulator):
     #: carving more; LOWER so noise carves away more easily.
     L_OCC = 0.85
     #: FREE evidence added to every voxel a ray passes THROUGH per keyframe (a
-    #: "miss" update, ~log(0.4/0.6) ~= -0.40). This is what REMOVES wrongly-added
+    #: "miss" update, ~log(0.38/0.62) ~= -0.50). This is what REMOVES wrongly-added
     #: voxels: a noise cell crossed by later rays accumulates this until it drops
     #: below L_OCC_THRESH and disappears. |L_FREE| < L_OCC so a single grazing
     #: free-ray can't erase a well-supported surface, but a couple of crossings can
-    #: carve a once-seen noise voxel. RAISE the magnitude (toward L_OCC) to carve
-    #: more aggressively; LOWER to carve more conservatively.
-    L_FREE = -0.40
+    #: carve a once-seen noise voxel. Strengthened slightly (-0.40 -> -0.50) so a
+    #: crossing ray drives REACHABLE noise down faster; still well under L_OCC so a
+    #: real thin surface is not over-carved by one grazing miss. RAISE the magnitude
+    #: (toward L_OCC) to carve more aggressively; LOWER to carve more conservatively.
+    L_FREE = -0.50
     #: Clamp band on the accumulated log-odds (OctoMap's "clamping update policy").
     #: L_MAX bounds how confident a cell can get so a long dwell can't pin it so high
     #: that later free evidence can NEVER carve it (defeating the whole point);
-    #: L_MIN bounds the free side symmetrically. L_MAX/L_OCC ~= 4 hits to saturate;
-    #: |L_MIN|/|L_FREE| ~= 5 crossings to bottom out.
-    L_MIN = -2.0
-    L_MAX = 3.5
-    #: Occupancy threshold: a cell is OCCUPIED (rendered) when its log_odds is >= this
-    #: (p_occ ~= 0.62). One un-carved hit (L_OCC=0.85) already crosses it, so a
-    #: surface shows immediately; two later free crossings (2*L_FREE=-0.80) pull a
-    #: once-hit noise voxel to +0.05 < thresh and it vanishes. RAISE for a stricter
-    #: (cleaner, sparser, slower-to-fill) map; LOWER toward 0 to fill faster (noisier).
+    #: L_MIN bounds the free side. L_MAX raised (3.5 -> 5.0) so a consistently-observed
+    #: surface can climb WELL above the render gate L_DISPLAY (a wall re-hit ~6x reaches
+    #: 5.0, vs L_DISPLAY=2.0) while sporadic behind-wall noise (1-2 hits) stays under it
+    #: -- widening the confidence gap the display gate separates on. L_MAX/L_OCC ~= 6
+    #: hits to saturate; even saturated, sustained free evidence still carves it back
+    #: (10 crossings at L_FREE=-0.50 span the full [L_MIN, L_MAX] band).
+    L_MIN = -2.5
+    L_MAX = 5.0
+    #: Occupancy threshold: a cell is OCCUPIED (the INTERNAL occupied set used by the
+    #: fusion bookkeeping) when its log_odds is >= this (p_occ ~= 0.62). One un-carved
+    #: hit (L_OCC=0.85) already crosses it, so a surface enters the set immediately;
+    #: one later free crossing (L_FREE=-0.50) pulls a once-hit noise voxel to +0.35 <
+    #: thresh and it leaves the set. This gate is kept LOW on purpose: the UPDATE math
+    #: (carving) needs the grid to retain low/near-zero evidence so a later crossing ray
+    #: can still drive a noise cell back down -- raising it would not change what carving
+    #: can reach. RAISE only to change the internal occupied-set membership; the RENDER
+    #: gate is the separate, higher :data:`L_DISPLAY` below.
     L_OCC_THRESH = 0.5
+    #: RENDER confidence gate (SEPARATE from L_OCC_THRESH; the principled fix for the
+    #: behind-the-wall noise). The UPDATE math is unchanged -- carving still drives every
+    #: voxel's log_odds correctly -- but the VIEW shows only voxels with
+    #: ``log_odds >= L_DISPLAY``, set HIGHER than L_OCC_THRESH. Rationale: a real wall is
+    #: a consistently-observed surface re-hit by many rays from many viewpoints, so its
+    #: log_odds climbs and SATURATES near L_MAX -> well above L_DISPLAY -> it renders.
+    #: The spray BEHIND the wall is sporadic stereo noise that carving cannot reach (rays
+    #: stop at the wall surface, nothing crosses the space behind it) but which is only
+    #: ever hit ONCE or a few times -> its log_odds stays low (~L_OCC..a couple of L_OCC)
+    #: -> it falls below L_DISPLAY and is filtered out of the view. So we DISPLAY
+    #: high-confidence surfaces only, without disturbing the carving that cleans the
+    #: reachable space. RAISE toward L_MAX for a stricter view (only the most-observed
+    #: surfaces; risks thinning a real but lightly-seen thin surface); LOWER toward
+    #: L_OCC_THRESH to show more (noisier). Chosen from the PNG sweep (see
+    #: ui/tests/_map_display_sweep.py): +2.0 keeps the wall crisp while the behind-wall
+    #: tail drops out.
+    L_DISPLAY = 2.0
 
     #: Hard SAFETY cap on rendered voxels (runaway guard ONLY). We render ALL
     #: occupied cells (log_odds >= L_OCC_THRESH) -- carving keeps the set CLEAN and a
@@ -1111,14 +1146,15 @@ class IpcSlamMapSource(_KeyframeAccumulator):
 
         Returns ``(points, colors, cams)``:
 
-        * ``points`` ``(N,3)`` float32 -- the CENTRE of EVERY OCCUPIED voxel
-          (``log_odds >= L_OCC_THRESH``). We render the WHOLE occupied set so the map
-          GROWS as the camera explores (a bounded room's occupied count plateaus) and
-          SELF-CLEANS (a carved noise voxel drops below threshold and vanishes); only
-          if it exceeds the high :data:`MAX_VOXELS` safety cap do we drop voxels by a
-          FAIR uniform-random subsample (NOT by lowest log-odds, which would erase the
-          newest areas). Optical-world frame (the window rotates it to ENU, same as
-          the trajectory).
+        * ``points`` ``(N,3)`` float32 -- the CENTRE of EVERY DISPLAYABLE voxel
+          (``log_odds >= L_DISPLAY``, the higher RENDER gate -- so only HIGH-confidence
+          surfaces show and the low-confidence behind-wall spray is filtered out). We
+          render the WHOLE displayable set so the map GROWS as the camera explores (a
+          bounded room's count plateaus) and SELF-CLEANS (a carved noise voxel drops in
+          log-odds and falls out of the view); only if it exceeds the high
+          :data:`MAX_VOXELS` safety cap do we drop voxels by a FAIR uniform-random
+          subsample (NOT by lowest log-odds, which would erase the newest areas).
+          Optical-world frame (the window rotates it to ENU, same as the trajectory).
         * ``colors`` ``(N,3)`` float32 -- a GREEN gradient by HEIGHT (optical
           ``+y`` is world-DOWN), so the floor/walls read like ModalAI's height-tinted
           occupancy.
@@ -1137,10 +1173,18 @@ class IpcSlamMapSource(_KeyframeAccumulator):
                 self._fuse_keyframe_locked(self._kf_depth[seq],
                                            self._kf_R[seq], self._kf_t[seq])
                 self._fused_seqs.add(seq)
-            # (2) Snapshot the occupied cell KEYS (log_odds >= L_OCC_THRESH) + the
-            #     camera trail under the lock, then build the arrays lock-free. We
-            #     render ALL occupied cells, so only the keys are needed.
-            thresh = float(self.L_OCC_THRESH)
+            # (2) Snapshot the DISPLAYABLE cell KEYS under the lock, then build the
+            #     arrays lock-free. The RENDER gate is L_DISPLAY (the separate, higher
+            #     confidence threshold), NOT L_OCC_THRESH: the grid keeps ALL its
+            #     log-odds evidence (the UPDATE math / carving is untouched -- it still
+            #     needs low/near-zero cells so a later crossing ray can carve them), but
+            #     the VIEW shows only HIGH-confidence surfaces. A real wall is re-hit by
+            #     many rays so its log_odds saturates well above L_DISPLAY and renders;
+            #     the sporadic behind-the-wall spray (carving can't reach it -- rays stop
+            #     at the wall) is hit only once or twice, stays below L_DISPLAY, and is
+            #     filtered out of the view. We render ALL displayable cells, so only the
+            #     keys are needed.
+            thresh = float(self.L_DISPLAY)
             occ = [k for k, lo in self._log.items() if lo >= thresh]
             cam_ts = [self._kf_t[s] for s in self._kf_depth]
         cams = (np.asarray(cam_ts, np.float32).reshape(-1, 3)

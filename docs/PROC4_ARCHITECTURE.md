@@ -436,23 +436,37 @@ The menu is plain Qt (`QMenuBar` / `QAction`); `ui.main` calls
   (lockstep across all rays, active set compacted each step, carve range capped at
   `MAX_DEPTH_M`); the accumulated log-odds is clamped to `[L_MIN, L_MAX]`. The grid is
   never rebuilt from scratch — only the not-yet-fused keyframes are folded forward
-  (`_fused_seqs`). A cell is **OCCUPIED** (rendered) when `log_odds ≥ L_OCC_THRESH`. The
+  (`_fused_seqs`). A cell is **internally OCCUPIED** when `log_odds ≥ L_OCC_THRESH`. The
   carving is the **self-cleaning** mechanism: a stereo-noise voxel (e.g. a textureless-
-  ceiling cone) the camera later sees *through* accumulates free evidence and drops back
-  below threshold — so it is **removed** from the map (the "remove already-added invalid
-  points" requirement), unlike the old add-only `hit_count ≥ OCC_HITS` gate. On the gold
-  `corridor_60s` (whole replay) carving removes **~40 %** of the occupied voxels vs the
-  no-carving build (332k → 199k — lower, cleaner), with a per-keyframe fuse of **~38 ms
-  mean / ~56 ms max** off the GUI thread. **Render is deliberately LIGHT** (every prior
-  3D GL map lagged): the voxels are a single `GLScatterPlotItem` of large **square
+  ceiling cone) in **reachable** free space that the camera later sees *through*
+  accumulates free evidence and drops back below threshold — so it is **removed** from
+  the map (the "remove already-added invalid points" requirement), unlike the old
+  add-only `hit_count ≥ OCC_HITS` gate. **For the noise carving _can't_ reach** — the
+  spray *behind a wall* (rays stop at the wall surface, nothing crosses the space behind
+  it) — a **separate, higher RENDER confidence gate** does the job: the UPDATE math is
+  left untouched (the grid keeps every cell's low evidence so carving keeps working), but
+  the VIEW renders **only `log_odds ≥ L_DISPLAY`** (a new tunable set higher, default
+  **+2.0** vs `L_OCC_THRESH`=+0.5). A wall is a consistently-observed surface re-hit by
+  many rays → its log_odds saturates near `L_MAX` → it clears `L_DISPLAY` and renders
+  crisply; the behind-wall spray is hit only once or twice → stays below `L_DISPLAY` →
+  filtered out of the view. The gate was chosen from a PNG sweep on `corridor_60s`
+  (top-down + side-along-wall views; displayed voxel count 190k→77k→52k→46k at
+  `L_DISPLAY` ∈ {+0.5,+1.5,+2.0,+2.5}): +2.0 drops the behind-wall tail while keeping the
+  wall solid, +2.5 starts thinning the real surface for little gain
+  (`ui/tests/_map_display_sweep.py`). `L_FREE` was also strengthened (−0.40→−0.50) and
+  `L_MAX` raised (3.5→5.0) to widen the confidence gap the display gate separates on. On
+  the gold `corridor_60s` (whole replay) carving removes **~40 %** of the occupied voxels
+  vs the no-carving build (332k → 199k — lower, cleaner), with a per-keyframe fuse of
+  **~38 ms mean / ~56 ms max** off the GUI thread. **Render is deliberately LIGHT** (every
+  prior 3D GL map lagged): the voxels are a single `GLScatterPlotItem` of large **square
   world-unit points** (`pxMode=False`, `size` = the voxel edge) — far cheaper than an
   N-cube `GLMeshItem` — coloured by a **green-by-height** gradient, **capped** at the
   high `MAX_VOXELS` (=150k) runaway guard (when over, a *fair uniform-random* subsample,
   never a top-N drop), rebuilt off the GUI thread, and re-emitted **only when the
-  occupied set materially changed** (so GL never re-uploads an unchanged cloud). All
+  displayed set materially changed** (so GL never re-uploads an unchanged cloud). All
   tunables (`VOXEL_M`, `STRIDE`, depth gate; `L_OCC`/`L_FREE`/`L_MIN`/`L_MAX`/
-  `L_OCC_THRESH`; `MAX_VOXELS`) are exposed + commented. Each window is cached so
-  repeated opens reuse the one IPC source.
+  `L_OCC_THRESH`/`L_DISPLAY`; `MAX_VOXELS`) are exposed + commented. Each window is cached
+  so repeated opens reuse the one IPC source.
 - **Calibration** — **"Gyroscope Bias…"** (`GyroCalibDialog`) and **"Accelerometer
   (6-position)…"** (`AccelCalibDialog`). Each opens with a fresh `IpcImuRawSource`
   injected as its `stream`; the menu handler owns the stream and closes it in its
@@ -484,9 +498,12 @@ seam (rather than folded into the one current source) because it is the natural 
 point for a second keyframe-fed map view and keeps the SHM/recv plumbing isolated from
 the map maths. The log-odds + carving fusion is unit-tested headless
 (`ui/tests/occupancy_selftest.py` — DDA contiguity, single-ray free/occupied, carving
-removes a crossed voxel, clamp band) and probed on the gold replays
-(`ui/tests/_map_persist_functional.py` — carving-vs-no-carving voxel count + per-keyframe
-fuse time + a top-down PNG; `ui/tests/_map_growth_functional.py` — growth/plateau).
+removes a crossed voxel, clamp band, **and the `L_DISPLAY` render gate: a high-confidence
+voxel renders while a low-confidence-but-occupied voxel does not**) and probed on the gold
+replays (`ui/tests/_map_persist_functional.py` — carving-vs-no-carving voxel count +
+per-keyframe fuse time + a top-down PNG; `ui/tests/_map_growth_functional.py` —
+growth/plateau; `ui/tests/_map_display_sweep.py` — the `L_DISPLAY` PNG sweep, top-down +
+side-along-wall, that picked the +2.0 default).
 
 ### 6.4 Calibration semantic — "saves for the NEXT capture start"
 
