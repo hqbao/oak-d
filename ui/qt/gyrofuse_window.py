@@ -74,10 +74,9 @@ class GyroFuseWindow(QWidget):
         root.addWidget(self._view, stretch=1)
 
         hint = QLabel(
-            "grey = pure-vision rotation (drifts) · cyan = gyro rotation "
-            "(trusted) · shaded = disagreement · gate/​full-gyro lines = where the "
-            "gyro takes over · gain = vision weight (1→0) · t_trust = translation "
-            "trust")
+            "VISION (eyes) = grey, accurate when slow but under-rotates on fast "
+            "yaw · GYRO (inner ear) = cyan, always right · amber-shaded frames = "
+            "the gyro took over (eyes & gyro disagreed past the gate)")
         hint.setObjectName("ScaleTick")
         hint.setWordWrap(True)
         root.addWidget(hint, stretch=0)
