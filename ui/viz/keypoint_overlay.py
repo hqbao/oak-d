@@ -10,6 +10,17 @@ recent positions across frames (a derived-from-real signal, clearly that and
 nothing invented). Keypoints whose depth has no stereo return (``z == 0``) are
 drawn as hollow grey rings -- they are NEVER given a fake depth colour.
 
+Reprojection-error stub
+-----------------------
+When the optional ``reproj`` diagnostic (``frame.inliers``) is given, each PnP
+point also gets a short line from its measured current pixel to where its
+prev-frame 3D point reprojects through the solved relative pose -- the literal
+quantity RGB-D PnP and windowed BA minimise. INLIERS draw a subtle GREEN stub
+(they are ~0-2 px so the line is barely there, which IS the point); OUTLIERS draw
+a striking RED stray (a long line to where the bad correspondence "wanted" the
+point to land). The data is a REAL odometry output (computed off the same
+``(R, t)`` that scored the inliers, read from ``last_info``), never re-derived.
+
 The drawing backend is cv2 (already pulled in by :mod:`depth_render`). Everything
 here is pure array logic + cv2, so it is fully unit-testable off-device.
 """
@@ -39,6 +50,10 @@ _INVALID_BGR = (158, 148, 139)   # #8b949e
 _FRESH_BGR = (0, 176, 255)       # #ffb000
 _INLIER_BGR = (80, 185, 63)      # #3fb950
 _HALO_BGR = (0, 0, 0)
+#: Reprojection stub colours (BGR): inliers reuse the SUCCESS green (subtle,
+#: ~0-2 px), outliers use DANGER red #f85149 (long, striking strays).
+_STUB_INLIER_BGR = _INLIER_BGR
+_STUB_OUTLIER_BGR = (73, 81, 248)   # #f85149
 
 
 def marker_sizes(shape: tuple[int, int]) -> tuple[int, int, int, int]:
@@ -143,7 +158,8 @@ def draw_overlay(gray: np.ndarray, depth_m: np.ndarray,
                  ids: np.ndarray, points: np.ndarray,
                  trails: TrackTrails, *, fresh_age: int = 3,
                  draw_trails: bool = True,
-                 inlier_ids: set[int] | None = None) -> np.ndarray:
+                 inlier_ids: set[int] | None = None,
+                 reproj: dict | None = None) -> np.ndarray:
     """Render the keypoint/depth/trail overlay; returns an ``(H, W, 3)`` RGB image.
 
     Background is the grayscale frame, dimmed so the colour dots pop. Each live
@@ -152,6 +168,16 @@ def draw_overlay(gray: np.ndarray, depth_m: np.ndarray,
     if the RGB-D PnP kept it as an inlier (``inlier_ids``, the clean subset the
     motion solve actually trusted), and -- when ``draw_trails`` -- a faint
     depth-coloured polyline of its last positions.
+
+    ``reproj`` (optional) is the per-PnP-point reprojection diagnostic, a dict
+    ``{"ids": (M,) int, "reproj": (M, 2) float, "inlier": (M,) bool}`` (the
+    ``frame.inliers`` payload). For each PnP point that ALSO has a measured pixel
+    this frame (joined by id with ``ids``/``points``) a stub line is drawn from
+    the measured pixel to its reprojected pixel: subtle GREEN for inliers
+    (near-zero length), striking RED for outliers (long strays). It makes
+    "minimise reprojection error" -- the heart of RGB-D PnP and windowed BA --
+    literally visible. ``inlier_ids`` may be passed independently (the legacy
+    green dots) or derived by the caller as ``reproj["ids"][reproj["inlier"]]``.
     """
     import cv2
 
@@ -195,5 +221,36 @@ def draw_overlay(gray: np.ndarray, depth_m: np.ndarray,
         if int(tid) in inl:
             cv2.circle(bg, (ix, iy), fresh_r + line_w, _INLIER_BGR,
                        line_w, cv2.LINE_AA)
+
+    # --- reprojection-error stubs (drawn last, on top of the markers) -------- #
+    # Join the per-PnP-point reproj diagnostic to THIS frame's measured pixels by
+    # id: the stub runs measured -> reprojected. The measured endpoint is the dot
+    # we just drew (same id -> same pixel), so the line visibly grows out of the
+    # marker. Outliers (long red) are drawn after inliers (short green) so a
+    # stray always sits on top of the subtle ones.
+    if reproj is not None:
+        r_ids = np.asarray(reproj.get("ids", ()), dtype=np.int64).reshape(-1)
+        r_px = np.asarray(reproj.get("reproj", ()),
+                          dtype=np.float64).reshape(-1, 2)
+        r_in = np.asarray(reproj.get("inlier", ()), dtype=bool).reshape(-1)
+        if r_ids.shape[0] and r_ids.shape[0] == r_px.shape[0] == r_in.shape[0]:
+            # Map id -> measured pixel for this frame (O(M) join).
+            meas = {int(t): (float(p[0]), float(p[1]))
+                    for t, p in zip(ids, pts)}
+            # Inliers first (subtle), outliers second (on top), each only where a
+            # measured pixel exists this frame and the reprojection is finite.
+            for want_inlier, col in ((True, _STUB_INLIER_BGR),
+                                     (False, _STUB_OUTLIER_BGR)):
+                for tid, (rx, ry), is_in in zip(r_ids, r_px, r_in):
+                    if bool(is_in) != want_inlier:
+                        continue
+                    m = meas.get(int(tid))
+                    if m is None:
+                        continue
+                    if not (np.isfinite(rx) and np.isfinite(ry)):
+                        continue
+                    cv2.line(bg, (int(round(m[0])), int(round(m[1]))),
+                             (int(round(rx)), int(round(ry))),
+                             col, line_w, cv2.LINE_AA)
 
     return np.ascontiguousarray(bg[:, :, ::-1])

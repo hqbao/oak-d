@@ -92,21 +92,30 @@ class FrameTracks:
 
 @dataclass(frozen=True)
 class FrameInliers:
-    """One frame's PnP inlier track ids for the keypoint-depth visualiser.
+    """One frame's PnP reprojection diagnostic for the keypoint-depth visualiser.
 
     Published on ``topics.FRAME_INLIERS`` by the odometry module's
     ``PublishInliers`` step, AFTER ``EstimateMotion`` solves the RGB-D PnP.
-    ``ids`` are the subset of that frame's tracks the PnP RANSAC kept as inliers --
-    the clean points the motion solve actually trusted (a REAL odometry output
-    read from ``last_info``, not a re-derivation). The UI marks these so the
-    operator can see which tracks survived outlier rejection.
 
-    * ``ids`` -- ``(M,)`` int64 inlier track ids (subset of the frame's tracks).
+    Carries, per PnP correspondence (all ``M`` points fed to the RANSAC, NOT just
+    the inliers), the reprojection of its prev-frame 3D point through the SAME
+    ``(R, t)`` the RANSAC produced -- the pose that DEFINED the inlier set. The UI
+    draws a measured-pixel -> reprojected-pixel stub per point (a REAL odometry
+    output read from ``last_info``, not a re-derivation), tiny + green for
+    inliers, long + red for outliers, so "minimise reprojection error" is visible.
+
+    * ``ids`` -- ``(M,)`` int64 PnP point track ids (all correspondences, in PnP
+      order). The classic "inlier ids" any consumer wants = ``ids[inlier]``.
+    * ``reproj`` -- ``(M, 2)`` float32 reprojected pixel per point (same order as
+      ``ids``); ``pinhole(K, R @ obj_i + t)``.
+    * ``inlier`` -- ``(M,)`` bool RANSAC inlier mask (same order as ``ids``).
     """
 
     seq: int
     ts_ns: int
     ids: np.ndarray
+    reproj: np.ndarray
+    inlier: np.ndarray
 
 
 @dataclass(frozen=True)

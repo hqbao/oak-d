@@ -4,7 +4,7 @@
   "cam_sync": "dbec0d679c54677d82be46c283d4b37c44cb001927f6570d11c2bdaa5e1b1342",
   "cam_sync_mono": "859adf6d3e6f0d0f2abd557acec1f59a08f671489eb0c28a2e7fe8ce853cf3df",
   "depth_frame": "5f74890799d6b316548ef7d68b7b9e87cecff55f6a3b4ef7a75c5f716b5794aa",
-  "frame_inliers": "6f3548dc68d45be971c57e51441947c8a4c19d09d8b68c053092eb75f9585890",
+  "frame_inliers": "e355aeb9a5f4fa1ee962ca8fdd953ff9cf705eb8734ef08ff4582825228dba33",
   "frame_tracks": "f3583830bb8b92578af3e19e560142fd0983754db013c64d0b1f2c838d27a84f",
   "imu_raw": "38ae5cd330da8e20e440c8d289dfb1f5da9290061870d0ab3892ed9b8e456768",
   "imu_raw_empty": "bc26accfcb51c586103d799addb7397f51ce10e173f3dffb5beb0f2084b2fb73",

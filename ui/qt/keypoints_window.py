@@ -113,17 +113,26 @@ class KeypointWorker(threading.Thread):
 
         trails = TrackTrails()
         t0_ns: list[int | None] = [None]
-        # Latest PnP inlier set, updated off ``frame.inliers``. The odometry flow
-        # publishes a frame's inliers right AFTER its tracks (PnP runs after the
-        # tracks emit), so when ``on_tracks`` for frame N renders it carries the
-        # inliers from the previous solve -- at most one frame stale. Tracks
-        # persist frame-to-frame, so a track that was an inlier still is, and the
-        # green ring stays honest: it marks tracks the solve actually trusted.
-        latest_inl: dict[str, set] = {"ids": set()}
+        # Latest PnP reproj diagnostic, updated off ``frame.inliers``. The
+        # odometry flow publishes a frame's inliers right AFTER its tracks (PnP
+        # runs after the tracks emit), so when ``on_tracks`` for frame N renders
+        # it carries the diagnostic from the previous solve -- at most one frame
+        # stale. Tracks persist frame-to-frame, so a track that was an inlier
+        # still is, and the green ring / green stub stays honest: it marks tracks
+        # the solve actually trusted. ``ids`` here is the inlier SUBSET
+        # (``ids[inlier]``, the legacy green dots); ``reproj`` carries the full
+        # per-PnP-point stub data (ids + reprojected px + inlier mask).
+        latest_inl: dict[str, object] = {"ids": set(), "reproj": None}
 
         def on_inliers(msg) -> None:
-            latest_inl["ids"] = {int(i) for i in
-                                 np.asarray(msg.ids, dtype=np.int64).reshape(-1)}
+            ids = np.asarray(msg.ids, dtype=np.int64).reshape(-1)
+            reproj = np.asarray(msg.reproj, dtype=np.float32).reshape(-1, 2)
+            inlier = np.asarray(msg.inlier, dtype=bool).reshape(-1)
+            # Green-dot subset = the classic "inlier ids" = ids[inlier].
+            n = min(ids.shape[0], inlier.shape[0])
+            latest_inl["ids"] = {int(i) for i in ids[:n][inlier[:n]]}
+            latest_inl["reproj"] = {"ids": ids, "reproj": reproj,
+                                    "inlier": inlier}
 
         def on_tracks(msg) -> None:
             ids = np.asarray(msg.ids, dtype=np.int64).reshape(-1)
@@ -140,7 +149,8 @@ class KeypointWorker(threading.Thread):
                 return
             depths = sample_depths(msg.depth_m, pts)
             rgb = draw_overlay(msg.gray_left, msg.depth_m, ids, pts, trails,
-                               inlier_ids=latest_inl["ids"])
+                               inlier_ids=latest_inl["ids"],
+                               reproj=latest_inl["reproj"])
             sample = KeypointSample(
                 rgb=rgb, ids=ids, points=pts, depths=depths,
                 seq=int(msg.seq), t_s=(msg.ts_ns - t0_ns[0]) * 1e-9,
@@ -266,7 +276,8 @@ class KeypointTrackWindow(QWidget):
         rasters.addWidget(_DepthScaleBar(), stretch=0)
         lay.addLayout(rasters, stretch=1)
         hint = QLabel("colour = depth · hollow grey = no stereo · amber = fresh "
-                      "track · green = PnP inlier · trail = last 20 frames")
+                      "track · green = PnP inlier · stub = reproj error "
+                      "(green inlier / red outlier) · trail = last 20 frames")
         hint.setObjectName("ScaleTick")
         lay.addWidget(hint, stretch=0)
         root.addWidget(panel, stretch=1)

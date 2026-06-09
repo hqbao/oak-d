@@ -500,6 +500,41 @@ class RGBDVisualOdometry:
                     inl_idx = np.asarray(inliers, dtype=np.int64).reshape(-1)
                     info["inlier_ids"] = np.asarray(id_list, dtype=np.int64)[inl_idx]
                     t_use = t_own if self.cfg.use_own_pnp else tvec.reshape(3)
+                    # --- reprojection-error diagnostic (additive, DO NOT use ---
+                    # below) ---------------------------------------------------
+                    # For EVERY PnP correspondence reproject its prev-frame 3D
+                    # point through the SAME (R, t) the RANSAC produced -- the
+                    # pose that DEFINED the inlier set -- so the UI can draw the
+                    # measured-pixel -> reprojected-pixel stub that makes
+                    # "minimise reprojection error" visible (tiny green stubs for
+                    # inliers, long red strays for outliers). This must read the
+                    # raw PnP translation, NOT the post-fusion ``t_use`` that the
+                    # gyro/freeze/clamp logic below may overwrite -- otherwise the
+                    # stubs would no longer reflect the pose that scored the
+                    # inliers. We snapshot it here into ``t_pnp`` while ``t_use``
+                    # still equals the raw PnP translation. ``R`` is likewise the
+                    # raw PnP rotation (it is reassigned to ``R_fused`` only later
+                    # in the gyro-fusion branch). Pinhole convention matches
+                    # :func:`pnp._reproj_err`: ``X_cur = R @ obj_i + t``, then
+                    # ``u = fx*X/Z + cx``, ``v = fy*Y/Z + cy``.
+                    t_pnp = np.asarray(t_use, dtype=np.float64).reshape(3)
+                    Pc = obj @ R.T + t_pnp             # (M,3) in cur-cam frame
+                    zc = Pc[:, 2]
+                    fx, fy = self.K[0, 0], self.K[1, 1]
+                    cx, cy = self.K[0, 2], self.K[1, 2]
+                    with np.errstate(divide="ignore", invalid="ignore"):
+                        ru = fx * Pc[:, 0] / zc + cx
+                        rv = fy * Pc[:, 1] / zc + cy
+                    reproj = np.stack([ru, rv], axis=1).astype(np.float32)
+                    # Inlier boolean mask over the M points (RANSAC kept the
+                    # ``inl_idx`` rows). Behind-camera reprojections (Z<=0) are
+                    # left in place -- the UI joins by id and will draw a long
+                    # red stray for them, which is the honest outlier signal.
+                    pnp_inlier = np.zeros(len(id_list), dtype=bool)
+                    pnp_inlier[inl_idx] = True
+                    info["pnp_ids"] = np.asarray(id_list, dtype=np.int64)
+                    info["pnp_reproj"] = reproj
+                    info["pnp_inlier"] = pnp_inlier
                     # --- pure-vision VO accumulator (UI "VO" line) -------------
                     # PnP succeeded, so ``R`` (cur<-prev rotation) and ``t_use``
                     # (cur<-prev translation) are the RAW vision motion BEFORE any

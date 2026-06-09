@@ -167,11 +167,19 @@ class WireFrameTracks:
 
 @dataclass(frozen=True)
 class WireFrameInliers:
-    """Wire form of :class:`comms.messages.FrameInliers`."""
+    """Wire form of :class:`comms.messages.FrameInliers`.
+
+    Pure POD: per-PnP-point ids + reprojected pixels + inlier mask. See
+    :class:`comms.messages.FrameInliers` for the field semantics; the codec is
+    generic over ndarrays so ``reproj`` (M,2 float32) and ``inlier`` (M, bool)
+    ride inline alongside ``ids`` (M, int64).
+    """
 
     seq: int
     ts_ns: int
     ids: np.ndarray
+    reproj: np.ndarray
+    inlier: np.ndarray
 
 
 @dataclass(frozen=True)

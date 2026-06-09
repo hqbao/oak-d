@@ -134,6 +134,12 @@ def build_vectors() -> list[tuple[str, str, object]]:
                         dtype=np.float32)
     inlier_ids = np.array([10, 30], dtype=np.int64)
 
+    # FrameInliers per-PnP-point diagnostic: all M point ids + reprojected px +
+    # inlier mask (id 20 is the outlier with a long stray reprojection).
+    pnp_reproj = np.array([[100.4, 200.30], [137.0, 198.0], [120.1, 219.9]],
+                          dtype=np.float32)
+    pnp_inlier = np.array([True, False, True], dtype=bool)
+
     # PoseMsg.info: a dict with NaN / Inf float values to prove float fidelity.
     info = {"n_inliers": 42, "tracking_ok": True,
             "reproj_rms": float("nan"), "depth_max": float("inf")}
@@ -178,7 +184,8 @@ def build_vectors() -> list[tuple[str, str, object]]:
         ("frame_tracks", topics.FRAME_TRACKS,
          WireFrameTracks(seq=3, ts_ns=123_456_789, ids=track_ids, points=track_px)),
         ("frame_inliers", topics.FRAME_INLIERS,
-         WireFrameInliers(seq=3, ts_ns=123_456_789, ids=inlier_ids)),
+         WireFrameInliers(seq=3, ts_ns=123_456_789, ids=track_ids,
+                          reproj=pnp_reproj, inlier=pnp_inlier)),
         ("pose_odom", topics.POSE_ODOM,
          WirePoseMsg(seq=3, ts_ns=123_456_789, T_world_cam=T, info=info)),
         ("pose_vo_empty_info", topics.POSE_VO,

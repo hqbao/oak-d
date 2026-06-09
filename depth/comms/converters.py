@@ -129,11 +129,15 @@ def _tracks_to_local(wm: WireFrameTracks, rings: RingRegistry) -> FrameTracks:
 
 
 def _inliers_to_wire(msg: FrameInliers, rings: RingRegistry, endpoint: str):
-    return WireFrameInliers(seq=int(msg.seq), ts_ns=int(msg.ts_ns), ids=msg.ids)
+    del rings, endpoint                                # pure POD, no ring slot
+    return WireFrameInliers(seq=int(msg.seq), ts_ns=int(msg.ts_ns),
+                            ids=msg.ids, reproj=msg.reproj, inlier=msg.inlier)
 
 
 def _inliers_to_local(wm: WireFrameInliers, rings: RingRegistry) -> FrameInliers:
-    return FrameInliers(seq=int(wm.seq), ts_ns=int(wm.ts_ns), ids=wm.ids)
+    del rings                                          # pure POD, no ring slot
+    return FrameInliers(seq=int(wm.seq), ts_ns=int(wm.ts_ns),
+                        ids=wm.ids, reproj=wm.reproj, inlier=wm.inlier)
 
 
 def _pose_to_wire(msg: PoseMsg, rings: RingRegistry, endpoint: str):
