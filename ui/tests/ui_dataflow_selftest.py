@@ -367,57 +367,14 @@ def _drain_samples(work_queue: "queue.Queue", timeout_s: float,
     return out
 
 
-def test_surface_map_source(vio_ep: str, bundle):
-    """Build a Room Surface depth mesh from the live keyframe feed; return it.
-
-    Mirrors the SLAM-map source's seam: attach the
-    :class:`~ui.modules.ipc_sources.IpcSurfaceMapSource` to VIO's ``keyframe``
-    feed, let the (already-running) replay drain into its keyframe accumulator,
-    then run its OFF-thread ``_build`` ONCE and assert the merged surface mesh is
-    valid (non-empty, every face index in range, one RGB colour per vertex).
-    Returns ``(verts, faces, vertex_colors, cams)`` so the caller can also feed it
-    to the window. Confirms the shared ``_KeyframeAccumulator`` base populates a
-    SECOND source with NO extra SHM/recv wiring.
-    """
-    from ui.modules import IpcSurfaceMapSource
-
-    W, H, K = int(bundle.width), int(bundle.height), bundle.K
-    src = IpcSurfaceMapSource(vio_ep, K, width=W, height=H, connect_timeout_s=20.0)
-    # Attach + subscribe but don't spin the rebuild loop, so we control the build.
-    _check(src._attach_or_fail(),
-           f"surface source attached VIO kf rings ({src.error})")
-    client = src._make_keyframe_client()
-    client.start()
-    try:
-        # Let trailing keyframes arrive (capture has already drained by now in the
-        # caller; this just waits for the last keyframes to land).
-        deadline = time.monotonic() + 6.0
-        while time.monotonic() < deadline and len(src._kf_depth) < 3:
-            time.sleep(0.2)
-        n_kf = len(src._kf_depth)
-        _check(n_kf >= 1, f"surface source accumulated >=1 keyframe (got {n_kf})")
-        verts, faces, vcols, cams = src._build()
-        _check(verts.shape[0] > 0 and faces.shape[0] > 0,
-               f"surface build is non-empty (verts {verts.shape}, faces "
-               f"{faces.shape})")
-        _check(int(faces.min()) >= 0 and int(faces.max()) < len(verts),
-               "surface mesh face indices all reference real vertices")
-        _check(vcols is not None and len(vcols) == len(verts),
-               "surface mesh has one RGB colour per vertex")
-        return verts, faces, vcols, cams
-    finally:
-        src.stop()
-
-
 def attach_floor_plan_source(vio_ep: str, bundle):
     """Attach an :class:`IpcFloorPlanSource` to VIO's ``keyframe`` feed (no build).
 
     Returns the attached, subscribed source so the caller can let it accumulate
-    keyframes in the BACKGROUND (alongside the room-surface source) WHILE the
-    replay/VIO is still alive, then build the plan + ``stop()`` it afterwards. VIO
-    shuts down once the replay sends END, so the floor-plan client must be up
-    before that happens -- attaching it up front (rather than after the
-    room-surface test's wait) is what makes the build see live kf rings.
+    keyframes in the BACKGROUND WHILE the replay/VIO is still alive, then build
+    the plan + ``stop()`` it afterwards. VIO shuts down once the replay sends END,
+    so the floor-plan client must be up before that happens -- attaching it up
+    front is what makes the build see live kf rings.
     """
     from ui.modules import IpcFloorPlanSource
 
@@ -436,9 +393,15 @@ def build_floor_plan_from(src):
     Asserts the occupancy raster is valid (a real ``(H,W,3)`` uint8 image, a sane
     world<->pixel extent, one camera path point per keyframe, some lit cell), then
     returns ``(rgb, path_px, cams, extent)`` for the caller to feed the window.
-    Confirms the shared ``_KeyframeAccumulator`` base populates a THIRD source with
+    Confirms the shared ``_KeyframeAccumulator`` base populates a SECOND source with
     NO extra SHM/recv wiring. The caller ``stop()``s the source.
     """
+    # Give the (already-subscribed) source time to drain keyframes out of VIO's kf
+    # rings before we build -- capture has drained by now in the caller; this just
+    # waits for the keyframes to land in the accumulator.
+    deadline = time.monotonic() + 6.0
+    while time.monotonic() < deadline and len(src._kf_depth) < 3:
+        time.sleep(0.2)
     n_kf = len(src._kf_depth)
     _check(n_kf >= 1, f"floor-plan source accumulated >=1 keyframe (got {n_kf})")
     rgb, path_px, cams, extent = src._build()
@@ -571,45 +534,17 @@ def test_menus(args) -> None:
         print(f"    [ok] keypoint: {len(ksamples)} samples, SEQ "
               f"{k0.seq}..{ksamples[-1].seq}, max trk {max_trk}")
 
-        # Attach the Floor-Plan source's keyframe client NOW (before the
-        # room-surface test's wait), so it accumulates keyframes in the background
-        # while VIO is still alive -- VIO shuts down once the replay ENDs, so its
-        # kf rings must be attached before then. We build + assert it in (f).
+        # Attach the Floor-Plan source's keyframe client NOW, so it accumulates
+        # keyframes in the background while VIO is still alive -- VIO shuts down
+        # once the replay ENDs, so its kf rings must be attached before then. We
+        # build + assert it in (e).
         floor_src = attach_floor_plan_source(vio_ep, bundle)
 
-        # ---------- (e) Visualize -> Room Surface (3D mesh) ----------
-        # Drive the IpcSurfaceMapSource directly (we control when the surface-mesh
-        # build runs) so we can assert a NON-EMPTY depth-surface mesh builds
-        # without error from the keyframe feed, with valid face indices + one RGB
-        # colour per vertex, and that RoomSurfaceWindow ingests it without raising.
-        # GL rasterisation is impossible on the offscreen Qt plugin, so this proves
-        # the build + GUI-thread ingest, not pixels.
-        from ui.qt.room_surface_window import RoomSurfaceWindow
-        smesh = test_surface_map_source(vio_ep, bundle)
-        verts, faces, vcols, vcams = smesh
-        n_tri = faces.shape[0]
-        rwin = RoomSurfaceWindow()
-        # update() touches the GL items; it must not raise on the GUI thread even
-        # offscreen (the framebuffer just stays blank).
-        rwin.update(verts, faces, vcols, vcams)
-        # Empty + a malformed (out-of-range face index) mesh exercise the guards.
-        rwin.update(np.zeros((0, 3), np.float32), np.zeros((0, 3), np.int64),
-                    None, None)
-        rwin.update(verts[:3], np.array([[0, 1, 999999]], np.int64), None, None)
-        app.processEvents()
-        rwin.close()
-        app.processEvents()
-        _check(n_tri > 0 and int(faces.max()) < len(verts),
-               f"room-surface mesh: {len(verts)} verts -> {n_tri} triangles "
-               f"(face indices in range)")
-        print(f"    [ok] room-surface: {len(verts)} verts, "
-              f"{n_tri} triangles, {len(vcams)} cams")
-
-        # ---------- (f) Visualize -> Floor Plan (top-down) ----------
+        # ---------- (e) Visualize -> Floor Plan (top-down) ----------
         # Build the 2D occupancy raster from the keyframes the floor-plan source
-        # accumulated above (in parallel with the room-surface source), and assert
-        # FloorPlanWindow ingests it without raising. This window is a 2D
-        # PlotWidget (NO GLViewWidget) so it renders fine offscreen.
+        # accumulated above, and assert FloorPlanWindow ingests it without raising.
+        # This window is a 2D PlotWidget (NO GLViewWidget) so it renders fine
+        # offscreen.
         from ui.qt.floor_plan_window import FloorPlanWindow
         try:
             frgb, fpath, fcams, fext = build_floor_plan_from(floor_src)

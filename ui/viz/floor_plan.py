@@ -1,7 +1,7 @@
 """UI-only top-down FLOOR-PLAN builder (pure numpy, no GL / no Qt / no display).
 
-The 3D map viewers (point cloud, voxel, surface mesh) are heavy GL on this Mac
-AND hard to read (noisy marginal depth seen in perspective). This module builds a
+The 3D map viewer (the SLAM landmark point cloud) is heavy GL on this Mac AND
+hard to read (noisy marginal depth seen in perspective). This module builds a
 LIGHT, READABLE alternative: a 2D top-down OCCUPANCY raster of the room -- the
 walls/vertical structure read as a top-down OUTLINE, with the camera path drawn
 over it -- so the room LAYOUT is obvious at a glance. Because the result is a 2D
@@ -9,15 +9,15 @@ raster it renders as a cheap pyqtgraph ``ImageItem`` (no ``GLViewWidget``), and 
 crucially -- it can be written to a PNG with pure numpy/cv2 with NO GL/display, so
 the build is VISUALLY VERIFIABLE offscreen (the GL viewers were not).
 
-It is a pure CONSUMER of the SAME VIO keyframe feed the 3D maps use (denoised
-``depth_m`` + each keyframe's own VIO pose ``[R | t]``): no new topic, no
-data-path change, no new dependency.
+It is a pure CONSUMER of the SAME VIO keyframe feed the SLAM landmark map uses
+(denoised ``depth_m`` + each keyframe's own VIO pose ``[R | t]``): no new topic,
+no data-path change, no new dependency.
 
 Frame / projection plane (which axis is the ground, which is height)
 --------------------------------------------------------------------
 The keyframe poses + the back-projected world points live in the CAMERA-OPTICAL
 world frame (OpenCV optical: ``+x`` right, ``+y`` DOWN, ``+z`` forward), the same
-frame the SLAM-map / surface-mesh builders use. The viewer's optical->NED map is
+frame the SLAM-map builder uses. The viewer's optical->NED map is
 ``_M_OPT_TO_NED = [[0,0,1],[1,0,0],[0,1,0]]``, whose Down row picks the optical
 ``+y`` axis -- so optical ``+y`` is world-DOWN (the VERTICAL axis) and the GROUND
 plane is the optical ``(x, z)`` plane. The floor plan therefore:
@@ -49,8 +49,8 @@ build a clean SOLID occupied-region mask and take its OUTLINE. Three stages:
    a faint raw-occupancy context wash.
 
 Everything here is pure numpy + a single ``np.add.at`` histogram + a few cheap 2D
-cv2 ops on the small raster, so a rebuild is far cheaper than a 3D mesh build (it
-can run at a higher rate than the surface map). No Qt, no GL, no device, no comms.
+cv2 ops on the small raster, so a rebuild is far cheaper than a 3D map build (it
+can run at a higher rate). No Qt, no GL, no device, no comms.
 """
 from __future__ import annotations
 
@@ -71,9 +71,9 @@ CELL_M = 0.08
 #: keeps the build cheap while the walls/outline survive. LOWER (toward 1) for a
 #: denser, heavier plan; RAISE for a lighter, sparser one.
 STRIDE = 4
-#: Valid-depth band (m) for the floor plan. ``MIN`` matches the other builders
+#: Valid-depth band (m) for the floor plan. ``MIN`` matches the SLAM-map builder
 #: (below it stereo is unreliable). ``MAX`` is deliberately TIGHTER than the
-#: SLAM-map / surface builders' 6.0 m: a dense per-pixel occupancy plan seen
+#: SLAM-map builder's 6.0 m: a dense per-pixel occupancy plan seen
 #: top-down is dominated by the FAR depth, where stereo range error grows ~with
 #: range^2 and SPRAYS points radially along each viewing ray -- a "starburst" fan
 #: from every camera that smears the walls. Those fans are the single biggest
@@ -88,7 +88,7 @@ MAX_DEPTH_M = 2.5
 #: foreground/background edge back-projects to points floating BETWEEN the two
 #: surfaces, which would smear the plan). A pixel is kept only if BOTH its
 #: vertical and horizontal depth gradient are <= this. 0 disables the reject.
-#: SAME idea as the surface mesh's ``EDGE_MAX_M``.
+#: SAME idea as the shared geometry back-projection edge-reject.
 EDGE_MAX_M = 0.1
 #: Cap on the grid's larger side (cells). A runaway extent (a diverged pose
 #: shooting a point far away) must not allocate a giant raster; clamp the longer
@@ -215,7 +215,7 @@ def keyframes_to_ground_points(depths, Rs, ts, K, *,
                                edge_max: float = EDGE_MAX_M):
     """Back-project keyframe depth maps to world points, gated + strided.
 
-    Mirrors the SLAM-map / surface builders' geometry: each keyframe's depth is
+    Mirrors the SLAM-map builder's geometry: each keyframe's depth is
     back-projected with the pinhole to its camera frame and transformed to the
     camera-optical WORLD frame by the keyframe's OWN VIO pose ``Xw = R Xc + t``
     (one pose source per keyframe -> seam-free). The depth grid is subsampled by

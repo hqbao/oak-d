@@ -84,7 +84,6 @@ long-lived trajectory sources use:
 | Keypoint Depth Tracker        | `IpcKeypointWorker`          | capture · `frame.depth`  +  vio · `frame.tracks`, `frame.inliers` |
 | Gyro Fusion (strip chart)     | `IpcGyroFuseSource`          | vio · `frame.gyrofuse` |
 | SLAM Map (landmarks)          | `IpcSlamMapSource`           | vio · `keyframe` (gray/depth/`track_ids`/`track_px`/`inlier_ids` via VIO's kf rings) + slam · `slam.map` (corrected poses) |
-| Room Surface (3D mesh)        | `IpcSurfaceMapSource`        | vio · `keyframe` (gray/depth via VIO's kf rings) |
 | Floor Plan (top-down)         | `IpcFloorPlanSource`         | vio · `keyframe` (depth via VIO's kf rings) |
 
 The crucial design rule: **nothing but `imu_camera` opens the OAK-D**. The UI never
@@ -430,9 +429,7 @@ The menu is plain Qt (`QMenuBar` / `QAction`); `ui.main` calls
   SLAM's loop-corrected poses, in the same ENU frame as `Viewer3D`; the gate is a
   **longest-consecutive-keyframe-run** filter — `ui/viz/map_cloud.py::longest_consecutive_run`,
   UI-only — so only consistently-tracked, motion-validated points show, NOT a dense
-  reconstruction), **"Room Surface (3D mesh)…"** (`RoomSurfaceWindow`, driven by
-  `IpcSurfaceMapSource` — a continuous **depth-surface mesh** of a spatially-spread
-  keyframe subset, `ui/viz/surface_mesh.py`, UI-only), and **"Floor Plan (top-down)…"**
+  reconstruction), and **"Floor Plan (top-down)…"**
   (`FloorPlanWindow`, driven by `IpcFloorPlanSource` — a **LIGHT 2D top-down
   wall-outline raster**, NOT OpenGL). The floor plan is a cheap, readable alternative
   to the 3D maps (heavy GL on a Mac, noisy in perspective): it back-projects each
@@ -473,11 +470,11 @@ only the capture rings it needs, and surfaces a connect failure (capture down) a
 clear reason rather than a raw shared-memory path error.
 
 Beside these three duck-typed adapters, the same module hosts the **keyframe-map
-builder** sources — `IpcSlamMapSource` (sparse landmark cloud), `IpcSurfaceMapSource`
-(continuous surface mesh) and `IpcFloorPlanSource` (2D top-down wall-outline raster).
-All three subclass a shared `_KeyframeAccumulator` base (VIO `keyframe` ring attach +
-stash + evict + a coalesced off-GUI rebuild loop), so each adds **only** its own
-build (`_build`) with **no copy-paste** of the SHM/recv wiring; the floor-plan build
+builder** sources — `IpcSlamMapSource` (sparse landmark cloud) and `IpcFloorPlanSource`
+(2D top-down wall-outline raster). Both subclass a shared `_KeyframeAccumulator` base
+(VIO `keyframe` ring attach + stash + evict + a coalesced off-GUI rebuild loop), so
+each adds **only** its own build (`_build`) with **no copy-paste** of the SHM/recv
+wiring; the floor-plan build
 delegates to the pure-numpy+cv2 `ui/viz/floor_plan.py` so its projection + wall-mask
 cleanup are testable headless.
 

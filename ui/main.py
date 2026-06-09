@@ -576,13 +576,11 @@ def run_ui(*, vio_endpoint: str = DEFAULT_VIO_ENDPOINT,
     from ui.qt.keypoints_window import KeypointTrackWindow
     from ui.qt.gyrofuse_window import GyroFuseWindow
     from ui.qt.map_window import MapWindow
-    from ui.qt.room_surface_window import RoomSurfaceWindow
     from ui.qt.floor_plan_window import FloorPlanWindow
     from ui.qt.calib_dialogs import GyroCalibDialog, AccelCalibDialog
     from ui.modules import (
         IpcImuRawSource, IpcGyroFuseSource, ipc_triplet_factory,
-        ipc_keypoint_factory, ipc_slam_map_factory, ipc_surface_map_factory,
-        ipc_floor_plan_factory,
+        ipc_keypoint_factory, ipc_slam_map_factory, ipc_floor_plan_factory,
     )
 
     # 1. Wait for VIO + SLAM to be ready (and learn the capture resolution).
@@ -831,44 +829,6 @@ def run_ui(*, vio_endpoint: str = DEFAULT_VIO_ENDPOINT,
     slam_map_act.triggered.connect(_open_slam_map)
     vis_menu.addAction(slam_map_act)
 
-    # Room Surface (3D mesh): the SAME mapped space as the SLAM-map window, but
-    # rendered as CONTINUOUS SHADED SURFACES (a depth-map surface mesh) so
-    # walls/floor/ceiling read as smooth connected sheets and the enclosed room is
-    # recognisable -- a COMPLEMENT to the point-cloud SLAM map, not a replacement.
-    # The IpcSurfaceMapSource consumes VIO's ``keyframe`` (gray/depth via VIO's kf
-    # rings) only, selects a spatially-spread subset of keyframes, meshes each one's
-    # dense depth (back-projected by its own VIO pose, with an edge-discontinuity
-    # reject) into a connected triangle surface, and stacks them into ONE shaded
-    # mesh; its callback hands each rebuilt mesh to the window via the thread-safe
-    # `submit` (a queued signal onto the GUI thread). Cached on `win`; the source is
-    # stopped in run_ui's teardown (mirrors the SLAM-Map entry).
-    def _open_room_surface() -> None:
-        if getattr(win, "_room_surface_win", None) is None:
-            win._room_surface_win = RoomSurfaceWindow(
-                title="Room Surface (3D mesh)")
-        rwin = win._room_surface_win
-        # (Re)start the source on every open (one-shot per run, like the SLAM map):
-        # stop a prior one before spawning a fresh one.
-        old = getattr(win, "_room_surface_src", None)
-        if old is not None:
-            try:
-                old.stop()
-            except Exception:                                      # noqa: BLE001
-                pass
-        src = ipc_surface_map_factory(vio_endpoint, vio_bundle.K, W, H)()
-        win._room_surface_src = src
-        src.start_mesh(rwin.submit)
-        if src.error:
-            win.statusBar().showMessage(f"Room surface: {src.error}", 4000)
-        rwin.show()
-        rwin.raise_()
-        rwin.activateWindow()
-        win.statusBar().showMessage("Room Surface (3D mesh) opened.", 2500)
-
-    room_surface_act = QAction("Room Surface (3D mesh)…", win)
-    room_surface_act.triggered.connect(_open_room_surface)
-    vis_menu.addAction(room_surface_act)
-
     # Floor Plan (top-down): the SAME mapped space, but rendered as a LIGHT 2D
     # top-down OCCUPANCY raster (NO OpenGL) -- the walls read as a top-down outline
     # + the camera path -- so the room layout is clear AND the view never stutters
@@ -997,11 +957,10 @@ def run_ui(*, vio_endpoint: str = DEFAULT_VIO_ENDPOINT,
         # process alive after `app.exec()` returns.
         vio_source.stop()
         tracker.stop()
-        # The SLAM-map + Room-surface + Floor-plan sources are standalone threads
-        # (their windows are plain QMainWindows with no closeEvent worker-stop), so
-        # stop them explicitly here.
-        for _src_attr in ("_slam_map_src", "_room_surface_src",
-                          "_floor_plan_src"):
+        # The SLAM-map + Floor-plan sources are standalone threads (their windows
+        # are plain QMainWindows with no closeEvent worker-stop), so stop them
+        # explicitly here.
+        for _src_attr in ("_slam_map_src", "_floor_plan_src"):
             _src = getattr(win, _src_attr, None)
             if _src is not None:
                 try:
@@ -1012,7 +971,7 @@ def run_ui(*, vio_endpoint: str = DEFAULT_VIO_ENDPOINT,
         # (closeEvent stops the worker). The calib dialogs are modal + scoped to
         # their handler's `finally`, so there's nothing to clean up for them here.
         for _attr in ("_triplet_win", "_keypoints_win", "_gyrofuse_win",
-                      "_slam_map_win", "_room_surface_win", "_floor_plan_win"):
+                      "_slam_map_win", "_floor_plan_win"):
             _w = getattr(win, _attr, None)
             if _w is not None:
                 try:

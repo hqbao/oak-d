@@ -1,7 +1,7 @@
 """FloorPlanWindow: a LIGHT 2D top-down floor plan of the room (NO OpenGL).
 
-A cheap, readable alternative to the 3D map windows (point cloud / voxel / surface
-mesh): those are heavy GL on this Mac AND hard to read (noisy marginal depth in
+A cheap, readable alternative to the 3D SLAM map window (the landmark point
+cloud): it is heavy GL on this Mac AND hard to read (noisy marginal depth in
 perspective). This window instead shows a 2D TOP-DOWN occupancy raster -- the
 walls/vertical structure read as a top-down OUTLINE with the camera path drawn over
 it -- so the room LAYOUT is obvious. It renders on a pyqtgraph 2D

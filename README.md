@@ -356,31 +356,13 @@ The menu bar renders **in-window on every platform** (`setNativeMenuBar(False)`)
 
 - **View** — camera presets and Follow Camera.
 - **Visualize** — *Camera + Depth + IMU (triplet)*, *Keypoint Depth Tracker*,
-  *Gyro Fusion (strip chart)*, *SLAM Map (3D room)*, *Room Surface (3D mesh)*, and
-  *Floor Plan (top-down)*.
+  *Gyro Fusion (strip chart)*, *SLAM Map (3D room)*, and *Floor Plan (top-down)*.
   - *SLAM Map (3D room)* — the sparse, ID-based landmark map: ONE point per KLT track
     id that was a PnP inlier across ≥ `PERSIST_KF` (=6) SUCCESSIVE keyframes + keyframe
     cameras, in the same ENU frame as the main viewer; the gate is a UI-only
     longest-consecutive-run filter, `ui/viz/map_cloud.py::longest_consecutive_run`, so
     only consistently-tracked, motion-validated points show, NOT a dense reconstruction.
-  - *Room Surface (3D mesh)* — a COMPLEMENT to the point-cloud map: the SAME mapped
-    space rendered as **continuous shaded surfaces**. A spatially-spread subset of VIO
-    keyframes is picked (greedy: keep a keyframe only if its camera is > `KF_SPACING_M`
-    (≈0.3 m) from every kept one, so a few viewpoints cover the room); each selected
-    keyframe's depth map (sub-sampled by `MESH_STRIDE`=3) is back-projected by its own
-    pose and **triangulated** — every 2×2 depth cell → 2 triangles, kept only when all
-    corners are valid AND their depth spread ≤ `EDGE_MAX_M` (≈0.1 m), which drops the
-    fg/bg "curtain" triangles across depth discontinuities. The per-keyframe surfaces
-    are stacked into ONE smooth-shaded `pyqtgraph.opengl.GLMeshItem`
-    (`shader='shaded'`, `smooth=True`), vertices coloured by height so floor/walls/ceiling
-    read as a gradient — so walls/floor become continuous surfaces and the enclosed room
-    is recognisable. The total triangle count is capped (~1.5 M); past it the build
-    coarsens `MESH_STRIDE` and logs it. No marching-cubes / Poisson library is used
-    (deps stay numpy + cv2 + pyqtgraph for the C port) — it is dependency-free
-    per-keyframe depth-map meshing. UI-only: the keyframe selection + depth-surface
-    meshing live in `ui/viz/surface_mesh.py` (`select_spread_keyframes` /
-    `depth_surface_mesh`), the window in `ui/qt/room_surface_window.py`.
-  - *Floor Plan (top-down)* — a **LIGHT, no-OpenGL** alternative to the two 3D maps
+  - *Floor Plan (top-down)* — a **LIGHT, no-OpenGL** alternative to the 3D map
     (heavy GL on a Mac, noisy depth hard to read in perspective): a **2D top-down
     wall-outline raster**. Each keyframe's depth is back-projected by its own VIO pose
     (strided, same depth gate + edge reject as the 3D builds, but a **tighter
@@ -403,15 +385,14 @@ The menu bar renders **in-window on every platform** (`setNativeMenuBar(False)`)
     area, outline-vs-filled) is exposed + commented. UI-only: the pure-numpy+cv2
     projection + cleanup live in `ui/viz/floor_plan.py`, the window in
     `ui/qt/floor_plan_window.py`.
-  - All three map windows reuse the same VIO `keyframe` feed via a shared
+  - Both map windows reuse the same VIO `keyframe` feed via a shared
     `_KeyframeAccumulator` base (`ui/modules/ipc_sources.py`) — the SHM ring attach +
     keyframe stash + evict wiring is written ONCE; the landmark source adds SLAM's
-    `slam.map`, the surface source adds the depth-surface-mesh build, the floor-plan
-    source adds the 2D ground-plane wall-outline build.
+    `slam.map`, the floor-plan source adds the 2D ground-plane wall-outline build.
   - All reuse the unchanged `ui/qt` windows, fed over IPC by the adapters in
     `ui/modules/ipc_sources.py` (capture's `imucam.sample` / `frame.depth`; the tracker
     also VIO's `frame.tracks` / `frame.inliers`; the SLAM map VIO's `keyframe` + SLAM's
-    `slam.map`; Room Surface + Floor Plan VIO's `keyframe` only).
+    `slam.map`; the Floor Plan VIO's `keyframe` only).
 - **Calibration** — *Gyroscope Bias* and *Accelerometer (6-position)*, fed by
   capture's **raw** `imu.raw`. Because capture (not the UI) owns the device, a
   saved calibration is keyed per device (`device_id` from the calib bundle) and
