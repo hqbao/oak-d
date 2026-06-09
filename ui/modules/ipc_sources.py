@@ -416,9 +416,9 @@ class _KeyframeAccumulator(threading.Thread):
     #: Cap on kept keyframes (bounds memory like the other UI buffers). At
     #: kf_every=5 @ 20 fps a keyframe lands ~every 0.25 s, so 600 kf ~= 2.5 min of
     #: distinct keyframes -- far more than any 3D map needs. The occupancy grid is
-    #: PERSISTENT (it accumulates hit counts as keyframes arrive), so an evicted
-    #: keyframe's hits stay folded into the grid -- this cap only bounds the raw
-    #: depth-grid buffer, not the fused map.
+    #: PERSISTENT (it accumulates log-odds evidence as keyframes arrive), so an
+    #: evicted keyframe's evidence stays folded into the grid -- this cap only bounds
+    #: the raw depth-grid buffer, not the fused map.
     MAX_KEYFRAMES = 600
     #: Valid-depth band (m): outside this range stereo depth is too noisy to
     #: back-project. The occupancy build gates the whole depth grid to this band.
@@ -497,8 +497,8 @@ class _KeyframeAccumulator(threading.Thread):
         keyframe -> no seams). The depth grid is the keyframe's DENOISED metric
         depth (``read_copy``-ed out of VIO's ``kf_depth`` ring by the converter).
         Marks the model dirty so the subclass NEXT rebuild folds it in (the
-        occupancy build INCREMENTS the persistent hit-count grid from the
-        not-yet-fused keyframes -- see :meth:`IpcSlamMapSource._build`).
+        occupancy build adds occupied + free log-odds evidence to the persistent
+        grid from the not-yet-fused keyframes -- see :meth:`IpcSlamMapSource._build`).
         """
         if wm is END:
             return
@@ -596,15 +596,24 @@ class IpcSlamMapSource(_KeyframeAccumulator):
 
     Instead of a noisy per-keyframe point cloud, this builds the clean blocky
     occupancy map the user wants (floor grid + walls + furniture as green voxel
-    cubes) the way an OctoMap does it: by TEMPORAL OCCUPANCY FUSION. The earlier
-    naive per-keyframe voxel binning was noisy + laggy precisely because it lacked
-    this fusion -- it re-binned every keyframe from scratch and kept every cell a
-    ray ever touched (so transient stereo noise survived). Here a PERSISTENT
-    per-voxel HIT-COUNT grid accumulates across keyframes and a cell only counts as
-    OCCUPIED once it has been hit by ``>= OCC_HITS`` keyframes -- a real surface is
-    re-observed many times and survives; random stereo noise hits a cell once or
-    twice and is rejected. That fusion both CLEANS the map and keeps the voxel
-    count (and therefore the render load) low.
+    cubes) the way an OctoMap / Voxblox does it: a PROBABILISTIC LOG-ODDS OCCUPANCY
+    GRID with FREE-SPACE RAY CARVING. This is how ModalAI VOXL gets a clean map out
+    of NOISY STEREO (not a ToF sensor): every depth ray does TWO things -- it adds
+    OCCUPIED evidence at its hit point AND adds FREE evidence to every voxel it
+    passes THROUGH on the way there. A voxel that stereo noise wrongly populated
+    from one viewpoint is later CROSSED by rays from new viewpoints (the camera can
+    now see THROUGH it), and that free evidence drives its log-odds back below the
+    occupied threshold so the voxel DISAPPEARS. The map self-cleans as the camera
+    moves -- exactly the "remove already-added points when they're detected invalid"
+    behaviour the user asked for.
+
+    This supersedes the earlier hit-count-only grid (a cell occupied once it was hit
+    by ``>= OCC_HITS`` keyframes). That gate only ever ADDED; it never removed, so
+    persistent stereo artefacts (e.g. the garbage cone a textureless ceiling throws)
+    that were re-hit a few times crossed the threshold and stuck forever, blobbing
+    the map. Log-odds + carving is strictly better: it keeps the temporal-fusion
+    cleanliness (a real surface is re-observed and its log-odds climbs and saturates)
+    AND actively erases noise the camera later sees past.
 
     This is a pure CONSUMER of existing topics: no new field, no data-path change.
 
@@ -615,9 +624,10 @@ class IpcSlamMapSource(_KeyframeAccumulator):
     * ``keyframe`` (VIO) -> per keyframe ``seq`` we keep its DENOISED metric depth
       (``read_copy``-ed out of VIO's kf ring by the converter) and the FULL POSE
       (rotation AND translation) of its ``T_world_cam`` -- everything the
-      back-projection needs. The keyframe rate is low (kf_every), so a bounded dict
-      of the last :data:`MAX_KEYFRAMES` raw depth grids caps memory (the fused
-      occupancy grid is persistent and unaffected by that cap).
+      back-projection needs. The translation is also the camera ORIGIN ``C`` each
+      ray is carved FROM. The keyframe rate is low (kf_every), so a bounded dict of
+      the last :data:`MAX_KEYFRAMES` raw depth grids caps memory (the fused log-odds
+      grid is persistent and unaffected by that cap).
     * ``slam.map`` (SLAM) -> the CONTINUOUS per-keyframe loop-closure-corrected
       positions, keyed by source frame seq. Retained (and kept fresh) as the source
       of truth for a future corrected-map variant + diagnostics, but it does NOT
@@ -625,26 +635,43 @@ class IpcSlamMapSource(_KeyframeAccumulator):
       a consistent, seam-free odom-frame grid. (Re-anchoring the grid to the
       loop-corrected translations is a deliberate later step.)
 
-    Occupancy fusion (PERSISTENT + INCREMENTAL -- see :meth:`_fuse_keyframe_locked`
-    and :meth:`_build`):
+    Log-odds occupancy fusion (PERSISTENT + INCREMENTAL -- see
+    :meth:`_fuse_keyframe_locked` and :meth:`_build`):
 
-    1. :attr:`_hits` is a persistent ``{(ix,iy,iz) -> hit_count}`` dict. As each
-       NEW keyframe arrives, its (denoised) depth is back-projected to the world by
-       the keyframe's OWN VIO pose (strided + depth-gated + edge-rejected), each hit
-       point is quantised to a :data:`VOXEL_M` cell, and that cell's hit_count is
-       INCREMENTED (capped at :data:`HIT_CAP` so a long dwell can't overflow). The
-       grid ACCUMULATES across keyframes; we never rebuild it from scratch. A set
-       :attr:`_fused_seqs` records which keyframe seqs are already folded in, so a
-       rebuild only folds the not-yet-fused keyframes (cheap, incremental).
-    2. A cell is OCCUPIED when ``hit_count >= OCC_HITS`` -- the temporal noise
-       filter. Render emits one voxel per occupied cell.
+    1. :attr:`_log` is a persistent ``{(ix,iy,iz) -> log_odds (float)}`` dict.
+       log_odds is ``log(p_occ / (1 - p_occ))``; >0 leans occupied, <0 leans free.
+       As each NEW keyframe arrives, its (denoised) depth is back-projected to the
+       world by the keyframe's OWN VIO pose ``P = R Xc + t`` (strided + depth-gated
+       + edge-rejected), with the camera origin ``C = t``. Then, per keyframe:
+
+       * HIT update: the voxel containing each world hit ``P`` gets ``+= L_OCC``.
+       * FREE carving: every voxel the ray ``C -> P`` passes THROUGH (from ``C`` up
+         to JUST BEFORE the hit voxel) gets ``+= L_FREE`` -- a Voxblox/OctoMap miss
+         update. Vectorised 3D voxel traversal (amanatides-woo DDA stepped in
+         lockstep across all rays) so it is numpy-fast over every ray at once; the
+         carve range is capped at :attr:`MAX_DEPTH_M` so a ray never traverses an
+         unbounded voxel line. Each cell is updated ONCE per (keyframe, kind) -- a
+         cell hit/crossed by many rays in ONE keyframe still moves by a single
+         ``L_OCC``/``L_FREE`` (the +1 is per (keyframe, cell), the temporal fusion).
+         A cell both crossed AND hit in the same keyframe is treated as a HIT (the
+         endpoint wins -- it is the measured surface).
+
+       The accumulated log-odds is clamped to ``[L_MIN, L_MAX]`` so a long dwell
+       can't pin a cell so high that later free evidence can never carve it (the
+       OctoMap "clamping update policy"). The grid ACCUMULATES across keyframes; we
+       never rebuild it from scratch. A set :attr:`_fused_seqs` records which seqs
+       are already folded in, so a rebuild only folds the not-yet-fused keyframes
+       (cheap, incremental).
+    2. A cell is OCCUPIED when ``log_odds >= L_OCC_THRESH``. Render emits one voxel
+       per occupied cell. A noise voxel that gets carved by later crossing rays
+       drops below the threshold and DISAPPEARS from the render.
     3. Output: ALL occupied voxel CENTRES (the cell index * VOXEL_M + half a cell)
        + a GREEN gradient colour by HEIGHT (derived from the cell's world ``y``,
        the optical DOWN axis). We render the WHOLE occupied set so the map GROWS as
-       the camera explores; a bounded room's occupied count PLATEAUS, and OCC_HITS
-       keeps it light. :data:`MAX_VOXELS` is only a HIGH runaway safety cap (a fair
-       random subsample if ever tripped -- NEVER a "keep top-N by hit_count" drop,
-       which would erase the newest areas and froze the map at the start).
+       the camera explores; carving keeps it CLEAN (noise removed) and a bounded
+       room's occupied count PLATEAUS. :data:`MAX_VOXELS` is only a HIGH runaway
+       safety cap (a fair random subsample if ever tripped -- NEVER a "keep top-N"
+       drop, which would erase the newest areas and froze the map at the start).
 
     Render choice (light, no-lag): the window draws the voxels as a
     ``GLScatterPlotItem`` of large SQUARE world-unit points (size == VOXEL_M,
@@ -653,21 +680,23 @@ class IpcSlamMapSource(_KeyframeAccumulator):
     squares read as the blocky cubes. The rebuild is coalesced + capped at
     :attr:`REBUILD_HZ` and only re-emits when the occupied set CHANGED -- grew or
     shifted (see :meth:`run` + :meth:`_occ_signature`), so the GUI never re-uploads
-    an identical cloud yet always reflects newly-explored areas.
+    an identical cloud yet always reflects newly-explored / newly-carved areas.
 
-    FUTURE (v2, do NOT implement now unless cheap): free-space RAY-CARVING -- decrement
-    the hit_count of voxels along each depth ray BEFORE the hit (the ones the ray
-    passed through unobstructed) so a flying-voxel that a later ray sees through is
-    actively cleared, exactly like OctoMap's miss updates. v1 only does hit updates
-    (the >= OCC_HITS gate already rejects most one-off noise without the extra
-    per-ray traversal cost).
+    Perf (the user is sensitive to lag): carving is the cost -- each ray touches
+    ~range/VOXEL_M voxels. It is mitigated three ways: (a) the DDA is fully
+    vectorised over all rays (no per-ray Python loop), (b) :attr:`STRIDE` limits the
+    ray count, (c) the carve range is capped at :attr:`MAX_DEPTH_M`. The whole build
+    runs OFF the GUI thread (this source is a worker that ``submit()``s the finished
+    voxels) and is throttled at :attr:`REBUILD_HZ`, so the UI never stalls; and the
+    rendered result is LIGHTER than the old hit-only map because carving removes
+    voxels. The functional probe reports the per-keyframe fuse time.
 
     ``K`` comes from VIO's retained ``calib.bundle`` (the rectified-left intrinsic
     for the full-res depth grid the keyframe ``depth_m`` lives on).
 
     The VIO keyframe feed (ring attach + ``_on_keyframe`` stash + evict + the
     coalesced rebuild loop) is inherited from :class:`_KeyframeAccumulator`; this
-    class adds the ``slam.map`` client + the occupancy fusion + the voxel build.
+    class adds the ``slam.map`` client + the log-odds fusion + the voxel build.
 
     Connect-error model mirrors :class:`IpcGyroFuseSource` /
     :class:`IpcKeypointWorker`: :meth:`start` swallows a connect timeout onto
@@ -687,45 +716,56 @@ class IpcSlamMapSource(_KeyframeAccumulator):
     #: agree per cell). LOWER for finer structure (more voxels, heavier); RAISE for
     #: a coarser, lighter map.
     VOXEL_M = 0.10
-    #: Occupancy threshold: a cell is OCCUPIED (rendered) only once it has been hit
-    #: by >= OCC_HITS keyframes. This IS the temporal noise filter -- a real surface
-    #: is re-observed across many keyframes (survives); a random stereo-noise hit
-    #: touches a cell once (rejected). Because we now render ALL occupied cells (no
-    #: top-N cap that favoured the start), OCC_HITS is also the RENDER-LOAD knob:
-    #: 5 yields fewer, cleaner voxels per area so a whole noisy-OAK-D room stays a
-    #: light scatter that plateaus around a few tens of thousands of points (vs the
-    #: old 3, which on noisy stereo overran the 30k cap in the start area alone and
-    #: starved every later area). RAISE for a cleaner/sparser/lighter map (slower to
-    #: fill, needs more re-observation); LOWER toward 1 to fill faster (noisier,
-    #: heavier).
-    OCC_HITS = 5
     #: Depth-map subsample stride: back-project every STRIDE-th pixel in u and v.
     #: The occupancy grid only needs the room SHAPE, not every pixel, so a stride of
-    #: 4 (1/16 the rays) keeps the per-keyframe fuse cheap while surfaces still get
-    #: dense multi-keyframe support. LOWER (toward 1) for denser support (heavier
-    #: fuse); RAISE for a lighter, sparser fuse.
+    #: 4 (1/16 the rays) keeps the per-keyframe fuse + carve cheap while surfaces
+    #: still get dense multi-keyframe support. Carving cost scales with the ray
+    #: count, so STRIDE is the primary perf knob. LOWER (toward 1) for denser support
+    #: (heavier fuse + carve); RAISE for a lighter, sparser fuse.
     STRIDE = 4
     #: Edge-reject threshold (m): drop "flying pixels" on a depth discontinuity (a
     #: fg/bg edge back-projects to points floating BETWEEN the two surfaces). A
     #: pixel is kept only if BOTH its vertical and horizontal depth gradient are
     #: <= this. SAME idea as the shared geometry edge-reject; 0 disables it.
     EDGE_MAX_M = 0.1
-    #: Per-cell hit-count ceiling. Without it a stationary dwell could pump one
-    #: cell's count arbitrarily high (no harm to occupancy, but it would dominate
-    #: any future confidence/decay logic + the colour normalisation). Capping keeps
-    #: the counts in a sane band; well above OCC_HITS so it never affects the gate.
-    HIT_CAP = 255
+
+    # --- Log-odds occupancy constants (OctoMap/Voxblox-style; see class doc). ---
+    #: OCCUPIED evidence added to the hit voxel per keyframe (a "hit" sensor model
+    #: update, ~log(0.7/0.3) ~= +0.85). RAISE so surfaces lock in faster / resist
+    #: carving more; LOWER so noise carves away more easily.
+    L_OCC = 0.85
+    #: FREE evidence added to every voxel a ray passes THROUGH per keyframe (a
+    #: "miss" update, ~log(0.4/0.6) ~= -0.40). This is what REMOVES wrongly-added
+    #: voxels: a noise cell crossed by later rays accumulates this until it drops
+    #: below L_OCC_THRESH and disappears. |L_FREE| < L_OCC so a single grazing
+    #: free-ray can't erase a well-supported surface, but a couple of crossings can
+    #: carve a once-seen noise voxel. RAISE the magnitude (toward L_OCC) to carve
+    #: more aggressively; LOWER to carve more conservatively.
+    L_FREE = -0.40
+    #: Clamp band on the accumulated log-odds (OctoMap's "clamping update policy").
+    #: L_MAX bounds how confident a cell can get so a long dwell can't pin it so high
+    #: that later free evidence can NEVER carve it (defeating the whole point);
+    #: L_MIN bounds the free side symmetrically. L_MAX/L_OCC ~= 4 hits to saturate;
+    #: |L_MIN|/|L_FREE| ~= 5 crossings to bottom out.
+    L_MIN = -2.0
+    L_MAX = 3.5
+    #: Occupancy threshold: a cell is OCCUPIED (rendered) when its log_odds is >= this
+    #: (p_occ ~= 0.62). One un-carved hit (L_OCC=0.85) already crosses it, so a
+    #: surface shows immediately; two later free crossings (2*L_FREE=-0.80) pull a
+    #: once-hit noise voxel to +0.05 < thresh and it vanishes. RAISE for a stricter
+    #: (cleaner, sparser, slower-to-fill) map; LOWER toward 0 to fill faster (noisier).
+    L_OCC_THRESH = 0.5
+
     #: Hard SAFETY cap on rendered voxels (runaway guard ONLY). We render ALL
-    #: occupied cells (hit_count >= OCC_HITS) -- a bounded room's occupied count
-    #: PLATEAUS (each surface re-observed but no new surface once explored), so a
-    #: green height-coloured GLScatterPlotItem of a few tens of thousands of points
-    #: stays light. This cap exists solely so a pathological unbounded sweep can't
-    #: explode the render; it is set HIGH (well above a room's plateau) so it never
-    #: trips in normal use. When it DOES trip we subsample FAIRLY (a uniform random
-    #: draw -- see :meth:`_build`), NOT by lowest hit-count: dropping the lowest
-    #: counts would erase exactly the newest, least-re-observed areas (the bug that
-    #: froze the map at the start). LOWER only if a room genuinely overruns the
-    #: render budget; RAISE for an even larger guard band.
+    #: occupied cells (log_odds >= L_OCC_THRESH) -- carving keeps the set CLEAN and a
+    #: bounded room's occupied count PLATEAUS, so a green height-coloured
+    #: GLScatterPlotItem of a few tens of thousands of points stays light. This cap
+    #: exists solely so a pathological unbounded sweep can't explode the render; it is
+    #: set HIGH (well above a room's plateau) so it never trips in normal use. When it
+    #: DOES trip we subsample FAIRLY (a uniform random draw -- see :meth:`_build`),
+    #: NOT by lowest log-odds: dropping the lowest would erase exactly the newest,
+    #: least-re-observed areas (the bug that froze the map at the start). LOWER only if
+    #: a room genuinely overruns the render budget; RAISE for an even larger guard band.
     MAX_VOXELS = 150_000
 
     def __init__(self, vio_endpoint: str, slam_endpoint: str, K: np.ndarray, *,
@@ -737,11 +777,14 @@ class IpcSlamMapSource(_KeyframeAccumulator):
         self._slam_ep = slam_endpoint
         self._K = np.asarray(K, dtype=np.float64).reshape(3, 3)
         self._slam_client: IPCPubSub | None = None
-        # PERSISTENT occupancy hit-count grid: {(ix,iy,iz) int -> hit_count int}.
-        # Accumulated across keyframes (NEVER rebuilt from scratch); guarded by the
-        # base's _lock together with the depth/pose dicts.
-        self._hits: dict[tuple[int, int, int], int] = {}
-        # The keyframe seqs already folded into _hits, so a rebuild only fuses the
+        # PERSISTENT log-odds occupancy grid: {(ix,iy,iz) int -> log_odds float}.
+        # log_odds = log(p_occ / (1 - p_occ)); >0 leans occupied, <0 leans free.
+        # Each keyframe's rays push hit voxels up by L_OCC and crossed voxels down by
+        # L_FREE (clamped to [L_MIN, L_MAX]), so noise the camera later sees through
+        # gets carved back below L_OCC_THRESH. Accumulated across keyframes (NEVER
+        # rebuilt from scratch); guarded by the base's _lock with the depth/pose dicts.
+        self._log: dict[tuple[int, int, int], float] = {}
+        # The keyframe seqs already folded into _log, so a rebuild only fuses the
         # NEW keyframes (incremental). Cleared keyframes stay folded in (the grid is
         # persistent), so an evicted seq is simply never re-fused.
         self._fused_seqs: set[int] = set()
@@ -805,8 +848,9 @@ class IpcSlamMapSource(_KeyframeAccumulator):
     def _on_evict_locked(self, seq: int) -> None:
         """Drop this source's per-seq corrected-position state too (under lock).
 
-        The keyframe's depth/pose are dropped by the base; its hits STAY in the
-        persistent grid (already fused) -- we just never re-fuse an evicted seq.
+        The keyframe's depth/pose are dropped by the base; its log-odds evidence
+        STAYS in the persistent grid (already fused) -- we just never re-fuse an
+        evicted seq.
         """
         self._kf_corr_pos.pop(seq, None)
 
@@ -836,16 +880,26 @@ class IpcSlamMapSource(_KeyframeAccumulator):
     # ------------------------------------------------------------------ #
     def _fuse_keyframe_locked(self, depth: np.ndarray, R: np.ndarray,
                               t: np.ndarray) -> None:
-        """Fold ONE keyframe's depth into the persistent hit-count grid (under lock).
+        """Fold ONE keyframe's depth into the persistent log-odds grid (under lock).
 
         Back-projects the (denoised) depth to the world by the keyframe's OWN VIO
-        pose ``Xw = R Xc + t`` (strided + depth-gated + edge-rejected), quantises
-        each world hit to a :data:`VOXEL_M` cell, and INCREMENTS that cell's
-        hit_count (capped at :data:`HIT_CAP`). Vectorised: one back-projection per
-        keyframe, one ``np.unique`` over the hit cells, then a scatter add into the
-        persistent dict -- so a cell hit by many rays in ONE keyframe still counts as
-        a SINGLE keyframe observation (the +1 is per (keyframe, cell), the temporal
-        fusion the OCC_HITS gate relies on).
+        pose ``P = R Xc + t`` (strided + depth-gated + edge-rejected). The camera
+        origin is the keyframe translation ``C = t``. Then, for THIS keyframe:
+
+        * HIT update -- the voxel containing each world hit ``P`` gets ``+= L_OCC``.
+        * FREE carving -- every voxel each ray ``C -> P`` passes THROUGH (from ``C``
+          up to JUST BEFORE the hit voxel) gets ``+= L_FREE`` (a Voxblox/OctoMap miss
+          update). This is what REMOVES wrongly-added voxels: a noise cell a later
+          ray sees through accumulates free evidence and drops below L_OCC_THRESH.
+
+        Both kinds collapse to ONE update per (keyframe, cell) via ``np.unique`` -- a
+        cell hit/crossed by many rays in ONE keyframe still moves by a single
+        L_OCC/L_FREE (the temporal-fusion principle). A cell both crossed AND hit in
+        the same keyframe is treated as a HIT: the hit cells are SUBTRACTED from the
+        free cells so the endpoint (the measured surface) wins. All accumulated
+        log-odds are clamped to ``[L_MIN, L_MAX]``. Fully vectorised: one
+        back-projection + one vectorised DDA over all rays, then a scatter add into
+        the persistent dict over only the UNIQUE cells touched.
         """
         d = np.asarray(depth, dtype=np.float32)
         if d.ndim != 2:
@@ -871,20 +925,185 @@ class IpcSlamMapSource(_KeyframeAccumulator):
         z = d[::s, ::s].astype(np.float64)
         uu, vv, z = uu[keep], vv[keep], z[keep]                # flat (M,)
         # Pinhole back-projection to the camera frame, then to the world by the
-        # keyframe's OWN pose, then quantise to integer voxel coords.
+        # keyframe's OWN pose -> the hit points P (M,3) in voxel UNITS (so the DDA
+        # and the quantise share one coordinate system). The camera origin C is the
+        # keyframe translation, likewise in voxel units.
+        vm = float(self.VOXEL_M)
         cam = np.stack([(uu - cx) * z / fx, (vv - cy) * z / fy, z], axis=1)
         world = cam @ np.asarray(R, np.float64).reshape(3, 3).T \
             + np.asarray(t, np.float64).reshape(3)             # (M,3)
-        keys = np.floor(world / float(self.VOXEL_M)).astype(np.int64)
-        # Collapse multi-ray hits within THIS keyframe to one +1 per cell, then add
-        # into the persistent grid (capped). One Python loop over the UNIQUE cells
-        # this keyframe touched (a few thousand at most), not the raw rays.
-        uniq = np.unique(keys, axis=0)
-        cap = int(self.HIT_CAP)
-        for cell in uniq:
-            k = (int(cell[0]), int(cell[1]), int(cell[2]))
-            c = self._hits.get(k, 0) + 1
-            self._hits[k] = c if c < cap else cap
+        P = world / vm                                         # hit points (vox)
+        C = np.asarray(t, np.float64).reshape(3) / vm          # origin (vox)
+
+        # HIT cells: the voxel each ray ENDS in (floor of the world hit).
+        hit_keys = np.floor(P).astype(np.int64)                # (M,3)
+        # FREE cells: every voxel each ray crosses from C up to (not incl.) the hit
+        # voxel, via the vectorised DDA. May be empty (origin == hit voxel).
+        free_keys = self._carve_free_cells(C, P)               # (F,3)
+
+        # Collapse to one update per (keyframe, cell) on a PACKED 1-D int64 key (the
+        # 3 voxel coords bit-packed) -- ``np.unique`` over a 1-D int array is an order
+        # of magnitude faster than the lexsort ``np.unique(..., axis=0)`` does over
+        # 700k 3-col rows (which dominated the fuse time). A cell both hit AND crossed
+        # in this keyframe is a HIT (the endpoint, the measured surface, wins), so
+        # drop any free cell that is also a hit cell (``np.isin`` on the 1-D keys).
+        hit_u = np.unique(self._pack_keys(hit_keys)) if hit_keys.size \
+            else np.empty(0, np.int64)
+        if free_keys.size:
+            free_u = np.unique(self._pack_keys(free_keys))
+            free_u = free_u[~np.isin(free_u, hit_u)]
+        else:
+            free_u = np.empty(0, np.int64)
+
+        lmin, lmax = float(self.L_MIN), float(self.L_MAX)
+        lfree, locc = float(self.L_FREE), float(self.L_OCC)
+        # Scatter the evidence into the persistent grid (clamped). One Python pass
+        # over the UNIQUE cells this keyframe touched (a few thousand), not the raw
+        # rays * voxels-per-ray. The packed keys decode back to (ix,iy,iz) tuples.
+        for k in self._unpack_to_tuples(free_u):
+            v = self._log.get(k, 0.0) + lfree
+            self._log[k] = lmin if v < lmin else (lmax if v > lmax else v)
+        for k in self._unpack_to_tuples(hit_u):
+            v = self._log.get(k, 0.0) + locc
+            self._log[k] = lmin if v < lmin else (lmax if v > lmax else v)
+
+    def _carve_free_cells(self, C: np.ndarray, P: np.ndarray) -> np.ndarray:
+        """Vectorised amanatides-woo DDA: voxels every ray ``C -> P`` crosses.
+
+        Returns an ``(F,3)`` int array of the integer voxel coords every ray passes
+        THROUGH, from the origin voxel up to (but NOT including) the hit voxel
+        ``floor(P)`` -- i.e. the FREE space along each ray. ``C`` is the shared
+        camera origin and ``P`` the (M,3) hit points, BOTH in voxel units (world /
+        VOXEL_M), so a unit step is one voxel.
+
+        Algorithm (the standard amanatides-woo grid traversal, but stepped across all
+        rays at once so it stays numpy-vectorised -- no per-ray Python loop):
+
+        * Each ray starts in voxel ``floor(C)`` and walks ONE voxel per iteration
+          along whichever axis has the nearest grid-plane crossing (``tMax`` per
+          axis), which guarantees a CONTIGUOUS, gap-free voxel line.
+        * The ACTIVE set is COMPACTED every iteration: a ray drops out the moment it
+          reaches its hit voxel or its t passes ``max_t``, and the per-ray state
+          arrays are sliced down to the survivors -- so per-step work shrinks with
+          the active count instead of staying O(M). This matters a lot in a corridor
+          where near-wall rays finish in a few steps while far rays run the full
+          range; without compaction every step re-touches the long-dead near rays.
+        * The carve range is capped at :attr:`MAX_DEPTH_M` (so a ray never traverses
+          an unbounded line), bounding the iteration count to ~MAX_DEPTH_M/VOXEL_M.
+
+        Vectorisation note: this loops at most ``ceil(range/VOXEL_M)`` times (a small
+        constant, e.g. 60 for 6 m / 0.10 m), and EACH iteration is a handful of numpy
+        ops over the (shrinking) active ray batch -- the cost is in C, not Python. The
+        collected per-step cells are concatenated once at the end.
+        """
+        M = P.shape[0]
+        if M == 0:
+            return np.empty((0, 3), np.int64)
+        Cv = np.asarray(C, np.float64).reshape(1, 3)
+        dirv = P - Cv                                          # ray vectors (M,3)
+        seg_len = np.linalg.norm(dirv, axis=1)                 # |C->P| in voxels
+        # Cap the per-ray traversal length: never carve past the hit voxel (t up to
+        # seg_len) NOR beyond MAX_DEPTH_M (in voxels), whichever is closer.
+        max_t = np.minimum(seg_len, float(self.MAX_DEPTH_M) / float(self.VOXEL_M))
+        # Keep only non-degenerate rays (hit voxel != origin voxel); guards /0 and
+        # drops zero-length rays up front so the active arrays start tight.
+        keep = seg_len > 1e-9
+        if not np.any(keep):
+            return np.empty((0, 3), np.int64)
+
+        # Per-ray state, sliced to the active set; updated in-place each step.
+        cur = np.floor(Cv).astype(np.int64)                    # origin voxel (1,3)
+        cur = np.broadcast_to(cur, (M, 3))[keep].copy()        # (A,3) current voxel
+        target = np.floor(P[keep]).astype(np.int64)            # (A,3) hit voxel
+        unit = dirv[keep] / seg_len[keep, None]                # (A,3) unit direction
+        max_t = max_t[keep]                                    # (A,)
+        # amanatides-woo per-axis setup. step = sign of the direction; tDelta = t to
+        # cross one voxel along each axis; tMax = t at the FIRST grid-plane crossing.
+        step = np.sign(unit).astype(np.int64)
+        absu = np.abs(unit)
+        safe = absu > 1e-12                                    # avoid /0 on flat axes
+        t_delta = np.full(unit.shape, np.inf)
+        np.divide(1.0, absu, out=t_delta, where=safe)
+        # Distance from C to the next grid plane along each axis (in voxels). For
+        # +step it is (1 - frac); for -step it is frac; on a plane it's a full voxel.
+        frac = (Cv - np.floor(Cv))                             # (1,3) shared origin
+        first = np.where(step > 0, 1.0 - frac, frac)
+        first = np.where(first <= 1e-12, 1.0, first)
+        t_max = np.full(unit.shape, np.inf)
+        np.divide(first, absu, out=t_max, where=safe)
+
+        max_iters = int(np.ceil(float(max_t.max()))) + 3
+
+        collected: list[np.ndarray] = []
+        # The ORIGIN voxel is free space too (the camera sits in clear air), unless it
+        # already is the hit voxel -- emit it for rays whose origin != hit.
+        origin_free = np.any(cur != target, axis=1)
+        if np.any(origin_free):
+            collected.append(cur[origin_free].copy())
+
+        rows = np.arange(cur.shape[0])
+        for _ in range(max_iters):
+            if cur.shape[0] == 0:
+                break
+            # Step each ray along its axis of MINIMUM tMax (the next plane it crosses)
+            # -- the amanatides-woo advance. argmin over the 3 tMax picks the axis.
+            axis = np.argmin(t_max, axis=1)                    # (A,) chosen axis
+            t_cross = t_max[rows, axis]                        # t at this crossing
+            cur[rows, axis] += step[rows, axis]                # advance the voxel
+            t_max[rows, axis] += t_delta[rows, axis]           # advance its tMax
+            # A ray stays active only if, AFTER stepping, it has NOT yet reached the
+            # hit voxel AND has not run past max_t. The cell just stepped INTO is free
+            # space (strictly before the hit voxel for still-active rays).
+            still = ~np.all(cur == target, axis=1) & (t_cross < max_t)
+            if not np.all(still):                              # COMPACT to survivors
+                cur, target, step, t_delta, t_max, max_t = (
+                    cur[still], target[still], step[still], t_delta[still],
+                    t_max[still], max_t[still])
+                rows = np.arange(cur.shape[0])
+            if cur.shape[0]:
+                collected.append(cur.copy())
+
+        if not collected:
+            return np.empty((0, 3), np.int64)
+        return np.concatenate(collected, axis=0)
+
+    #: Bits per voxel axis when packing an (ix,iy,iz) cell into one int64 key.
+    #: 21 bits -> a signed range of +-2^20 (~1.05M) voxels per axis = +-105 km at
+    #: VOXEL_M=0.10 m, vastly beyond any room; 3*21 = 63 bits fits a signed int64.
+    #: A bias of 2^20 shifts the signed coord into [0, 2^21) before packing.
+    _PACK_BITS = 21
+    _PACK_BIAS = 1 << 20
+
+    @classmethod
+    def _pack_keys(cls, cells: np.ndarray) -> np.ndarray:
+        """Pack an int ``(N,3)`` voxel-coord array into a 1-D int64 key array.
+
+        Bit-packs (ix,iy,iz) into ONE int64 so ``np.unique`` / ``np.isin`` run on a
+        flat int array (an order of magnitude faster than ``np.unique(..., axis=0)``,
+        which lexsorts 3-col rows and dominated the carve cost). Each coord is biased
+        into a non-negative range first so negative voxel indices pack cleanly.
+        """
+        b, bias = cls._PACK_BITS, cls._PACK_BIAS
+        c = cells.astype(np.int64)
+        return (((c[:, 0] + bias) << (2 * b))
+                | ((c[:, 1] + bias) << b)
+                | (c[:, 2] + bias))
+
+    @classmethod
+    def _unpack_to_tuples(cls, keys: np.ndarray):
+        """Decode packed int64 keys back to ``(ix,iy,iz)`` int tuples (a generator).
+
+        Yields the dict keys for the scatter step (the inverse of :meth:`_pack_keys`).
+        Done in numpy then ``.tolist()`` so the per-cell Python work is just tuple
+        construction, not arithmetic.
+        """
+        b, bias = cls._PACK_BITS, cls._PACK_BIAS
+        mask = (1 << b) - 1
+        k = np.asarray(keys, np.int64)
+        ix = (k >> (2 * b)) - bias
+        iy = ((k >> b) & mask) - bias
+        iz = (k & mask) - bias
+        return zip(ix.tolist(), iy.tolist(), iz.tolist())
 
     # ------------------------------------------------------------------ #
     def _build(self):
@@ -893,12 +1112,13 @@ class IpcSlamMapSource(_KeyframeAccumulator):
         Returns ``(points, colors, cams)``:
 
         * ``points`` ``(N,3)`` float32 -- the CENTRE of EVERY OCCUPIED voxel
-          (``hit_count >= OCC_HITS``). We render the WHOLE occupied set so the map
-          GROWS as the camera explores (a bounded room's occupied count plateaus);
-          only if it exceeds the high :data:`MAX_VOXELS` safety cap do we drop
-          voxels by a FAIR uniform-random subsample (NOT by lowest hit-count, which
-          would erase the newest areas). Optical-world frame (the window rotates it
-          to ENU, same as the trajectory).
+          (``log_odds >= L_OCC_THRESH``). We render the WHOLE occupied set so the map
+          GROWS as the camera explores (a bounded room's occupied count plateaus) and
+          SELF-CLEANS (a carved noise voxel drops below threshold and vanishes); only
+          if it exceeds the high :data:`MAX_VOXELS` safety cap do we drop voxels by a
+          FAIR uniform-random subsample (NOT by lowest log-odds, which would erase the
+          newest areas). Optical-world frame (the window rotates it to ENU, same as
+          the trajectory).
         * ``colors`` ``(N,3)`` float32 -- a GREEN gradient by HEIGHT (optical
           ``+y`` is world-DOWN), so the floor/walls read like ModalAI's height-tinted
           occupancy.
@@ -909,17 +1129,19 @@ class IpcSlamMapSource(_KeyframeAccumulator):
         keyframes accumulate.
         """
         with self._lock:
-            # (1) Fold the NEW keyframes into the persistent grid (incremental).
+            # (1) Fold the NEW keyframes into the persistent grid (incremental):
+            #     each adds occupied evidence at its hits and carves free space along
+            #     its rays, so a later keyframe can REMOVE an earlier noise voxel.
             new_seqs = [s for s in self._kf_depth if s not in self._fused_seqs]
             for seq in sorted(new_seqs):
                 self._fuse_keyframe_locked(self._kf_depth[seq],
                                            self._kf_R[seq], self._kf_t[seq])
                 self._fused_seqs.add(seq)
-            # (2) Snapshot the occupied cell KEYS + the camera trail under the
-            #     lock, then build the arrays lock-free. We render ALL occupied
-            #     cells, so only the keys are needed (the hit_count no longer
-            #     selects a subset).
-            occ = [k for k, c in self._hits.items() if c >= self.OCC_HITS]
+            # (2) Snapshot the occupied cell KEYS (log_odds >= L_OCC_THRESH) + the
+            #     camera trail under the lock, then build the arrays lock-free. We
+            #     render ALL occupied cells, so only the keys are needed.
+            thresh = float(self.L_OCC_THRESH)
+            occ = [k for k, lo in self._log.items() if lo >= thresh]
             cam_ts = [self._kf_t[s] for s in self._kf_depth]
         cams = (np.asarray(cam_ts, np.float32).reshape(-1, 3)
                 if cam_ts else np.zeros((0, 3), np.float32))
@@ -931,10 +1153,10 @@ class IpcSlamMapSource(_KeyframeAccumulator):
         # Render the WHOLE occupied set (the map must GROW as new areas are
         # explored). The high MAX_VOXELS safety cap is a runaway guard only; if it
         # ever trips we subsample UNIFORMLY AT RANDOM -- a spatially-fair draw that
-        # thins the cloud everywhere instead of erasing the newest (lowest-hit)
-        # areas the way a "keep top-N by hit_count" rule did (that rule permanently
-        # favoured the start area and froze the map). Seeded for a stable cloud
-        # across rebuilds (so the safety thinning doesn't shimmer frame to frame).
+        # thins the cloud everywhere instead of erasing the newest (lowest log-odds)
+        # areas the way a "keep top-N" rule did (that rule permanently favoured the
+        # start area and froze the map). Seeded for a stable cloud across rebuilds
+        # (so the safety thinning doesn't shimmer frame to frame).
         if keys.shape[0] > self.MAX_VOXELS:
             rng = np.random.default_rng(0)
             sel = rng.choice(keys.shape[0], size=self.MAX_VOXELS, replace=False)

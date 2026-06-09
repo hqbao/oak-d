@@ -411,11 +411,11 @@ def build_slam_map_from(src):
         time.sleep(0.2)
     n_kf = len(src._kf_depth)
     _check(n_kf >= 1, f"slam-map source accumulated >=1 keyframe (got {n_kf})")
-    # This smoke run accumulates only a handful of keyframes (small --max-frames),
-    # so relax the occupancy gate to OCC_HITS=1 to PROVE the fuse -> build -> emit
-    # path produces voxels the window ingests; the >= OCC_HITS noise-rejection
-    # across many keyframes is proven separately in ui.tests.occupancy_selftest.
-    src.OCC_HITS = 1
+    # This smoke run just PROVES the fuse -> build -> emit path produces voxels the
+    # window ingests. The log-odds fusion occupies a cell from a single un-carved
+    # hit (L_OCC=0.85 > L_OCC_THRESH=0.5), so even a handful of keyframes yields
+    # occupied voxels; the free-space ray CARVING (noise removal) across many
+    # keyframes is proven separately in ui.tests.occupancy_selftest.
     points, colors, cams = src._build()
     _check(points.ndim == 2 and points.shape[1] == 3
            and points.dtype == np.float32,

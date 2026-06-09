@@ -13,10 +13,10 @@ samples the source every few keyframes to log:
 * the per-tick rebuild time.
 
 The bug was that BOTH the count and the extent were frozen at the START area
-(the top-N-by-hit_count cap locked the displayed set there + the count-only
-re-emit gate never fired again). With the fix (render ALL occupied cells, raise
-OCC_HITS, fair safety cap, growth/shift re-emit gate) the count + extent must
-GROW as the camera traverses the corridor, then PLATEAU (a bounded room).
+(the top-N cap locked the displayed set there + the count-only re-emit gate never
+fired again). With the fix (render ALL occupied cells, log-odds + free-space
+carving, fair safety cap, growth/shift re-emit gate) the count + extent must GROW
+as the camera traverses the corridor, then PLATEAU (a bounded, self-cleaned room).
 
 This is a developer/tester probe (not part of the assertion selftest); it prints
 numbers for the report.
@@ -92,7 +92,8 @@ def main() -> int:
         W, H = int(bundle.width), int(bundle.height)
         print(f"  capture {W}x{H}, kf_every={args.kf_every}, "
               f"max_frames={args.max_frames}, VOXEL_M={IpcSlamMapSource.VOXEL_M}, "
-              f"OCC_HITS={IpcSlamMapSource.OCC_HITS}, "
+              f"L_OCC={IpcSlamMapSource.L_OCC}, L_FREE={IpcSlamMapSource.L_FREE}, "
+              f"L_OCC_THRESH={IpcSlamMapSource.L_OCC_THRESH}, "
               f"MAX_VOXELS={IpcSlamMapSource.MAX_VOXELS}\n")
 
         src = IpcSlamMapSource(vio_ep, slam_ep, bundle.K, width=W, height=H,

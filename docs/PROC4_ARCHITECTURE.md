@@ -425,29 +425,34 @@ The menu is plain Qt (`QMenuBar` / `QAction`); `ui.main` calls
   by `IpcGyroFuseSource`), and **"SLAM Map (3D room)…"** (`MapWindow`, driven by
   `IpcSlamMapSource` — a **ModalAI/VOXL-style VOXEL OCCUPANCY map**: the room as clean
   green voxel cubes (floor grid + walls + furniture as blocky voxels), in the same ENU
-  frame as `Viewer3D`). It is built by **temporal occupancy fusion** (OctoMap-style):
-  a **persistent** per-voxel **hit-count grid** that accumulates across keyframes. As
-  each keyframe arrives its denoised depth is back-projected by its own VIO pose
-  (strided + depth-gated + edge-rejected), every hit is quantised to a `VOXEL_M`
-  (≈0.10 m) cell, and that cell's count is **incremented** once per `(keyframe, cell)`
-  (never rebuilt from scratch — only the not-yet-fused keyframes are folded forward,
-  tracked by `_fused_seqs`). A cell is **OCCUPIED** (rendered) only once
-  `hit_count ≥ OCC_HITS` (=3) — the temporal noise filter: a real surface is
-  re-observed by many keyframes (survives), random stereo noise hits a cell once or
-  twice (rejected). That fusion both **cleans** the map and keeps the voxel count (and
-  render load) low. On the gold sessions the occupied count drops materially as the
-  gate rises (lab_loop_30s: 104k → 50k → 32k → 15k at OCC_HITS 1/2/3/5; corridor_60s:
-  134k → 58k → 33k → 13k), with the off-thread rebuild ~5–25 ms. **Render is
-  deliberately LIGHT** (every prior 3D GL map lagged): the voxels are a single
-  `GLScatterPlotItem` of large **square world-unit points** (`pxMode=False`,
-  `size` = the voxel edge) — far cheaper than an N-cube `GLMeshItem` — coloured by a
-  **green-by-height** gradient, **capped** at `MAX_VOXELS` (=30k; most-re-observed
-  win), rebuilt off the GUI thread, and re-emitted **only when the occupied set
-  materially changed** (so GL never re-uploads an unchanged cloud). All tunables
-  (`VOXEL_M`, `OCC_HITS`, `STRIDE`, depth gate, `MAX_VOXELS`) are exposed + commented.
-  *Future v2 (not implemented): free-space ray-carving (OctoMap miss updates) to clear
-  flying voxels a later ray sees through.* Each window is cached so repeated opens
-  reuse the one IPC source.
+  frame as `Viewer3D`). It is built as a **probabilistic LOG-ODDS occupancy grid with
+  free-space RAY CARVING** (OctoMap/Voxblox-style) — how VOXL cleans a map from *noisy
+  stereo*. A **persistent** per-voxel `{(ix,iy,iz)→log_odds}` grid accumulates across
+  keyframes. As each keyframe arrives its denoised depth is back-projected by its own
+  VIO pose (strided + depth-gated + edge-rejected) to the world **hit point** `P`, with
+  the camera origin `C` = the keyframe translation. Then, per keyframe, every ray `C→P`
+  does **two** updates: the **hit voxel** gets `+L_OCC` and every voxel the ray **passes
+  through** gets `+L_FREE`, via a **vectorised amanatides-woo DDA** voxel traversal
+  (lockstep across all rays, active set compacted each step, carve range capped at
+  `MAX_DEPTH_M`); the accumulated log-odds is clamped to `[L_MIN, L_MAX]`. The grid is
+  never rebuilt from scratch — only the not-yet-fused keyframes are folded forward
+  (`_fused_seqs`). A cell is **OCCUPIED** (rendered) when `log_odds ≥ L_OCC_THRESH`. The
+  carving is the **self-cleaning** mechanism: a stereo-noise voxel (e.g. a textureless-
+  ceiling cone) the camera later sees *through* accumulates free evidence and drops back
+  below threshold — so it is **removed** from the map (the "remove already-added invalid
+  points" requirement), unlike the old add-only `hit_count ≥ OCC_HITS` gate. On the gold
+  `corridor_60s` (whole replay) carving removes **~40 %** of the occupied voxels vs the
+  no-carving build (332k → 199k — lower, cleaner), with a per-keyframe fuse of **~38 ms
+  mean / ~56 ms max** off the GUI thread. **Render is deliberately LIGHT** (every prior
+  3D GL map lagged): the voxels are a single `GLScatterPlotItem` of large **square
+  world-unit points** (`pxMode=False`, `size` = the voxel edge) — far cheaper than an
+  N-cube `GLMeshItem` — coloured by a **green-by-height** gradient, **capped** at the
+  high `MAX_VOXELS` (=150k) runaway guard (when over, a *fair uniform-random* subsample,
+  never a top-N drop), rebuilt off the GUI thread, and re-emitted **only when the
+  occupied set materially changed** (so GL never re-uploads an unchanged cloud). All
+  tunables (`VOXEL_M`, `STRIDE`, depth gate; `L_OCC`/`L_FREE`/`L_MIN`/`L_MAX`/
+  `L_OCC_THRESH`; `MAX_VOXELS`) are exposed + commented. Each window is cached so
+  repeated opens reuse the one IPC source.
 - **Calibration** — **"Gyroscope Bias…"** (`GyroCalibDialog`) and **"Accelerometer
   (6-position)…"** (`AccelCalibDialog`). Each opens with a fresh `IpcImuRawSource`
   injected as its `stream`; the menu handler owns the stream and closes it in its
@@ -472,13 +477,16 @@ clear reason rather than a raw shared-memory path error.
 Beside these three duck-typed adapters, the same module hosts the **keyframe-map
 builder** source — `IpcSlamMapSource` (the voxel occupancy map). It subclasses a
 shared `_KeyframeAccumulator` base (VIO `keyframe` ring attach + stash + evict + a
-coalesced off-GUI rebuild loop), adding **only** the `slam.map` client + the temporal
-occupancy fusion + the voxel build (`_fuse_keyframe_locked` / `_build`), with **no
-copy-paste** of the SHM/recv wiring. The base is kept as a separate seam (rather than
-folded into the one current source) because it is the natural attach point for a
-second keyframe-fed map view and keeps the SHM/recv plumbing isolated from the map
-maths. The occupancy fusion is unit-tested headless (`ui/tests/occupancy_selftest.py`)
-and probed on the gold replays (`ui/tests/_map_persist_functional.py`).
+coalesced off-GUI rebuild loop), adding **only** the `slam.map` client + the log-odds
+occupancy fusion + the voxel build (`_fuse_keyframe_locked` / `_carve_free_cells` /
+`_build`), with **no copy-paste** of the SHM/recv wiring. The base is kept as a separate
+seam (rather than folded into the one current source) because it is the natural attach
+point for a second keyframe-fed map view and keeps the SHM/recv plumbing isolated from
+the map maths. The log-odds + carving fusion is unit-tested headless
+(`ui/tests/occupancy_selftest.py` — DDA contiguity, single-ray free/occupied, carving
+removes a crossed voxel, clamp band) and probed on the gold replays
+(`ui/tests/_map_persist_functional.py` — carving-vs-no-carving voxel count + per-keyframe
+fuse time + a top-down PNG; `ui/tests/_map_growth_functional.py` — growth/plateau).
 
 ### 6.4 Calibration semantic — "saves for the NEXT capture start"
 

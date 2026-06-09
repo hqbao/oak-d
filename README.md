@@ -359,34 +359,43 @@ The menu bar renders **in-window on every platform** (`setNativeMenuBar(False)`)
   *Gyro Fusion (strip chart)*, and *SLAM Map (3D room)*.
   - *SLAM Map (3D room)* — a **ModalAI/VOXL-style VOXEL OCCUPANCY map**: the room as
     clean green voxel cubes (floor grid + walls + furniture as blocky voxels), in the
-    same ENU frame as the main viewer. It is built by **temporal occupancy fusion**
-    (OctoMap-style): a **PERSISTENT** per-voxel **hit-count grid** that accumulates
-    across keyframes. As each keyframe arrives its denoised depth is back-projected by
-    its own VIO pose (strided + depth-gated + edge-rejected), every hit is quantised to
-    a `VOXEL_M` (≈0.10 m) cell, and that cell's count is **incremented** (once per
-    `(keyframe, cell)`); the grid is never rebuilt from scratch, only folded forward.
-    A cell is **OCCUPIED** (rendered) only once `hit_count ≥ OCC_HITS` (=3) — the
-    temporal noise filter: a real surface is re-observed across many keyframes (it
-    survives); a random stereo-noise hit touches a cell once or twice (it is rejected).
-    That fusion both **cleans** the map and keeps the voxel count (hence the render
-    load) low. On the gold sessions the OCC_HITS sweep shows the occupied count drop
-    materially as the gate rises (e.g. lab_loop_30s: 104k → 50k → 32k → 15k at
-    OCC_HITS 1/2/3/5), and the off-thread rebuild stays ~5–25 ms.
+    same ENU frame as the main viewer. It is built as a **probabilistic LOG-ODDS
+    occupancy grid with free-space RAY CARVING** (OctoMap/Voxblox-style) — how VOXL
+    gets a clean map out of *noisy stereo* (not a ToF sensor). A **PERSISTENT**
+    per-voxel `{(ix,iy,iz)→log_odds}` grid accumulates across keyframes. As each
+    keyframe arrives its denoised depth is back-projected by its own VIO pose (strided
+    + depth-gated + edge-rejected) to the world **hit point** `P`, with the camera
+    origin `C` = the keyframe translation. Then, per keyframe, every ray `C→P` does
+    **two** updates: the **hit voxel** gets `+L_OCC` (occupied evidence) and every
+    voxel the ray **passes through** gets `+L_FREE` (free evidence) via a **vectorised
+    amanatides-woo DDA** voxel traversal; the accumulated log-odds is clamped to
+    `[L_MIN, L_MAX]`. The grid is never rebuilt from scratch, only folded forward
+    (`_fused_seqs`).
+  - **This is the self-cleaning bit the user asked for:** a voxel that stereo noise
+    wrongly added (e.g. the garbage cone on a textureless ceiling) is later **crossed**
+    by rays from new viewpoints (the camera can now see *through* it), so its log-odds
+    is driven back **below** `L_OCC_THRESH` and the voxel **disappears** — the map
+    removes already-added points once they're detected invalid. A cell is **OCCUPIED**
+    (rendered) when `log_odds ≥ L_OCC_THRESH`. On the gold `corridor_60s` (whole
+    replay) carving removes **~40 %** of the occupied voxels vs the no-carving build
+    (332k → 199k) — lower, cleaner — and the per-keyframe fuse stays **~38 ms mean /
+    ~56 ms max** off the GUI thread.
   - *Render is deliberately LIGHT* (every prior 3D GL map lagged): the voxels are a
     single `GLScatterPlotItem` of large **SQUARE world-unit points** (`pxMode=False`,
     `size` = the voxel edge) — far cheaper to upload + paint than an N-cube
     `GLMeshItem` (12·N triangles), and at this voxel size the squares read as the
     blocky cubes. The colour is a **green-by-height** gradient (optical `+y` is
-    world-down). The render is **capped** at `MAX_VOXELS` (=30k; when over, the
-    most-re-observed voxels win), the rebuild is coalesced + throttled (`REBUILD_HZ`),
-    runs **off the GUI thread**, and the source re-emits **only when the occupied set
-    materially changed** — so the GUI never re-uploads an unchanged cloud.
-  - All tunables (`VOXEL_M`, `OCC_HITS`, `STRIDE`, depth gate, `MAX_VOXELS`) are
-    exposed + commented on `IpcSlamMapSource` (`ui/modules/ipc_sources.py`). *Future
-    v2 (not yet implemented): free-space ray-carving (OctoMap miss updates) to clear
-    flying voxels a later ray sees through.* The window reuses the shared VIO
-    `keyframe` feed via the `_KeyframeAccumulator` base (the SHM ring attach +
-    keyframe stash + evict wiring), adding SLAM's `slam.map` + the occupancy fusion.
+    world-down). The render is **capped** at the high `MAX_VOXELS` (=150k) runaway
+    safety guard (when over, a *fair uniform-random* subsample — never a top-N drop),
+    the rebuild is coalesced + throttled (`REBUILD_HZ`), runs **off the GUI thread**,
+    and the source re-emits **only when the occupied set materially changed** — so the
+    GUI never re-uploads an unchanged cloud.
+  - All tunables (`VOXEL_M`, `STRIDE`, depth gate; `L_OCC`/`L_FREE`/`L_MIN`/`L_MAX`/
+    `L_OCC_THRESH`; `MAX_VOXELS`) are exposed + commented on `IpcSlamMapSource`
+    (`ui/modules/ipc_sources.py`). Carving cost is mitigated by the vectorised DDA, the
+    `STRIDE` ray cap, and the `MAX_DEPTH_M` carve-range cap. The window reuses the
+    shared VIO `keyframe` feed via the `_KeyframeAccumulator` base (the SHM ring attach
+    + keyframe stash + evict wiring), adding SLAM's `slam.map` + the log-odds fusion.
   - All reuse the unchanged `ui/qt` windows, fed over IPC by the adapters in
     `ui/modules/ipc_sources.py` (capture's `imucam.sample` / `frame.depth`; the tracker
     also VIO's `frame.tracks` / `frame.inliers`; the SLAM map VIO's `keyframe` + SLAM's

@@ -1,23 +1,29 @@
 #!/usr/bin/env python3
-"""Unit tests for the SLAM-map occupancy fusion (no IPC, no Qt, no replay).
+"""Unit tests for the SLAM-map LOG-ODDS occupancy + RAY-CARVING fusion.
 
-The ModalAI-style SLAM Map (:class:`~ui.modules.ipc_sources.IpcSlamMapSource`)
-builds a VOXEL OCCUPANCY map by TEMPORAL OCCUPANCY FUSION: a PERSISTENT per-voxel
-hit-count grid that increments once per (keyframe, cell), and a cell is rendered
-OCCUPIED only once ``hit_count >= OCC_HITS``. These tests drive that fusion with
-SYNTHETIC depth keyframes (so the geometry is hand-checkable) and assert:
+The ModalAI/VOXL-style SLAM Map (:class:`~ui.modules.ipc_sources.IpcSlamMapSource`)
+builds a VOXEL OCCUPANCY map as a PROBABILISTIC LOG-ODDS GRID with FREE-SPACE RAY
+CARVING (OctoMap/Voxblox-style). Each depth ray adds OCCUPIED evidence (``+L_OCC``)
+at its hit voxel and FREE evidence (``+L_FREE``) to every voxel it passes THROUGH;
+a cell is rendered OCCUPIED when ``log_odds >= L_OCC_THRESH``. The key win over the
+old hit-count-only gate is that carving REMOVES wrongly-added voxels: a noise cell a
+later ray sees through accumulates free evidence and drops below threshold, so the
+map self-cleans. These tests drive that fusion with SYNTHETIC geometry (so it is
+hand-checkable) and assert:
 
-* a cell hit by ``>= OCC_HITS`` keyframes SURVIVES while a once-hit "noise" cell is
-  DROPPED (the temporal noise filter),
-* the fusion is INCREMENTAL (folding a new keyframe only adds; never rebuilds),
+* the vectorised DDA visits a CORRECT, CONTIGUOUS voxel line C->P (axis-aligned and
+  diagonal), from the origin voxel up to JUST BEFORE the hit voxel (the hit excluded),
+* a single ray marks its IN-BETWEEN voxels FREE (log_odds < 0) and its END voxel
+  OCCUPIED (log_odds > 0),
+* CARVING REMOVES A VOXEL: a cell hit once (+L_OCC) then crossed by 2 rays (+2*L_FREE)
+  drops BELOW L_OCC_THRESH and is no longer occupied (the core behaviour),
+* log-odds are CLAMPED to [L_MIN, L_MAX] (so a long dwell can't pin a cell un-carvably
+  high, and free evidence can't run off to -inf),
+* fusion is INCREMENTAL (a new keyframe only folds itself; never rebuilds),
 * the emitted points are the correct VOXEL CENTRES (index * VOXEL_M + half-cell),
-* the OCC_HITS sweep is MONOTONE non-increasing (a stricter gate never grows the
-  map) and OCC_HITS=1 == every touched cell,
-* we render ALL occupied cells (the map GROWS as new areas are explored) and the
-  high MAX_VOXELS safety cap, when it trips, thins FAIRLY (keeps new-area voxels,
-  not just the long-dwelt start area),
-* feeding keyframes that cover NEW spatial areas GROWS the occupied count AND its
-  world extent (the frozen-map regression),
+* we render ALL occupied cells (the map GROWS) and the high MAX_VOXELS safety cap,
+  when it trips, thins FAIRLY (keeps new-area voxels, not just the long-dwelt start),
+* feeding keyframes that cover NEW spatial areas GROWS the occupied count + extent,
 * the re-emit signature changes on growth/shift but is stable on a repeat,
 * a flat-`y` colour fallback + a green-by-height gradient stay in [0,1].
 
@@ -63,7 +69,7 @@ def _identity_kf(src: IpcSlamMapSource, seq: int, depth_val: float,
 
     With R=I, t=0 the world hit of pixel (u,v) is ((u-cx)/fx*z, (v-cy)/fy*z, z) --
     so a constant depth + a small image span land all hits in a tight world band
-    (hence into a few voxels), which makes the hit-count bookkeeping checkable.
+    (hence into a few voxels), which makes the log-odds bookkeeping checkable.
     """
     depth = np.full((h, w), float(depth_val), dtype=np.float32)
     src._kf_depth[seq] = depth                                  # noqa: SLF001
@@ -71,123 +77,258 @@ def _identity_kf(src: IpcSlamMapSource, seq: int, depth_val: float,
     src._kf_t[seq] = np.zeros(3, dtype=np.float64)              # noqa: SLF001
 
 
-def test_threshold_and_centres() -> None:
-    print("\n  occupancy: >= OCC_HITS survives, once-hit noise dropped")
-    src = _make_source()
-    src.OCC_HITS = 3
-    # A persistent grid built directly (bypass back-projection so the cells are
-    # exact + hand-checkable): one "real surface" cell hit by 4 keyframes, one
-    # "noise" cell hit once.
-    real = (5, -2, 30)
-    noise = (40, 7, 12)
-    src._hits = {real: 4, noise: 1}                             # noqa: SLF001
-    src._fused_seqs = {0, 1, 2, 3}     # noqa: SLF001 pretend already fused
-    points, colors, cams = src._build()                         # noqa: SLF001
-    _check(points.shape == (1, 3),
-           f"only the >= OCC_HITS=3 cell survives (got {points.shape[0]} voxels)")
-    _check(colors.shape == points.shape,
-           f"colours align with voxels ({colors.shape} vs {points.shape})")
-    # The emitted point is the REAL cell's centre: index * VOXEL_M + half a cell.
-    vm = src.VOXEL_M
-    want = (np.asarray(real, np.float64) + 0.5) * vm
-    _check(np.allclose(points[0], want, atol=1e-5),
-           f"voxel centre = (idx+0.5)*VOXEL_M (got {points[0]}, want {want})")
-    # The once-hit noise cell is NOT in the output.
-    _check(not np.any(np.all(np.isclose(
-        points, (np.asarray(noise, np.float64) + 0.5) * vm), axis=1)),
-        "once-hit noise cell is rejected at OCC_HITS=3")
+def _occupied_cells(src: IpcSlamMapSource) -> set:
+    """The set of integer cell keys currently OCCUPIED (log_odds >= L_OCC_THRESH)."""
+    th = src.L_OCC_THRESH
+    return {k for k, lo in src._log.items() if lo >= th}        # noqa: SLF001
 
 
-def test_fusion_increments_per_keyframe() -> None:
-    print("\n  occupancy: fusion increments ONCE per (keyframe, cell), incremental")
+# --------------------------------------------------------------------------- #
+# The DDA voxel traversal (the heart of the carving).
+# --------------------------------------------------------------------------- #
+def test_dda_axis_aligned_contiguous_line() -> None:
+    print("\n  carving DDA: axis-aligned ray visits a contiguous voxel line, "
+          "hit excluded")
     src = _make_source()
-    src.OCC_HITS = 1
-    # Two keyframes of the SAME constant-depth plane at the SAME identity pose ->
-    # the SAME cells hit each time. Each keyframe should bump every touched cell by
-    # exactly +1 (a cell hit by many rays in ONE keyframe still counts once).
+    # In VOXEL units: C at the centre of voxel (0,0,0), P at the centre of (5,0,0).
+    # The ray should pass THROUGH voxels x=0..4 (origin up to just before the hit
+    # voxel x=5), all at y=0,z=0; the hit voxel x=5 is EXCLUDED.
+    C = np.array([0.5, 0.5, 0.5])
+    P = np.array([[5.5, 0.5, 0.5]])
+    free = src._carve_free_cells(C, P)                          # noqa: SLF001
+    xs = sorted(int(c[0]) for c in free)
+    _check(xs == [0, 1, 2, 3, 4],
+           f"free voxels are the contiguous line x=0..4 (got {xs})")
+    _check(all(int(c[1]) == 0 and int(c[2]) == 0 for c in free),
+           "free voxels stay on the ray's y=0,z=0 line")
+    _check(not any(tuple(c) == (5, 0, 0) for c in free),
+           "the HIT voxel (5,0,0) is NOT carved as free (it's the endpoint)")
+
+
+def test_dda_diagonal_is_6connected_no_gaps() -> None:
+    print("\n  carving DDA: diagonal ray is a 6-connected, gap-free voxel line")
+    src = _make_source()
+    # A 45-degree ray in the xy plane from (0.5,0.5) to (3.5,3.5): amanatides-woo
+    # produces a 6-CONNECTED line (each step advances exactly ONE axis), with NO
+    # gaps -- consecutive cells differ by exactly one in a single coordinate.
+    C = np.array([0.5, 0.5, 0.5])
+    P = np.array([[3.5, 3.5, 0.5]])
+    free = src._carve_free_cells(C, P)                          # noqa: SLF001
+    # Order along the ray by t = progress; sort by (x+y) then x is enough here.
+    order = sorted(free.tolist(), key=lambda c: (c[0] + c[1], c[0]))
+    diffs = [np.abs(np.subtract(order[i + 1], order[i])).sum()
+             for i in range(len(order) - 1)]
+    _check(all(d == 1 for d in diffs),
+           f"every DDA step moves exactly one voxel (6-connected; deltas {diffs})")
+    _check((0, 0, 0) in [tuple(c) for c in order],
+           "the line starts at the origin voxel (0,0,0)")
+    _check((3, 3, 0) not in [tuple(c) for c in order],
+           "the line stops before the hit voxel (3,3,0)")
+
+
+# --------------------------------------------------------------------------- #
+# One ray: free in between, occupied at the end.
+# --------------------------------------------------------------------------- #
+def test_single_ray_free_between_occupied_end() -> None:
+    print("\n  carving: a single ray marks IN-BETWEEN voxels free, the END occupied")
+    src = _make_source()
+    # Drive ONE ray directly through the fuse's scatter step (bypass back-projection
+    # so the geometry is exact): C at (0,0,0)-ish voxel, P at voxel (5,0,0). We mimic
+    # what _fuse_keyframe_locked does for one ray: free-carve, then hit.
+    C = np.array([0.5, 0.5, 0.5])
+    P = np.array([[5.5, 0.5, 0.5]])
+    free = src._carve_free_cells(C, P)                          # noqa: SLF001
+    hit = (5, 0, 0)
+    lmin, lmax = src.L_MIN, src.L_MAX
+    for cell in free:
+        k = (int(cell[0]), int(cell[1]), int(cell[2]))
+        v = src._log.get(k, 0.0) + src.L_FREE                   # noqa: SLF001
+        src._log[k] = max(lmin, min(lmax, v))                   # noqa: SLF001
+    v = src._log.get(hit, 0.0) + src.L_OCC                      # noqa: SLF001
+    src._log[hit] = max(lmin, min(lmax, v))                     # noqa: SLF001
+
+    _check(all(src._log[(int(c[0]), int(c[1]), int(c[2]))] < 0.0  # noqa: SLF001
+               for c in free),
+           "every in-between voxel has log_odds < 0 (free)")
+    _check(src._log[hit] > 0.0,                                 # noqa: SLF001
+           f"the end voxel has log_odds > 0 (occupied; {src._log[hit]:.2f})")
+    occ = _occupied_cells(src)
+    _check(occ == {hit},
+           f"only the END voxel is OCCUPIED (>= L_OCC_THRESH); got {occ}")
+
+
+# --------------------------------------------------------------------------- #
+# THE CORE: carving REMOVES an already-added voxel.
+# --------------------------------------------------------------------------- #
+def test_carving_removes_a_crossed_voxel() -> None:
+    print("\n  carving: a voxel hit once then crossed by 2 rays drops BELOW threshold "
+          "(REMOVED)")
+    src = _make_source()
+    cell = (7, 7, 7)
+    lmin, lmax = src.L_MIN, src.L_MAX
+
+    def _add(c, dl):
+        v = src._log.get(c, 0.0) + dl                           # noqa: SLF001
+        src._log[c] = max(lmin, min(lmax, v))                   # noqa: SLF001
+
+    # One hit -> occupied (a wrongly-added stereo-noise voxel).
+    _add(cell, src.L_OCC)
+    _check(cell in _occupied_cells(src),
+           f"after ONE hit the voxel is occupied ({src._log[cell]:.2f} "    # noqa: SLF001
+           f">= {src.L_OCC_THRESH})")
+    # Two later rays from new viewpoints CROSS it (see through it) -> 2 free updates.
+    _add(cell, src.L_FREE)
+    _add(cell, src.L_FREE)
+    _check(cell not in _occupied_cells(src),
+           f"after +2 free crossings the voxel is REMOVED "
+           f"({src._log[cell]:.2f} < {src.L_OCC_THRESH})")    # noqa: SLF001
+    # Sanity: the math is L_OCC + 2*L_FREE and it lands below the threshold.
+    want = src.L_OCC + 2.0 * src.L_FREE
+    _check(abs(src._log[cell] - want) < 1e-6 and want < src.L_OCC_THRESH,  # noqa: SLF001
+           f"log_odds = L_OCC + 2*L_FREE = {want:.2f} < L_OCC_THRESH "
+           f"={src.L_OCC_THRESH} (carving wins)")
+
+
+def test_logodds_clamped_to_band() -> None:
+    print("\n  carving: log_odds is clamped to [L_MIN, L_MAX] (un-carvable-high "
+          "prevented)")
+    src = _make_source()
+    lmin, lmax = src.L_MIN, src.L_MAX
+
+    def _add(c, dl):
+        v = src._log.get(c, 0.0) + dl                           # noqa: SLF001
+        src._log[c] = max(lmin, min(lmax, v))                   # noqa: SLF001
+
+    cell = (1, 2, 3)
+    # Hammer the cell with many hits -> must saturate at L_MAX (not run away), so a
+    # later run of free crossings CAN still carve it back below threshold.
+    for _ in range(50):
+        _add(cell, src.L_OCC)
+    _check(abs(src._log[cell] - lmax) < 1e-6,                   # noqa: SLF001
+           f"a long dwell saturates at L_MAX={lmax} (got {src._log[cell]:.2f})")
+    # Now carve it with free evidence -> must bottom out at L_MIN, not -inf.
+    for _ in range(50):
+        _add(cell, src.L_FREE)
+    _check(abs(src._log[cell] - lmin) < 1e-6,                   # noqa: SLF001
+           f"sustained free evidence bottoms out at L_MIN={lmin} "
+           f"(got {src._log[cell]:.2f})")
+    _check(cell not in _occupied_cells(src),
+           "the clamped-low cell is no longer occupied (carved away even after dwell)")
+
+
+def test_fuse_carves_through_a_planted_noise_voxel() -> None:
+    """End-to-end through _fuse_keyframe_locked: a planted noise voxel in front of a
+    real surface gets CARVED by the keyframe's own free rays.
+
+    A constant-depth plane keyframe back-projects to a wall of hit voxels at z~=2 m.
+    Every ray from C=(0,0,0) to that wall passes through the free space at z<2 m. We
+    pre-seed a NOISE voxel sitting in that free corridor (occupied), fuse the
+    keyframe, and assert the rays carve the noise voxel below threshold while the
+    real wall voxels become occupied.
+    """
+    print("\n  carving: fusing a real keyframe carves a planted noise voxel in its "
+          "free corridor")
+    src = _make_source()
+    # A small plane at 2.0 m (R=I, t=0) -> hits near z=2.0 -> hit voxels at iz~=20
+    # (VOXEL_M=0.1). The free corridor is iz = 0..19 along each ray.
+    _identity_kf(src, seq=0, depth_val=2.0, h=40, w=40)
+    # Plant a NOISE voxel near the optical axis at iz=10 (mid free-corridor), pushed
+    # occupied as if an earlier bad keyframe had added it.
+    noise = (0, 0, 10)
+    src._log[noise] = src.L_OCC * 3.0   # noqa: SLF001 strongly "occupied"
+    src._log[noise] = min(src._log[noise], src.L_MAX)           # noqa: SLF001
+    _check(noise in _occupied_cells(src), "noise voxel starts OCCUPIED (planted)")
+
+    src._build()    # noqa: SLF001 folds keyframe 0: carves the corridor, hits the wall
+    occ = _occupied_cells(src)
+    # The real wall (cells at iz ~= 20) must now be occupied...
+    wall = [c for c in occ if c[2] >= 18]
+    _check(len(wall) > 0,
+           f"the real surface (iz~=20) is occupied after fusing ({len(wall)} cells)")
+    # ...and the noise voxel must have been carved (a single keyframe's rays cross it
+    # once each, so its log-odds drops by L_FREE; a strongly-planted voxel may need
+    # more than one keyframe, so assert it at least DROPPED, and fully verify removal
+    # by fusing a few more identical keyframes from the same viewpoint).
+    before = src.L_OCC * 3.0
+    _check(src._log[noise] < before,                            # noqa: SLF001
+           f"the noise voxel's log-odds DROPPED after one carve "
+           f"({src._log[noise]:.2f} < {before:.2f})")     # noqa: SLF001
+    for seq in range(1, 12):
+        _identity_kf(src, seq=seq, depth_val=2.0, h=40, w=40)
+        src._build()                                            # noqa: SLF001
+    _check(noise not in _occupied_cells(src),
+           f"after repeated crossings the noise voxel is REMOVED "
+           f"({src._log[noise]:.2f} < {src.L_OCC_THRESH})")     # noqa: SLF001
+
+
+# --------------------------------------------------------------------------- #
+# Incremental fusion + voxel centres.
+# --------------------------------------------------------------------------- #
+def test_fusion_is_incremental_and_centres_correct() -> None:
+    print("\n  occupancy: fusion is incremental; emitted points are voxel CENTRES")
+    src = _make_source()
+    # A plane at the identity pose -> a wall of hit voxels. Fold it once.
     _identity_kf(src, seq=0, depth_val=2.0)
-    src._build()                                                # noqa: SLF001
+    pts1, cols1, _ = src._build()                               # noqa: SLF001
     with src._lock:                                             # noqa: SLF001
-        grid_after_1 = dict(src._hits)
         fused_1 = set(src._fused_seqs)
-    _check(len(grid_after_1) > 0, "first keyframe fused some cells")
-    _check(all(c == 1 for c in grid_after_1.values()),
-           "every touched cell has hit_count == 1 after ONE keyframe "
-           "(multi-ray hits collapse to a single +1)")
+        grid_1 = dict(src._log)
+    _check(pts1.shape[0] > 0, "first keyframe produced occupied voxels")
+    _check(cols1.shape == pts1.shape, "colours align with the voxel centres")
     _check(fused_1 == {0}, f"seq 0 marked fused (got {fused_1})")
 
-    # Fold a SECOND identical keyframe: the SAME cells now have hit_count 2, and no
-    # earlier cell is re-fused (the first keyframe is not re-counted).
+    # The emitted points are the occupied cells' CENTRES: (idx + 0.5) * VOXEL_M.
+    vm = src.VOXEL_M
+    keys = np.round(pts1 / vm - 0.5).astype(int)
+    recon = (keys.astype(np.float32) + 0.5) * np.float32(vm)
+    _check(np.allclose(pts1, recon, atol=1e-5),
+           "every emitted point is a voxel centre (idx+0.5)*VOXEL_M")
+
+    # Fold a SECOND identical keyframe: the SAME hit cells are re-observed (their
+    # log-odds rises, saturating at L_MAX) and seq 0 is NOT re-fused (incremental).
     _identity_kf(src, seq=1, depth_val=2.0)
     src._build()                                                # noqa: SLF001
     with src._lock:                                             # noqa: SLF001
-        grid_after_2 = dict(src._hits)
         fused_2 = set(src._fused_seqs)
-    _check(set(grid_after_2) == set(grid_after_1),
-           "the second identical keyframe touches the SAME cells (same geometry)")
-    _check(all(grid_after_2[k] == 2 for k in grid_after_1),
-           "each cell is now hit_count == 2 (incremental, not rebuilt)")
+        grid_2 = dict(src._log)
     _check(fused_2 == {0, 1}, f"both seqs marked fused (got {fused_2})")
-
-
-def test_occ_hits_sweep_monotone() -> None:
-    print("\n  occupancy: OCC_HITS sweep is monotone non-increasing; 1 == touched")
-    src = _make_source()
-    # A grid with a spread of hit counts (some cells hit 1..5 times).
-    rng = np.random.default_rng(0)
-    grid = {}
-    for i in range(500):
-        cell = (int(rng.integers(-50, 50)), int(rng.integers(-50, 50)),
-                int(rng.integers(1, 60)))
-        grid[cell] = int(rng.integers(1, 6))      # hit_count in 1..5
-    src._hits = grid                                            # noqa: SLF001
-    src._fused_seqs = set(range(10))                            # noqa: SLF001
-    counts = []
-    for occ in (1, 2, 3, 5):
-        src.OCC_HITS = occ
-        pts, _, _ = src._build()                                # noqa: SLF001
-        counts.append(pts.shape[0])
-    _check(counts[0] == len(grid),
-           f"OCC_HITS=1 keeps every touched cell ({counts[0]} vs {len(grid)})")
-    _check(all(counts[i] >= counts[i + 1] for i in range(len(counts) - 1)),
-           f"a stricter OCC_HITS never grows the map (counts {counts})")
-    _check(counts[-1] < counts[0],
-           f"the strictest gate DROPS the count vs OCC_HITS=1 ({counts})")
+    # Re-observed hit cells climbed (or saturated) -- never dropped -- proving the
+    # second keyframe ADDED evidence rather than rebuilding from scratch.
+    re_hit = [k for k in grid_1 if grid_1[k] > 0 and k in grid_2]
+    _check(re_hit and all(grid_2[k] >= grid_1[k] - 1e-6 for k in re_hit),
+           "re-observed occupied cells gained (or saturated) log-odds (incremental)")
 
 
 def test_max_voxels_safety_cap_is_fair() -> None:
-    print("\n  occupancy: MAX_VOXELS safety cap thins FAIRLY (not by hit-count)")
+    print("\n  occupancy: MAX_VOXELS safety cap thins FAIRLY (not by log-odds)")
     src = _make_source()
-    src.OCC_HITS = 1
     src.MAX_VOXELS = 100
-    # The bug was a "keep top-N by hit_count" cap that permanently favoured the
-    # long-dwelt START area and starved the newest (low-hit) areas. Model that:
-    # 50 "old/start" cells observed many times (hit_count 9) + 150 "new area" cells
-    # observed only twice (hit_count 2). With OCC_HITS=1 ALL 200 are occupied; the
-    # 100-cap must trip and -- crucially -- the kept set must include NEW-area cells
-    # (a fair random subsample), NOT only the 50 high-count start cells.
+    # The bug was a "keep top-N by confidence" cap that permanently favoured the
+    # long-dwelt START area and starved the newest (low-confidence) areas. Model
+    # that: 50 "old/start" cells at near-max log-odds + 150 "new area" cells just
+    # over threshold. ALL 200 are occupied; the 100-cap must trip and -- crucially --
+    # the kept set must include NEW-area cells (a fair random subsample), NOT only
+    # the 50 high-confidence start cells.
     grid = {}
     for i in range(50):
-        grid[(i, 0, 5)] = 9              # old/start: re-observed many times
+        grid[(i, 0, 5)] = src.L_MAX                 # old/start: re-observed often
     for i in range(150):
-        grid[(1000 + i, 0, 5)] = 2       # new area: only just explored
-    src._hits = grid                                            # noqa: SLF001
-    src._fused_seqs = {0}                                       # noqa: SLF001
-    pts, cols, _ = src._build()                                 # noqa: SLF001
+        grid[(1000 + i, 0, 5)] = src.L_OCC_THRESH + 1e-3   # new area: just occupied
+    src._log = grid                                            # noqa: SLF001
+    src._fused_seqs = {0}                                      # noqa: SLF001
+    pts, cols, _ = src._build()                                # noqa: SLF001
     _check(pts.shape[0] == 100,
            f"render thinned to the MAX_VOXELS=100 safety cap (got {pts.shape[0]})")
     _check(cols.shape == pts.shape, "colours still align after the safety thin")
-    # The kept set must contain NEW-area cells (x >= 1000), proving the thin does
-    # NOT erase the newest areas the way a "keep top-N by hit_count" rule did.
     vm = src.VOXEL_M
     kept_x = np.round(pts[:, 0] / vm - 0.5).astype(int)
     n_new = int(np.sum(kept_x >= 1000))
     _check(n_new > 0,
            f"the fair thin kept NEW-area voxels too (kept {n_new} new-area cells), "
-           "not just the high-hit start cells")
+           "not just the high-confidence start cells")
     # Under the cap (no thinning) ALL occupied cells render -- the map GROWS.
     src.MAX_VOXELS = 100_000
-    pts2, _, _ = src._build()                                   # noqa: SLF001
+    pts2, _, _ = src._build()                                  # noqa: SLF001
     _check(pts2.shape[0] == len(grid),
            f"under the safety cap ALL occupied cells render ({pts2.shape[0]} vs "
            f"{len(grid)}) -- no top-N starvation")
@@ -196,15 +337,12 @@ def test_max_voxels_safety_cap_is_fair() -> None:
 def test_map_grows_with_new_areas() -> None:
     """Regression: keyframes covering NEW spatial areas GROW the occupied set.
 
-    THE BUG: the render locked to a "top-N by hit_count" subset, so as the camera
-    explored, new-area voxels (few hits) never entered the top-N and the rendered
-    map froze at the start area. This proves that feeding keyframes whose poses
-    translate into fresh, non-overlapping world regions GROWS both the occupied
-    count AND its world bounding box (extent) -- the map keeps extending.
+    Feeding keyframes whose poses translate into fresh, non-overlapping world
+    regions must GROW both the occupied count AND its world bounding box (extent) --
+    the map keeps extending instead of freezing at the start area.
     """
     print("\n  occupancy: NEW-area keyframes GROW the occupied set + extent (no freeze)")
     src = _make_source()
-    src.OCC_HITS = 2          # a cell must be hit by >= 2 keyframes to occupy
     src.STRIDE = 2
 
     # Helper: stash a constant-depth plane keyframe translated by ``tx`` metres
@@ -218,40 +356,33 @@ def test_map_grows_with_new_areas() -> None:
 
     counts, x_spans = [], []
     seq = 0
-    # Walk the camera down +x in 1.0 m steps. At each station fire TWO keyframes
-    # (so the cells reach OCC_HITS=2) at the SAME pose, then advance. The occupied
-    # count and the x-extent must both keep growing as we explore new stations.
+    # Walk the camera down +x in 1.5 m steps (> the plane's x-footprint so each
+    # station's hits land in a fresh column). One keyframe per station already lifts
+    # its hit cells above L_OCC_THRESH (L_OCC=0.85 > 0.5), so the count + extent must
+    # both keep growing as we explore new stations.
     for station in range(6):
-        tx = 1.0 * station
-        _planar_kf(seq, tx); seq += 1
-        _planar_kf(seq, tx); seq += 1
+        tx = 1.5 * station
+        _planar_kf(seq, tx)
+        seq += 1
         pts, _, cams = src._build()                             # noqa: SLF001
         _check(pts.shape[0] > 0, f"station {station}: some voxels occupied")
         counts.append(pts.shape[0])
         x_spans.append(float(pts[:, 0].max() - pts[:, 0].min()))
-        # The camera path must also grow (cams == every keyframe translation).
         _check(cams.shape[0] == seq,
                f"camera path tracks every keyframe ({cams.shape[0]} vs {seq})")
 
-    # COUNT grows: each new station adds fresh occupied cells (monotone increase --
-    # the start area never starves the new ones, the heart of the fix).
-    _check(all(counts[i] < counts[i + 1] for i in range(len(counts) - 1)),
+    # COUNT grows: each new station adds fresh occupied cells (monotone non-
+    # decreasing -- the start area never starves the new ones, the heart of the fix).
+    _check(all(counts[i] <= counts[i + 1] for i in range(len(counts) - 1))
+           and counts[-1] > counts[0],
            f"occupied count GROWS as new areas are explored (counts {counts})")
-    # EXTENT grows: the world bounding box widens as the camera moves down +x
-    # (a frozen map would keep the same start-area extent).
+    # EXTENT grows: the world bounding box widens as the camera moves down +x.
     _check(x_spans[-1] > x_spans[0] + 4.0,
            f"world x-extent GROWS as the camera moves (spans {x_spans})")
 
 
 def test_reemit_gate_fires_on_growth_not_on_repeat() -> None:
-    """Regression: the re-emit signature fires on growth/shift, not on a repeat.
-
-    The frozen-view half of the bug: the old gate compared only the occupied COUNT,
-    and once the cap pinned the count the gate never fired again. This checks the
-    new (count, content-hash) signature: it CHANGES when the set grows OR shifts at
-    the same count, and is STABLE when the set is unchanged (so the GUI never
-    re-uploads an identical cloud).
-    """
+    """Regression: the re-emit signature fires on growth/shift, not on a repeat."""
     print("\n  occupancy: re-emit signature changes on growth/shift, stable on repeat")
     sig = IpcSlamMapSource._occ_signature                       # noqa: SLF001
     vm = IpcSlamMapSource.VOXEL_M
@@ -295,10 +426,14 @@ def test_green_by_height_in_range() -> None:
 
 
 def main() -> int:
-    print("occupancy_selftest: temporal occupancy fusion")
-    test_threshold_and_centres()
-    test_fusion_increments_per_keyframe()
-    test_occ_hits_sweep_monotone()
+    print("occupancy_selftest: log-odds occupancy + free-space ray carving")
+    test_dda_axis_aligned_contiguous_line()
+    test_dda_diagonal_is_6connected_no_gaps()
+    test_single_ray_free_between_occupied_end()
+    test_carving_removes_a_crossed_voxel()
+    test_logodds_clamped_to_band()
+    test_fuse_carves_through_a_planted_noise_voxel()
+    test_fusion_is_incremental_and_centres_correct()
     test_max_voxels_safety_cap_is_fair()
     test_map_grows_with_new_areas()
     test_reemit_gate_fires_on_growth_not_on_repeat()

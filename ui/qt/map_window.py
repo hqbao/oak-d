@@ -13,9 +13,10 @@ lagged). The voxels are drawn as a single :class:`~pyqtgraph.opengl.GLScatterPlo
 of large SQUARE WORLD-UNIT points (``pxMode=False``, ``size`` = the voxel edge in
 GL world units), NOT an N-cube ``GLMeshItem`` -- a scatter of N points is far
 cheaper to upload + paint than 12*N triangles, and at this voxel size the squares
-read as the blocky cubes. The occupancy fusion upstream keeps the voxel count low
-(noise rejected), and the source re-emits only when the occupied set materially
-changed, so the GUI never re-uploads an unchanged cloud.
+read as the blocky cubes. The log-odds occupancy fusion + free-space ray carving
+upstream keeps the voxel count low (noise actively carved away, not just rejected),
+and the source re-emits only when the occupied set materially changed, so the GUI
+never re-uploads an unchanged cloud.
 
 The map is REBUILT live: an IPC source (see
 :class:`~ui.modules.ipc_sources.IpcSlamMapSource`) accumulates the persistent

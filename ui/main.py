@@ -798,12 +798,14 @@ def run_ui(*, vio_endpoint: str = DEFAULT_VIO_ENDPOINT,
     # (clean green voxel cubes -- floor grid + walls + furniture), in the same ENU
     # frame as the main Viewer3D. The IpcSlamMapSource consumes VIO's ``keyframe``
     # (denoised depth via VIO's kf rings) + SLAM's ``slam.map`` (corrected poses)
-    # and runs TEMPORAL OCCUPANCY FUSION (a persistent per-voxel hit-count grid;
-    # a cell is occupied only once >= OCC_HITS keyframes hit it, so noise is
-    # rejected and the voxel count stays low). Its callback hands each fresh voxel
-    # set to the window via the thread-safe `submit` (a queued signal onto the GUI
-    # thread); the window renders light square world-unit points. Cached on `win`;
-    # the source is stopped in run_ui's teardown.
+    # and runs a LOG-ODDS OCCUPANCY GRID with FREE-SPACE RAY CARVING (OctoMap/Voxblox
+    # style): each ray adds occupied evidence at its hit and free evidence to the
+    # voxels it passes through, so a wrongly-added (stereo-noise) voxel the camera
+    # later sees through is CARVED back below threshold and removed -- the map
+    # self-cleans as the camera moves. Its callback hands each fresh voxel set to the
+    # window via the thread-safe `submit` (a queued signal onto the GUI thread); the
+    # window renders light square world-unit points. Cached on `win`; the source is
+    # stopped in run_ui's teardown.
     def _open_slam_map() -> None:
         if getattr(win, "_slam_map_win", None) is None:
             win._slam_map_win = MapWindow(title="SLAM Map (3D room)")
