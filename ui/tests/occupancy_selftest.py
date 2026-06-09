@@ -13,7 +13,12 @@ SYNTHETIC depth keyframes (so the geometry is hand-checkable) and assert:
 * the emitted points are the correct VOXEL CENTRES (index * VOXEL_M + half-cell),
 * the OCC_HITS sweep is MONOTONE non-increasing (a stricter gate never grows the
   map) and OCC_HITS=1 == every touched cell,
-* the MAX_VOXELS cap keeps the most-re-observed cells,
+* we render ALL occupied cells (the map GROWS as new areas are explored) and the
+  high MAX_VOXELS safety cap, when it trips, thins FAIRLY (keeps new-area voxels,
+  not just the long-dwelt start area),
+* feeding keyframes that cover NEW spatial areas GROWS the occupied count AND its
+  world extent (the frozen-map regression),
+* the re-emit signature changes on growth/shift but is stable on a repeat,
 * a flat-`y` colour fallback + a green-by-height gradient stay in [0,1].
 
 We build the source WITHOUT connecting (no ``start_cloud``): the fusion + build are
@@ -140,7 +145,6 @@ def test_occ_hits_sweep_monotone() -> None:
     counts = []
     for occ in (1, 2, 3, 5):
         src.OCC_HITS = occ
-        src._last_emit_occ = -1                                 # noqa: SLF001
         pts, _, _ = src._build()                                # noqa: SLF001
         counts.append(pts.shape[0])
     _check(counts[0] == len(grid),
@@ -151,28 +155,122 @@ def test_occ_hits_sweep_monotone() -> None:
            f"the strictest gate DROPS the count vs OCC_HITS=1 ({counts})")
 
 
-def test_max_voxels_cap() -> None:
-    print("\n  occupancy: MAX_VOXELS cap keeps the most-re-observed voxels")
+def test_max_voxels_safety_cap_is_fair() -> None:
+    print("\n  occupancy: MAX_VOXELS safety cap thins FAIRLY (not by hit-count)")
     src = _make_source()
     src.OCC_HITS = 1
-    src.MAX_VOXELS = 10
-    # 50 cells: 10 "strong" (hit_count 9) + 40 "weak" (hit_count 1). The cap must
-    # keep the 10 strong ones (highest hit_count = most confident).
+    src.MAX_VOXELS = 100
+    # The bug was a "keep top-N by hit_count" cap that permanently favoured the
+    # long-dwelt START area and starved the newest (low-hit) areas. Model that:
+    # 50 "old/start" cells observed many times (hit_count 9) + 150 "new area" cells
+    # observed only twice (hit_count 2). With OCC_HITS=1 ALL 200 are occupied; the
+    # 100-cap must trip and -- crucially -- the kept set must include NEW-area cells
+    # (a fair random subsample), NOT only the 50 high-count start cells.
     grid = {}
-    for i in range(10):
-        grid[(i, 0, 5)] = 9
-    for i in range(40):
-        grid[(100 + i, 0, 5)] = 1
+    for i in range(50):
+        grid[(i, 0, 5)] = 9              # old/start: re-observed many times
+    for i in range(150):
+        grid[(1000 + i, 0, 5)] = 2       # new area: only just explored
     src._hits = grid                                            # noqa: SLF001
     src._fused_seqs = {0}                                       # noqa: SLF001
     pts, cols, _ = src._build()                                 # noqa: SLF001
-    _check(pts.shape[0] == 10, f"capped to MAX_VOXELS=10 (got {pts.shape[0]})")
-    _check(cols.shape == pts.shape, "colours still align after the cap")
-    # Every kept voxel must be one of the 10 strong cells (x in 0..9).
+    _check(pts.shape[0] == 100,
+           f"render thinned to the MAX_VOXELS=100 safety cap (got {pts.shape[0]})")
+    _check(cols.shape == pts.shape, "colours still align after the safety thin")
+    # The kept set must contain NEW-area cells (x >= 1000), proving the thin does
+    # NOT erase the newest areas the way a "keep top-N by hit_count" rule did.
     vm = src.VOXEL_M
     kept_x = np.round(pts[:, 0] / vm - 0.5).astype(int)
-    _check(set(int(x) for x in kept_x) <= set(range(10)),
-           "the cap kept the high-hit-count (most-re-observed) cells, not noise")
+    n_new = int(np.sum(kept_x >= 1000))
+    _check(n_new > 0,
+           f"the fair thin kept NEW-area voxels too (kept {n_new} new-area cells), "
+           "not just the high-hit start cells")
+    # Under the cap (no thinning) ALL occupied cells render -- the map GROWS.
+    src.MAX_VOXELS = 100_000
+    pts2, _, _ = src._build()                                   # noqa: SLF001
+    _check(pts2.shape[0] == len(grid),
+           f"under the safety cap ALL occupied cells render ({pts2.shape[0]} vs "
+           f"{len(grid)}) -- no top-N starvation")
+
+
+def test_map_grows_with_new_areas() -> None:
+    """Regression: keyframes covering NEW spatial areas GROW the occupied set.
+
+    THE BUG: the render locked to a "top-N by hit_count" subset, so as the camera
+    explored, new-area voxels (few hits) never entered the top-N and the rendered
+    map froze at the start area. This proves that feeding keyframes whose poses
+    translate into fresh, non-overlapping world regions GROWS both the occupied
+    count AND its world bounding box (extent) -- the map keeps extending.
+    """
+    print("\n  occupancy: NEW-area keyframes GROW the occupied set + extent (no freeze)")
+    src = _make_source()
+    src.OCC_HITS = 2          # a cell must be hit by >= 2 keyframes to occupy
+    src.STRIDE = 2
+
+    # Helper: stash a constant-depth plane keyframe translated by ``tx`` metres
+    # along the world x-axis (R=I), so each new tx places hits in a fresh region.
+    def _planar_kf(seq: int, tx: float, depth_val: float = 2.0,
+                   h: int = 32, w: int = 32) -> None:
+        depth = np.full((h, w), float(depth_val), dtype=np.float32)
+        src._kf_depth[seq] = depth                              # noqa: SLF001
+        src._kf_R[seq] = np.eye(3, dtype=np.float64)            # noqa: SLF001
+        src._kf_t[seq] = np.array([tx, 0.0, 0.0], np.float64)   # noqa: SLF001
+
+    counts, x_spans = [], []
+    seq = 0
+    # Walk the camera down +x in 1.0 m steps. At each station fire TWO keyframes
+    # (so the cells reach OCC_HITS=2) at the SAME pose, then advance. The occupied
+    # count and the x-extent must both keep growing as we explore new stations.
+    for station in range(6):
+        tx = 1.0 * station
+        _planar_kf(seq, tx); seq += 1
+        _planar_kf(seq, tx); seq += 1
+        pts, _, cams = src._build()                             # noqa: SLF001
+        _check(pts.shape[0] > 0, f"station {station}: some voxels occupied")
+        counts.append(pts.shape[0])
+        x_spans.append(float(pts[:, 0].max() - pts[:, 0].min()))
+        # The camera path must also grow (cams == every keyframe translation).
+        _check(cams.shape[0] == seq,
+               f"camera path tracks every keyframe ({cams.shape[0]} vs {seq})")
+
+    # COUNT grows: each new station adds fresh occupied cells (monotone increase --
+    # the start area never starves the new ones, the heart of the fix).
+    _check(all(counts[i] < counts[i + 1] for i in range(len(counts) - 1)),
+           f"occupied count GROWS as new areas are explored (counts {counts})")
+    # EXTENT grows: the world bounding box widens as the camera moves down +x
+    # (a frozen map would keep the same start-area extent).
+    _check(x_spans[-1] > x_spans[0] + 4.0,
+           f"world x-extent GROWS as the camera moves (spans {x_spans})")
+
+
+def test_reemit_gate_fires_on_growth_not_on_repeat() -> None:
+    """Regression: the re-emit signature fires on growth/shift, not on a repeat.
+
+    The frozen-view half of the bug: the old gate compared only the occupied COUNT,
+    and once the cap pinned the count the gate never fired again. This checks the
+    new (count, content-hash) signature: it CHANGES when the set grows OR shifts at
+    the same count, and is STABLE when the set is unchanged (so the GUI never
+    re-uploads an identical cloud).
+    """
+    print("\n  occupancy: re-emit signature changes on growth/shift, stable on repeat")
+    sig = IpcSlamMapSource._occ_signature                       # noqa: SLF001
+    vm = IpcSlamMapSource.VOXEL_M
+    base = (np.array([[0, 0, 5], [1, 0, 5], [2, 0, 5]], np.float64) + 0.5) * vm
+    base = base.astype(np.float32)
+    grown = np.vstack([base, ((np.array([[9, 0, 5]], np.float64) + 0.5)
+                              * vm).astype(np.float32)])
+    # Same COUNT, different CELLS (a spatial shift the old count-only gate missed).
+    shifted = (np.array([[0, 0, 5], [1, 0, 5], [7, 0, 5]], np.float64) + 0.5) * vm
+    shifted = shifted.astype(np.float32)
+    _check(sig(base) == sig(base.copy()),
+           "identical set -> identical signature (no needless re-upload)")
+    _check(sig(base) != sig(grown),
+           "a GROWN set -> different signature (re-emit when the map extends)")
+    _check(sig(base) != sig(shifted),
+           "a SHIFTED set at the SAME count -> different signature "
+           "(the count-only gate would have missed this)")
+    _check(sig(np.zeros((0, 3), np.float32)) == (0, 0),
+           "empty cloud -> the sentinel (0,0) signature")
 
 
 def test_green_by_height_in_range() -> None:
@@ -201,7 +299,9 @@ def main() -> int:
     test_threshold_and_centres()
     test_fusion_increments_per_keyframe()
     test_occ_hits_sweep_monotone()
-    test_max_voxels_cap()
+    test_max_voxels_safety_cap_is_fair()
+    test_map_grows_with_new_areas()
+    test_reemit_gate_fires_on_growth_not_on_repeat()
     test_green_by_height_in_range()
     print("\nALL OCCUPANCY SELFTESTS PASSED")
     return 0

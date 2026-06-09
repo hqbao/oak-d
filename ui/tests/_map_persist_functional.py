@@ -101,16 +101,17 @@ def main() -> int:
         # occupied set + emits -- time that (the live per-tick cost). The count at
         # OCC_HITS=1 == every touched cell; higher thresholds DROP the count
         # (proving the temporal noise filter both cleans + shrinks the map).
-        print("  OCC_HITS sweep (occupied = raw cells >= gate; rendered = capped):")
+        print("  OCC_HITS sweep (occupied = raw cells >= gate; rendered = ALL "
+              "occupied, capped only by the high MAX_VOXELS safety guard):")
         with src._lock:                          # noqa: SLF001
             grid = dict(src._hits)
         for occ in (1, 2, 3, 5):
-            # Raw occupied count BEFORE the MAX_VOXELS render cap -- this is the
-            # number that proves the temporal fusion shrinks the map as the gate
-            # rises (the rendered count below is then clamped for the render load).
+            # Raw occupied count BEFORE the MAX_VOXELS safety cap -- proves the
+            # temporal fusion shrinks the map as the gate rises. We now render the
+            # WHOLE occupied set, so rendered == occupied unless the high safety cap
+            # (150k) trips (it should not for a room).
             raw = sum(1 for c in grid.values() if c >= occ)
             src.OCC_HITS = occ                   # instance override of the const
-            src._last_emit_occ = -1              # noqa: SLF001 force a re-count
             src._build()                         # noqa: SLF001 warm
             t0 = time.perf_counter()
             pts, cols, cams = src._build()       # noqa: SLF001
@@ -118,7 +119,8 @@ def main() -> int:
             print(f"    OCC_HITS={occ:>2}: occupied={raw:>7}  "
                   f"rendered={pts.shape[0]:>7}  ({cams.shape[0]} cams)  "
                   f"rebuild={dt * 1e3:6.1f} ms  "
-                  f"render<=30k? {'yes' if pts.shape[0] <= 30_000 else 'NO'}")
+                  f"render==occupied? "
+                  f"{'yes' if pts.shape[0] == min(raw, src.MAX_VOXELS) else 'NO'}")
         return 0
     finally:
         if src is not None:

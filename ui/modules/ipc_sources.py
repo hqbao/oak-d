@@ -638,17 +638,22 @@ class IpcSlamMapSource(_KeyframeAccumulator):
        rebuild only folds the not-yet-fused keyframes (cheap, incremental).
     2. A cell is OCCUPIED when ``hit_count >= OCC_HITS`` -- the temporal noise
        filter. Render emits one voxel per occupied cell.
-    3. Output: voxel CENTRES (the cell index * VOXEL_M + half a cell) + a GREEN
-       gradient colour by HEIGHT (derived from the cell's world ``y``, the optical
-       DOWN axis), capped at :data:`MAX_VOXELS` so the render stays light.
+    3. Output: ALL occupied voxel CENTRES (the cell index * VOXEL_M + half a cell)
+       + a GREEN gradient colour by HEIGHT (derived from the cell's world ``y``,
+       the optical DOWN axis). We render the WHOLE occupied set so the map GROWS as
+       the camera explores; a bounded room's occupied count PLATEAUS, and OCC_HITS
+       keeps it light. :data:`MAX_VOXELS` is only a HIGH runaway safety cap (a fair
+       random subsample if ever tripped -- NEVER a "keep top-N by hit_count" drop,
+       which would erase the newest areas and froze the map at the start).
 
     Render choice (light, no-lag): the window draws the voxels as a
     ``GLScatterPlotItem`` of large SQUARE world-unit points (size == VOXEL_M,
     ``pxMode=False``), NOT an N-cube ``GLMeshItem`` -- a scatter of N points is far
     cheaper to upload + paint than 12*N triangles, and at this voxel size the
     squares read as the blocky cubes. The rebuild is coalesced + capped at
-    :attr:`REBUILD_HZ` and only re-emits when the occupied set MATERIALLY changed
-    (see :meth:`run`), so the GUI never re-uploads an unchanged cloud.
+    :attr:`REBUILD_HZ` and only re-emits when the occupied set CHANGED -- grew or
+    shifted (see :meth:`run` + :meth:`_occ_signature`), so the GUI never re-uploads
+    an identical cloud yet always reflects newly-explored areas.
 
     FUTURE (v2, do NOT implement now unless cheap): free-space RAY-CARVING -- decrement
     the hit_count of voxels along each depth ray BEFORE the hit (the ones the ray
@@ -685,11 +690,15 @@ class IpcSlamMapSource(_KeyframeAccumulator):
     #: Occupancy threshold: a cell is OCCUPIED (rendered) only once it has been hit
     #: by >= OCC_HITS keyframes. This IS the temporal noise filter -- a real surface
     #: is re-observed across many keyframes (survives); a random stereo-noise hit
-    #: touches a cell once (rejected). 3 is the balance from the OCC_HITS sweep on
-    #: the gold sessions (drops the radial/flying noise materially vs 1 while the
-    #: room structure survives). RAISE for a cleaner/sparser map (slower to fill,
-    #: needs more re-observation); LOWER toward 1 to fill faster (noisier).
-    OCC_HITS = 3
+    #: touches a cell once (rejected). Because we now render ALL occupied cells (no
+    #: top-N cap that favoured the start), OCC_HITS is also the RENDER-LOAD knob:
+    #: 5 yields fewer, cleaner voxels per area so a whole noisy-OAK-D room stays a
+    #: light scatter that plateaus around a few tens of thousands of points (vs the
+    #: old 3, which on noisy stereo overran the 30k cap in the start area alone and
+    #: starved every later area). RAISE for a cleaner/sparser/lighter map (slower to
+    #: fill, needs more re-observation); LOWER toward 1 to fill faster (noisier,
+    #: heavier).
+    OCC_HITS = 5
     #: Depth-map subsample stride: back-project every STRIDE-th pixel in u and v.
     #: The occupancy grid only needs the room SHAPE, not every pixel, so a stride of
     #: 4 (1/16 the rays) keeps the per-keyframe fuse cheap while surfaces still get
@@ -706,11 +715,18 @@ class IpcSlamMapSource(_KeyframeAccumulator):
     #: any future confidence/decay logic + the colour normalisation). Capping keeps
     #: the counts in a sane band; well above OCC_HITS so it never affects the gate.
     HIT_CAP = 255
-    #: Hard cap on rendered voxels (render-load ceiling). The fusion keeps the
-    #: occupied count low, but a huge swept space could still exceed a light render;
-    #: if the occupied set is larger we keep the OCC_HITS-strongest (most
-    #: re-observed = most confident) voxels. 30k square points stays light in GL.
-    MAX_VOXELS = 30_000
+    #: Hard SAFETY cap on rendered voxels (runaway guard ONLY). We render ALL
+    #: occupied cells (hit_count >= OCC_HITS) -- a bounded room's occupied count
+    #: PLATEAUS (each surface re-observed but no new surface once explored), so a
+    #: green height-coloured GLScatterPlotItem of a few tens of thousands of points
+    #: stays light. This cap exists solely so a pathological unbounded sweep can't
+    #: explode the render; it is set HIGH (well above a room's plateau) so it never
+    #: trips in normal use. When it DOES trip we subsample FAIRLY (a uniform random
+    #: draw -- see :meth:`_build`), NOT by lowest hit-count: dropping the lowest
+    #: counts would erase exactly the newest, least-re-observed areas (the bug that
+    #: froze the map at the start). LOWER only if a room genuinely overruns the
+    #: render budget; RAISE for an even larger guard band.
+    MAX_VOXELS = 150_000
 
     def __init__(self, vio_endpoint: str, slam_endpoint: str, K: np.ndarray, *,
                  connect_timeout_s: float = 10.0,
@@ -729,9 +745,15 @@ class IpcSlamMapSource(_KeyframeAccumulator):
         # NEW keyframes (incremental). Cleared keyframes stay folded in (the grid is
         # persistent), so an evicted seq is simply never re-fused.
         self._fused_seqs: set[int] = set()
-        # Count of occupied cells at the last emit -> skip re-emitting an unchanged
-        # cloud (avoids re-uploading the whole scatter to GL every rebuild tick).
-        self._last_emit_occ = -1
+        # Signature of the occupied set at the last emit -> skip re-emitting an
+        # UNCHANGED cloud (avoids re-uploading the whole scatter to GL every rebuild
+        # tick) while still re-emitting whenever the set GROWS or SHIFTS as new
+        # keyframes fuse. A bare count is NOT enough: as the camera explores, the
+        # count grows (caught) but a count that momentarily plateaus while voxels
+        # appear in a new area + drop in an old one would be missed -- so we pair
+        # the count with a cheap content hash of the occupied cell keys. -1 = never
+        # emitted (force the first emit). See :meth:`run`.
+        self._last_emit_sig: tuple[int, int] = (-1, 0)
         # Latest loop-closure-corrected camera positions from slam.map, keyed by
         # seq. NOT used to position the voxels (they build from the VIO keyframe's
         # own pose for a seam-free odom-frame grid); retained as the source of truth
@@ -870,9 +892,12 @@ class IpcSlamMapSource(_KeyframeAccumulator):
 
         Returns ``(points, colors, cams)``:
 
-        * ``points`` ``(N,3)`` float32 -- the CENTRE of every OCCUPIED voxel
-          (``hit_count >= OCC_HITS``), capped at :data:`MAX_VOXELS` (keep the
-          most-re-observed when over). Optical-world frame (the window rotates it
+        * ``points`` ``(N,3)`` float32 -- the CENTRE of EVERY OCCUPIED voxel
+          (``hit_count >= OCC_HITS``). We render the WHOLE occupied set so the map
+          GROWS as the camera explores (a bounded room's occupied count plateaus);
+          only if it exceeds the high :data:`MAX_VOXELS` safety cap do we drop
+          voxels by a FAIR uniform-random subsample (NOT by lowest hit-count, which
+          would erase the newest areas). Optical-world frame (the window rotates it
           to ENU, same as the trajectory).
         * ``colors`` ``(N,3)`` float32 -- a GREEN gradient by HEIGHT (optical
           ``+y`` is world-DOWN), so the floor/walls read like ModalAI's height-tinted
@@ -890,9 +915,11 @@ class IpcSlamMapSource(_KeyframeAccumulator):
                 self._fuse_keyframe_locked(self._kf_depth[seq],
                                            self._kf_R[seq], self._kf_t[seq])
                 self._fused_seqs.add(seq)
-            # (2) Snapshot the occupied cells + the camera trail under the lock,
-            #     then build the arrays lock-free.
-            occ = [(k, c) for k, c in self._hits.items() if c >= self.OCC_HITS]
+            # (2) Snapshot the occupied cell KEYS + the camera trail under the
+            #     lock, then build the arrays lock-free. We render ALL occupied
+            #     cells, so only the keys are needed (the hit_count no longer
+            #     selects a subset).
+            occ = [k for k, c in self._hits.items() if c >= self.OCC_HITS]
             cam_ts = [self._kf_t[s] for s in self._kf_depth]
         cams = (np.asarray(cam_ts, np.float32).reshape(-1, 3)
                 if cam_ts else np.zeros((0, 3), np.float32))
@@ -900,14 +927,18 @@ class IpcSlamMapSource(_KeyframeAccumulator):
             empty = np.zeros((0, 3), np.float32)
             return empty, empty, cams
 
-        keys = np.asarray([k for k, _ in occ], dtype=np.int64)     # (N,3)
-        counts = np.asarray([c for _, c in occ], dtype=np.int64)   # (N,)
-        # Cap the render load: when over MAX_VOXELS keep the MOST re-observed cells
-        # (highest hit_count = most confident), so the cap never drops real
-        # structure before noise.
+        keys = np.asarray(occ, dtype=np.int64)                     # (N,3)
+        # Render the WHOLE occupied set (the map must GROW as new areas are
+        # explored). The high MAX_VOXELS safety cap is a runaway guard only; if it
+        # ever trips we subsample UNIFORMLY AT RANDOM -- a spatially-fair draw that
+        # thins the cloud everywhere instead of erasing the newest (lowest-hit)
+        # areas the way a "keep top-N by hit_count" rule did (that rule permanently
+        # favoured the start area and froze the map). Seeded for a stable cloud
+        # across rebuilds (so the safety thinning doesn't shimmer frame to frame).
         if keys.shape[0] > self.MAX_VOXELS:
-            sel = np.argpartition(counts, -self.MAX_VOXELS)[-self.MAX_VOXELS:]
-            keys, counts = keys[sel], counts[sel]
+            rng = np.random.default_rng(0)
+            sel = rng.choice(keys.shape[0], size=self.MAX_VOXELS, replace=False)
+            keys = keys[sel]
         # Voxel centres: cell index * edge + half a cell (the cell's centre).
         points = ((keys.astype(np.float32) + 0.5) * np.float32(self.VOXEL_M))
         colors = self._green_by_height(points[:, 1])
@@ -941,11 +972,15 @@ class IpcSlamMapSource(_KeyframeAccumulator):
     def run(self) -> None:
         """Coalesced rebuild loop with a "materially changed" emit guard.
 
-        Same throttle as the base, but skips the callback when the occupied-voxel
-        count did not change since the last emit -- so the GUI never re-uploads an
-        unchanged scatter to GL (the no-lag requirement). A new keyframe / slam.map
-        marks dirty; we rebuild (which folds new keyframes + counts occupied) and
-        emit ONLY if the occupied count moved.
+        Same throttle as the base, but skips the callback when the occupied set is
+        UNCHANGED since the last emit -- so the GUI never re-uploads an identical
+        scatter to GL (the no-lag requirement) -- while ALWAYS re-emitting when the
+        set GROWS or SHIFTS as new keyframes fuse (the bug was a frozen view). A new
+        keyframe / slam.map marks dirty; we rebuild (folds new keyframes + recounts
+        occupied) and emit when the signature -- (occupied count, content hash) --
+        changed. Pairing the count with a content hash catches a spatial shift that
+        leaves the count unchanged (new area appears, old voxel drops), which a bare
+        count comparison would miss.
         """
         period = 1.0 / self.REBUILD_HZ
         while not self._stop.is_set():
@@ -961,12 +996,32 @@ class IpcSlamMapSource(_KeyframeAccumulator):
                 time.sleep(period)
                 continue
             cb = self._cb
-            # Re-emit only when the occupied set MATERIALLY changed (count moved),
-            # so an idle dirty tick doesn't re-push the same cloud to GL.
-            if cb is not None and points.shape[0] != self._last_emit_occ:
-                self._last_emit_occ = int(points.shape[0])
+            sig = self._occ_signature(points)
+            # Re-emit whenever the occupied set CHANGED (count or content); an idle
+            # dirty tick that produced the identical set re-pushes nothing to GL.
+            if cb is not None and sig != self._last_emit_sig:
+                self._last_emit_sig = sig
                 cb(points, colors, cams)
             self._stop.wait(period)
+
+    @staticmethod
+    def _occ_signature(points: np.ndarray) -> tuple[int, int]:
+        """Cheap (count, content-hash) signature of the rendered voxel cloud.
+
+        ``points`` are the occupied voxel centres (deterministic for a given
+        occupied set + cap). The count alone can't tell a SHIFTED set from a stable
+        one (same N, different cells), so we add a hash of the raw point bytes. Both
+        are O(N) over a few-tens-of-thousands array (negligible vs the build) and
+        change the instant the set grows OR shifts -- so the map re-emits as the
+        camera explores instead of freezing.
+        """
+        n = int(points.shape[0])
+        if n == 0:
+            return (0, 0)
+        # hash() over the C-contiguous float32 bytes: order-sensitive but the
+        # occupied keys come out of the dict in a stable order per build, so an
+        # unchanged set hashes identically while any add/drop/shift changes it.
+        return (n, hash(np.ascontiguousarray(points).tobytes()))
 
     # ------------------------------------------------------------------ #
     def _stop_extra_clients(self) -> None:
