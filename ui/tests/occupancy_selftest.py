@@ -30,6 +30,9 @@ hand-checkable) and assert:
   when it trips, thins FAIRLY (keeps new-area voxels, not just the long-dwelt start),
 * feeding keyframes that cover NEW spatial areas GROWS the occupied count + extent,
 * the re-emit signature changes on growth/shift but is stable on a repeat,
+* the SPATIAL OUTLIER REMOVAL (radius-outlier SOR) on the displayed voxels keeps a
+  DENSE cluster intact but drops an ISOLATED voxel + a tiny speck, with an exact
+  MIN_NEIGHBORS boundary and a MIN_NEIGHBORS=0 disable path,
 * a flat-`y` colour fallback + a green-by-height gradient stay in [0,1].
 
 We build the source WITHOUT connecting (no ``start_cloud``): the fusion + build are
@@ -234,6 +237,11 @@ def test_render_confidence_gate_separates_wall_from_spray() -> None:
     print("\n  render gate: a high-confidence wall renders; a low-confidence "
           "behind-wall voxel does NOT")
     src = _make_source()
+    # This test isolates the L_DISPLAY confidence gate on single, intentionally
+    # ISOLATED synthetic cells. The spatial outlier filter (an ORTHOGONAL concern,
+    # tested separately) would prune a lone cell, so disable it here so the gate is
+    # the only thing under test.
+    src.MIN_NEIGHBORS = 0
     # Sanity on the tuning itself: the render gate must sit strictly ABOVE the internal
     # occupied threshold (a separate, higher gate), and high enough that 1-2 hits do
     # NOT clear it (so sporadic noise is filtered) while it stays under L_MAX (so a
@@ -399,6 +407,11 @@ def test_max_voxels_safety_cap_is_fair() -> None:
     print("\n  occupancy: MAX_VOXELS safety cap thins FAIRLY (not by log-odds)")
     src = _make_source()
     src.MAX_VOXELS = 100
+    # The synthetic cells here are laid out in two sparse 1-D lines (to model
+    # "old start" vs "new area"); the spatial outlier filter (separate concern)
+    # would prune such thin lines, so disable it so the SAFETY-CAP fairness is the
+    # only thing under test.
+    src.MIN_NEIGHBORS = 0
     # The bug was a "keep top-N by confidence" cap that permanently favoured the
     # long-dwelt START area and starved the newest (low-confidence) areas. Model
     # that: 50 "old/start" cells at near-max log-odds + 150 "new area" cells just over
@@ -528,6 +541,69 @@ def test_green_by_height_in_range() -> None:
         "empty height -> empty (0,3) colour")
 
 
+def test_spatial_outlier_filter_drops_isolated_keeps_dense() -> None:
+    """SOR: a dense cluster survives; an isolated voxel + a tiny speck are removed;
+    the MIN_NEIGHBORS boundary is exact; MIN_NEIGHBORS=0 disables the filter.
+
+    This is the standard point-cloud radius-outlier filter applied to the displayed
+    voxels: KEEP a cell only if it has >= MIN_NEIGHBORS OTHER displayed cells inside
+    the (2r+1)^3 box. A real wall is DENSE (each cell has ~10-26 neighbours) so it
+    survives; isolated stereo specks have few and are dropped -- removing the
+    outside-wall spray WITHOUT eroding the dense walls.
+    """
+    print("\n  SOR: dense cluster survives; isolated voxel + tiny speck removed; "
+          "MIN_NEIGHBORS boundary exact")
+    src = _make_source()
+    src.NEIGHBOR_RADIUS = 1                      # 26-neighbourhood (the default)
+    src.MIN_NEIGHBORS = 6
+
+    # A DENSE 3x3x3 block (a chunk of "wall") -- every cell has >= 7 neighbours, so
+    # ALL 27 survive. Plus a LONE voxel (0 neighbours) and a 2-voxel SPECK (1 each),
+    # both far from the block -- both must be dropped at MIN_NEIGHBORS=6.
+    dense = np.array([(x, y, z) for x in range(3) for y in range(3)
+                      for z in range(3)], np.int64)
+    lone = np.array([[100, 100, 100]], np.int64)
+    speck = np.array([[-50, -50, -50], [-50, -50, -49]], np.int64)
+    cells = np.vstack([dense, lone, speck])
+    kept = src._spatial_outlier_filter(cells)                   # noqa: SLF001
+    kept_set = {tuple(int(c) for c in k) for k in kept}
+    _check(len(kept) == 27,
+           f"the dense 3x3x3 block fully survives (kept {len(kept)} of 27)")
+    _check(all(tuple(c) in kept_set for c in dense.tolist()),
+           "every dense-block voxel is kept (dense walls are NOT eroded)")
+    _check((100, 100, 100) not in kept_set,
+           "the LONE voxel (0 neighbours) is removed")
+    _check((-50, -50, -50) not in kept_set and (-50, -50, -49) not in kept_set,
+           "the 2-voxel SPECK (1 neighbour each) is removed")
+
+    # Boundary: a centre with EXACTLY MIN_NEIGHBORS-1 neighbours is DROPPED; with
+    # EXACTLY MIN_NEIGHBORS it is KEPT (the >= test is exact).
+    offs = [(dx, dy, dz) for dx in (-1, 0, 1) for dy in (-1, 0, 1)
+            for dz in (-1, 0, 1) if not (dx == dy == dz == 0)]
+
+    def _centre_kept_with(k: int) -> bool:
+        c = np.array([(0, 0, 0)] + [offs[i] for i in range(k)], np.int64)
+        out = src._spatial_outlier_filter(c)                    # noqa: SLF001
+        return (0, 0, 0) in {tuple(int(v) for v in r) for r in out}
+
+    mn = src.MIN_NEIGHBORS
+    _check(not _centre_kept_with(mn - 1),
+           f"a voxel with exactly MIN_NEIGHBORS-1 ({mn - 1}) neighbours is DROPPED")
+    _check(_centre_kept_with(mn),
+           f"a voxel with exactly MIN_NEIGHBORS ({mn}) neighbours is KEPT")
+
+    # Disable path: MIN_NEIGHBORS=0 returns the input untouched (no pruning).
+    src.MIN_NEIGHBORS = 0
+    out = src._spatial_outlier_filter(cells)                    # noqa: SLF001
+    _check(out.shape[0] == cells.shape[0],
+           f"MIN_NEIGHBORS=0 disables the filter (pass-through {out.shape[0]} of "
+           f"{cells.shape[0]})")
+    # Empty input is safe.
+    _check(src._spatial_outlier_filter(                         # noqa: SLF001
+        np.zeros((0, 3), np.int64)).shape == (0, 3),
+        "empty input -> empty (0,3) output (no crash)")
+
+
 def main() -> int:
     print("occupancy_selftest: log-odds occupancy + free-space ray carving")
     test_dda_axis_aligned_contiguous_line()
@@ -541,6 +617,7 @@ def main() -> int:
     test_max_voxels_safety_cap_is_fair()
     test_map_grows_with_new_areas()
     test_reemit_gate_fires_on_growth_not_on_repeat()
+    test_spatial_outlier_filter_drops_isolated_keeps_dense()
     test_green_by_height_in_range()
     print("\nALL OCCUPANCY SELFTESTS PASSED")
     return 0

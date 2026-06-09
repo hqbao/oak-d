@@ -791,6 +791,35 @@ class IpcSlamMapSource(_KeyframeAccumulator):
     #: tail drops out.
     L_DISPLAY = 2.0
 
+    # --- Spatial outlier removal (point-cloud SOR on the DISPLAYED voxels). ---
+    #: After the L_DISPLAY gate, the wall renders -- but a sparse spray of ISOLATED
+    #: noise voxels can still pass the gate OUTSIDE the wall (stereo specks that were
+    #: each hit a couple of times yet carving could not reach). The principled,
+    #: standard fix is the SAME radius-outlier filter PCL/Open3D apply to a point
+    #: cloud: a REAL wall is a DENSE surface -- every occupied voxel has MANY occupied
+    #: neighbours (a flat surface gives ~10-26 in a 3x3x3 box); isolated noise has FEW
+    #: (0-a-handful). So we KEEP a displayed voxel only if it has at least
+    #: :data:`MIN_NEIGHBORS` OTHER displayed voxels within the (2r+1)^3 neighbourhood
+    #: -- the dense walls survive (they are dense), the lone specks are dropped. This
+    #: is a pure RENDER-time filter on the L_DISPLAY-gated set; it does NOT touch the
+    #: log-odds grid / carving / fusion (see :meth:`_spatial_outlier_filter`).
+    #:
+    #: Neighbourhood radius in voxels: the box is (2*NEIGHBOR_RADIUS+1)^3. r=1 -> the
+    #: 26-neighbourhood (the immediately-adjacent cells), which is what a "dense
+    #: surface" means at this VOXEL_M. RAISE to count over a wider box (tolerates
+    #: gappier surfaces but also lets bigger specks survive); LOWER is not meaningful
+    #: below 1.
+    NEIGHBOR_RADIUS = 1
+    #: Minimum OTHER displayed neighbours a voxel must have inside the box to be KEPT.
+    #: 0 disables the filter (render every L_DISPLAY voxel). HIGHER = more aggressive
+    #: isolated-noise removal: a dense wall voxel has ~10-26 neighbours so it easily
+    #: clears any value up to ~20; an isolated speck has 0-few and is dropped. Chosen
+    #: from the PNG sweep (see ui/tests/_map_sor_sweep.py): the value that cleanly
+    #: removes the outside-wall spray while keeping the walls solid + connected. RAISE
+    #: to prune harder (risks thinning a genuinely thin/lightly-seen real surface);
+    #: LOWER to keep more (noisier).
+    MIN_NEIGHBORS = 6
+
     #: Hard SAFETY cap on rendered voxels (runaway guard ONLY). We render ALL
     #: occupied cells (log_odds >= L_OCC_THRESH) -- carving keeps the set CLEAN and a
     #: bounded room's occupied count PLATEAUS, so a green height-coloured
@@ -1141,20 +1170,81 @@ class IpcSlamMapSource(_KeyframeAccumulator):
         return zip(ix.tolist(), iy.tolist(), iz.tolist())
 
     # ------------------------------------------------------------------ #
+    def _spatial_outlier_filter(self, cells: np.ndarray) -> np.ndarray:
+        """Radius-outlier (SOR) filter on the displayed voxel coords (vectorised).
+
+        Standard point-cloud spatial outlier removal, applied to the integer voxel
+        grid so it needs no kd-tree: KEEP only cells that have at least
+        :data:`MIN_NEIGHBORS` OTHER displayed cells inside the
+        ``(2*NEIGHBOR_RADIUS+1)^3`` box around them. A real wall is a DENSE surface
+        (each cell has ~10-26 occupied neighbours) so it survives; an isolated stereo
+        speck has 0-few and is dropped -- without eroding the walls (they are dense).
+
+        ``cells`` is the ``(N,3)`` int array of the L_DISPLAY-gated voxel coords.
+        Returns the kept subset (an ``(K,3)`` int array, K <= N).
+
+        Vectorisation (NO scipy/skimage -- not installed): pack the cells into the
+        same 1-D int64 keys :meth:`_pack_keys` uses and SORT that key table ONCE; then
+        for EACH of the up to ``(2r+1)^3 - 1`` neighbour OFFSETS, pack ``cells +
+        offset`` and test membership against the sorted table with one
+        ``np.searchsorted`` (a C-level binary search), summing the hits per cell. The
+        offset is added to the UNPACKED integer coords and re-packed (a packed key is
+        bit-FIELDS, so adding a constant to it would carry across axes -- wrong).
+        Sorting once and reusing it (vs ``np.isin``, which re-sorts the table on every
+        call) cuts the work to a single O(N log N) sort + a small constant (26 at r=1)
+        number of O(N log N) searches -- ~70 ms over a 50k-voxel set, comfortably light
+        within the off-thread 4 Hz (250 ms) rebuild budget.
+        """
+        n = cells.shape[0]
+        r = int(self.NEIGHBOR_RADIUS)
+        min_n = int(self.MIN_NEIGHBORS)
+        # min_n <= 0 disables the filter; r <= 0 or an empty set -> nothing to do.
+        if min_n <= 0 or r <= 0 or n == 0:
+            return cells
+        c = cells.astype(np.int64)
+        # The membership table: all displayed cells as packed int64 keys, SORTED once
+        # so every offset's lookup is a binary search against the SAME table (instead
+        # of np.isin re-sorting it 26 times).
+        ks = np.sort(self._pack_keys(c))
+        # Tally OTHER displayed neighbours per cell over every box offset except the
+        # centre (0,0,0) -- the cell itself is not its own neighbour.
+        counts = np.zeros(n, dtype=np.int32)
+        rng = range(-r, r + 1)
+        for dx in rng:
+            for dy in rng:
+                for dz in rng:
+                    if dx == 0 and dy == 0 and dz == 0:
+                        continue
+                    # Re-pack the SHIFTED coords (add the offset to the unpacked ints,
+                    # then pack) and binary-search the sorted table. searchsorted gives
+                    # the INSERTION index; clip it in-range and confirm the table entry
+                    # there EQUALS the shifted key -> a present neighbour. (Keys are
+                    # >= 0 by the pack bias, so a clip to [0, size-1] is safe.)
+                    shifted = self._pack_keys(c + np.array((dx, dy, dz), np.int64))
+                    idx = np.clip(np.searchsorted(ks, shifted), 0, ks.size - 1)
+                    counts += (ks[idx] == shifted)
+        return c[counts >= min_n]
+
+    # ------------------------------------------------------------------ #
     def _build(self):
         """Fold any NEW keyframes into the grid, then emit the occupied voxels.
 
         Returns ``(points, colors, cams)``:
 
-        * ``points`` ``(N,3)`` float32 -- the CENTRE of EVERY DISPLAYABLE voxel
-          (``log_odds >= L_DISPLAY``, the higher RENDER gate -- so only HIGH-confidence
-          surfaces show and the low-confidence behind-wall spray is filtered out). We
-          render the WHOLE displayable set so the map GROWS as the camera explores (a
-          bounded room's count plateaus) and SELF-CLEANS (a carved noise voxel drops in
-          log-odds and falls out of the view); only if it exceeds the high
-          :data:`MAX_VOXELS` safety cap do we drop voxels by a FAIR uniform-random
-          subsample (NOT by lowest log-odds, which would erase the newest areas).
-          Optical-world frame (the window rotates it to ENU, same as the trajectory).
+        * ``points`` ``(N,3)`` float32 -- the CENTRE of every DISPLAYABLE voxel that
+          ALSO survives the spatial outlier filter. A voxel is displayable when
+          ``log_odds >= L_DISPLAY`` (the higher RENDER gate -- so only HIGH-confidence
+          surfaces show and the low-confidence behind-wall spray is filtered out); on
+          top of that a SPATIAL OUTLIER REMOVAL (:meth:`_spatial_outlier_filter`, the
+          standard point-cloud radius-outlier filter) drops ISOLATED voxels -- the
+          sparse spray OUTSIDE the wall -- by neighbour count, so only DENSE surfaces
+          (the walls) remain. We render the WHOLE surviving set so the map GROWS as the
+          camera explores (a bounded room's count plateaus) and SELF-CLEANS (a carved
+          noise voxel drops in log-odds and falls out of the view); only if it exceeds
+          the high :data:`MAX_VOXELS` safety cap do we drop voxels by a FAIR
+          uniform-random subsample (NOT by lowest log-odds, which would erase the
+          newest areas). Optical-world frame (the window rotates it to ENU, same as the
+          trajectory).
         * ``colors`` ``(N,3)`` float32 -- a GREEN gradient by HEIGHT (optical
           ``+y`` is world-DOWN), so the floor/walls read like ModalAI's height-tinted
           occupancy.
@@ -1194,6 +1284,15 @@ class IpcSlamMapSource(_KeyframeAccumulator):
             return empty, empty, cams
 
         keys = np.asarray(occ, dtype=np.int64)                     # (N,3)
+        # (2b) SPATIAL OUTLIER REMOVAL on the displayed set: drop ISOLATED voxels
+        #      (the sparse spray OUTSIDE the wall) by neighbour count -- a dense wall
+        #      voxel has many occupied neighbours and survives; a lone speck has few
+        #      and is removed. Pure render-time filter (the log-odds grid is
+        #      untouched). MIN_NEIGHBORS=0 makes this a no-op.
+        keys = self._spatial_outlier_filter(keys)
+        if keys.shape[0] == 0:                                     # all pruned
+            empty = np.zeros((0, 3), np.float32)
+            return empty, empty, cams
         # Render the WHOLE occupied set (the map must GROW as new areas are
         # explored). The high MAX_VOXELS safety cap is a runaway guard only; if it
         # ever trips we subsample UNIFORMLY AT RANDOM -- a spatially-fair draw that

@@ -454,7 +454,21 @@ The menu is plain Qt (`QMenuBar` / `QAction`); `ui.main` calls
   `L_DISPLAY` ∈ {+0.5,+1.5,+2.0,+2.5}): +2.0 drops the behind-wall tail while keeping the
   wall solid, +2.5 starts thinning the real surface for little gain
   (`ui/tests/_map_display_sweep.py`). `L_FREE` was also strengthened (−0.40→−0.50) and
-  `L_MAX` raised (3.5→5.0) to widen the confidence gap the display gate separates on. On
+  `L_MAX` raised (3.5→5.0) to widen the confidence gap the display gate separates on.
+  **After the `L_DISPLAY` gate a SPATIAL OUTLIER REMOVAL (SOR) clears the remaining
+  ISOLATED spray OUTSIDE the walls** (the standard point-cloud radius-outlier filter,
+  `_spatial_outlier_filter`): a real wall is a **DENSE** surface (each occupied voxel
+  has ~10–26 occupied neighbours in a 3×3×3 box), an isolated stereo speck has few — so
+  a displayed voxel is KEPT only if it has `≥ MIN_NEIGHBORS` OTHER displayed voxels in
+  the `(2·NEIGHBOR_RADIUS+1)³` box, dropping lone specks **without eroding the walls**.
+  Vectorised with NO scipy/skimage: pack each `(ix,iy,iz)` into one int64, sort that key
+  table once, then for each of the (26 at `r=1`) neighbour offsets pack `cell+offset` and
+  binary-search membership (`np.searchsorted`) — ~92 ms over a 52k-voxel set, off the GUI
+  thread inside the 4 Hz (250 ms) budget. Chosen from a PNG sweep on `corridor_60s`
+  (top-down + side-along-wall; `MIN_NEIGHBORS` ∈ {0 = off, 3, 6, 10} at `r=1`; displayed
+  count 52.1k→47.6k→43.0k→35.9k): **+6** removes the outside-wall spray while keeping the
+  walls solid + connected (+3 leaves residual specks, +10 erodes the real walls;
+  `ui/tests/_map_sor_sweep.py`). On
   the gold `corridor_60s` (whole replay) carving removes **~40 %** of the occupied voxels
   vs the no-carving build (332k → 199k — lower, cleaner), with a per-keyframe fuse of
   **~38 ms mean / ~56 ms max** off the GUI thread. **Render is deliberately LIGHT** (every
@@ -465,7 +479,8 @@ The menu is plain Qt (`QMenuBar` / `QAction`); `ui.main` calls
   never a top-N drop), rebuilt off the GUI thread, and re-emitted **only when the
   displayed set materially changed** (so GL never re-uploads an unchanged cloud). All
   tunables (`VOXEL_M`, `STRIDE`, depth gate; `L_OCC`/`L_FREE`/`L_MIN`/`L_MAX`/
-  `L_OCC_THRESH`/`L_DISPLAY`; `MAX_VOXELS`) are exposed + commented. Each window is cached
+  `L_OCC_THRESH`/`L_DISPLAY`; `NEIGHBOR_RADIUS`/`MIN_NEIGHBORS`; `MAX_VOXELS`) are exposed
+  + commented. Each window is cached
   so repeated opens reuse the one IPC source.
 - **Calibration** — **"Gyroscope Bias…"** (`GyroCalibDialog`) and **"Accelerometer
   (6-position)…"** (`AccelCalibDialog`). Each opens with a fresh `IpcImuRawSource`
@@ -498,12 +513,15 @@ seam (rather than folded into the one current source) because it is the natural 
 point for a second keyframe-fed map view and keeps the SHM/recv plumbing isolated from
 the map maths. The log-odds + carving fusion is unit-tested headless
 (`ui/tests/occupancy_selftest.py` — DDA contiguity, single-ray free/occupied, carving
-removes a crossed voxel, clamp band, **and the `L_DISPLAY` render gate: a high-confidence
-voxel renders while a low-confidence-but-occupied voxel does not**) and probed on the gold
+removes a crossed voxel, clamp band, **the `L_DISPLAY` render gate: a high-confidence
+voxel renders while a low-confidence-but-occupied voxel does not**, **and the SOR: a dense
+cluster survives while an isolated voxel + a tiny speck are dropped, with an exact
+`MIN_NEIGHBORS` boundary**) and probed on the gold
 replays (`ui/tests/_map_persist_functional.py` — carving-vs-no-carving voxel count +
 per-keyframe fuse time + a top-down PNG; `ui/tests/_map_growth_functional.py` —
 growth/plateau; `ui/tests/_map_display_sweep.py` — the `L_DISPLAY` PNG sweep, top-down +
-side-along-wall, that picked the +2.0 default).
+side-along-wall, that picked the +2.0 default; `ui/tests/_map_sor_sweep.py` — the
+`MIN_NEIGHBORS` SOR PNG sweep that picked the +6 default).
 
 ### 6.4 Calibration semantic — "saves for the NEXT capture start"
 

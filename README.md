@@ -389,6 +389,22 @@ The menu bar renders **in-window on every platform** (`setNativeMenuBar(False)`)
     views at `L_DISPLAY` ∈ {+0.5, +1.5, +2.0, +2.5}; voxel count 190k → 77k → 52k → 46k):
     +2.0 removes the behind-wall tail while keeping the wall solid; +2.5 starts thinning
     the real surface for little further gain (`ui/tests/_map_display_sweep.py`).
+  - **A SPATIAL OUTLIER REMOVAL (SOR) clears the remaining ISOLATED spray OUTSIDE the
+    walls:** even after `L_DISPLAY`, a sparse halo of lone stereo specks can pass the
+    gate around/outside the wall. A real wall is a **DENSE** surface (each occupied
+    voxel has many occupied neighbours, ~10–26 in a 3×3×3 box); an isolated speck has
+    **few**. So — the standard point-cloud radius-outlier filter
+    (`_spatial_outlier_filter`) — a displayed voxel is KEPT only if it has `≥
+    MIN_NEIGHBORS` OTHER displayed voxels inside the `(2·NEIGHBOR_RADIUS+1)³` box: the
+    dense walls survive, the lone specks drop, **without eroding the walls**. Vectorised
+    with NO scipy/skimage: pack each `(ix,iy,iz)` into one int64, sort that key table
+    ONCE, then for each of the (26 at `r=1`) neighbour offsets pack `cell+offset` and
+    binary-search membership (`np.searchsorted`) — ~92 ms over a 52k-voxel set, off the
+    GUI thread within the 4 Hz (250 ms) budget. Chosen from a PNG sweep on `corridor_60s`
+    (top-down + side; `MIN_NEIGHBORS` ∈ {0 = off, 3, 6, 10} at `r=1`; voxel count 52.1k →
+    47.6k → 43.0k → 35.9k): **+6** cleanly removes the outside-wall spray while keeping
+    the walls solid + connected; +3 leaves residual specks, +10 starts eroding the real
+    walls (`ui/tests/_map_sor_sweep.py`).
   - On the gold `corridor_60s` (whole replay) carving removes **~40 %** of the occupied
     voxels vs the no-carving build (332k → 199k) — lower, cleaner — and the per-keyframe
     fuse stays **~38 ms mean / ~56 ms max** off the GUI thread.
@@ -403,7 +419,7 @@ The menu bar renders **in-window on every platform** (`setNativeMenuBar(False)`)
     and the source re-emits **only when the occupied set materially changed** — so the
     GUI never re-uploads an unchanged cloud.
   - All tunables (`VOXEL_M`, `STRIDE`, depth gate; `L_OCC`/`L_FREE`/`L_MIN`/`L_MAX`/
-    `L_OCC_THRESH`/`L_DISPLAY`; `MAX_VOXELS`) are exposed + commented on `IpcSlamMapSource`
+    `L_OCC_THRESH`/`L_DISPLAY`; `NEIGHBOR_RADIUS`/`MIN_NEIGHBORS`; `MAX_VOXELS`) are exposed + commented on `IpcSlamMapSource`
     (`ui/modules/ipc_sources.py`). Carving cost is mitigated by the vectorised DDA, the
     `STRIDE` ray cap, and the `MAX_DEPTH_M` carve-range cap. The window reuses the
     shared VIO `keyframe` feed via the `_KeyframeAccumulator` base (the SHM ring attach
