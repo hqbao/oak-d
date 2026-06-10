@@ -207,6 +207,15 @@ class PropagateImu(StepBase):
         info = step.info or {}
         vis_ok = bool(info.get("ok", True)) and \
             int(info.get("n_inliers", _MIN_VIS_INLIERS)) >= _MIN_VIS_INLIERS
+        # TIGHT-only DR indicator for the UI: True when this live pose is being
+        # carried by the IMU dead-reckoning (vision lost) rather than a trusted
+        # vision fix -- the viewer shows an AMBER "inertial DR" badge for it vs
+        # the RED "tracking lost" badge on the loose (no-IMU-fallback) path. Set
+        # ONCE here (after the retain_imu gate, so loose/oracle never reaches it)
+        # so every downstream return path carries it; step.info is a COPY of
+        # vo.last_info (see EstimateMotion), so this never mutates the oracle key.
+        if isinstance(step.info, dict):
+            step.info["inertial_dr"] = not vis_ok
 
         if nav is not None and ctx.state.get("loop_correct") \
                 and nav.get("loop_applied") is not None:

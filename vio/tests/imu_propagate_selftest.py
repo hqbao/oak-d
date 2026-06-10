@@ -155,6 +155,7 @@ def test_covered_camera_dead_reckons() -> None:
     # First 10 frames accelerate +z, next 10 decelerate (net forward motion).
     n_per = 5
     poses = []
+    dr_flags = []
     seq = 0
     # frame 0 establishes the anchor (first frame just seeds the nav-state).
     for fi in range(22):
@@ -165,7 +166,15 @@ def test_covered_camera_dead_reckons() -> None:
         st = _Step(_Frame(seq, int(seg[0][-1])), frozen.copy(), dict(failed_vis))
         out = step_obj.run(ctx, st)
         poses.append(out.pose[:3, 3].copy())
+        # The TIGHT-only DR flag the UI reads: vision was lost every frame here,
+        # so the live pose is inertial dead-reckoning -> inertial_dr must be True.
+        dr_flags.append(bool(out.info.get("inertial_dr")))
         seq += 1
+
+    # inertial_dr stamped True on every vision-lost frame (the amber-badge
+    # condition). Frame 0 only seeds the anchor; assert from frame 1 on.
+    assert all(dr_flags[1:]), \
+        f"inertial_dr not set on covered/vision-lost frames: {dr_flags}"
 
     pos = np.array(poses)
     # The published camera->world position is the nav-state position (body==cam).
@@ -179,6 +188,32 @@ def test_covered_camera_dead_reckons() -> None:
     assert total_path > 0.1, f"live pose path is ~0 (froze): {total_path}"
     assert np.all(np.isfinite(pos)), "non-finite dead-reckoned pose"
     print("  OK -- covered camera + motion: live pose dead-reckons via IMU")
+
+
+def test_inertial_dr_flag_vision_ok() -> None:
+    """The TIGHT-only ``inertial_dr`` flag is FALSE when this frame's vision
+    solve is trusted (ok + enough inliers) -> the UI shows OK, not the amber
+    inertial-DR badge. Mirrors the covered-camera test but with a GOOD solve."""
+    ctx = _make_ctx()
+    step_obj = PropagateImu()
+    rest = np.array([0.0, -G, 0.0])
+    n_per = 5
+    # A trusted vision solve every frame: ok=True with inliers above the
+    # _MIN_VIS_INLIERS gate -> vis_ok True -> inertial_dr False.
+    good_vis = {"ok": True, "n_inliers": 50}
+    seq = 0
+    flags = []
+    for _ in range(6):
+        seg = _accel_seg(seq, rest, np.zeros(3), n_per)
+        ctx.state["imu_segs"][seq] = seg
+        st = _Step(_Frame(seq, int(seg[0][-1])), np.eye(4), dict(good_vis))
+        out = step_obj.run(ctx, st)
+        flags.append(bool(out.info.get("inertial_dr")))
+        seq += 1
+    # Frame 0 only seeds the anchor; the flag is still written there too. With a
+    # trusted solve every frame, NO frame should report inertial DR.
+    assert not any(flags), f"inertial_dr falsely set on vision-OK frames: {flags}"
+    print("inertial_dr flag: False on trusted-vision frames  OK")
 
 
 def test_stationary_zupt_no_drift() -> None:
@@ -255,6 +290,7 @@ def main() -> int:
     test_imu_at_rest_gate()
     print()
     test_covered_camera_dead_reckons()
+    test_inertial_dr_flag_vision_ok()
     test_stationary_zupt_no_drift()
     print()
     test_empty_imu_segment_held()

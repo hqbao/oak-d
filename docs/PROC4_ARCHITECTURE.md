@@ -413,6 +413,22 @@ publishes (with their source seqs in `kf_ids`): the tracker matches each keyfram
 its dense VIO anchor, computes the correction delta, and interpolates it
 piecewise-linearly by seq across the dense trail before adding it back.
 
+On top of the trajectory lines the viewer surfaces tracking loss as a **debounced
+two-tier master-warning badge** (top-centre) plus a recolour of the live drone
+marker, driven solely by the abstract `pose.tracking_ok` / `pose.inertial_dr` flags
+(multi-chip-generic — `ui/main.py:_wire_pose_to_ned` maps VIO's `info["ok"]` and
+`info["inertial_dr"]` onto them). It latches lost only after `LOST_DEBOUNCE_POSES =
+5` consecutive lost poses and clears on the first OK pose, so a single dropped frame
+cannot flash. While latched, the tier is a per-frame presentation of the single
+latched state: **AMBER `⚠ VISION LOST · INERTIAL DR`** + amber marker when the
+`--tight` IMU is still dead-reckoning a valid pose (`pose.inertial_dr` True — vision
+lost but the live pose keeps moving), vs **RED `⚠ TRACKING LOST`** + red marker when
+there is no inertial fallback (loose path frozen). `inertial_dr` is stamped TIGHT-only
+by `vio/modules/propagate_imu.py` (after the `retain_imu` gate, on a copy of
+`vo.last_info`, so the byte-parity oracle is untouched) and rides the existing generic
+`info` dict across the IPC wire — no wire-schema change. The amber↔red switch never
+re-arms the debounce.
+
 `slam.map` **supersedes** the old `loop.correction`-driven overlay, which only fired
 ON a loop closure — so there were no keyframe dots along the path until the first loop
 closed (the bug this design fixes). `loop.correction` is still published (the

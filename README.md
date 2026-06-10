@@ -332,6 +332,22 @@ path → the corrected keyframe map:
 5. **SLAM** (cyan) — the loop-corrected keyframe path + amber keyframe dots from
    the continuous `slam.map` stream, with a flash on each loop closure.
 
+Over the trajectory lines the viewer carries a **two-tier tracking-lost
+master-warning badge** pinned top-centre, plus a recolour of the live drone
+marker, driven solely by the abstract `pose.tracking_ok` / `pose.inertial_dr`
+flags (kept multi-chip-generic). It latches lost only after `LOST_DEBOUNCE_POSES
+= 5` consecutive lost poses (so a single dropped frame can't flash) and clears on
+the first OK pose. While latched, the tier is chosen per-frame:
+- **AMBER `⚠ VISION LOST · INERTIAL DR`** + amber marker when the `--tight` IMU is
+  still dead-reckoning a valid pose (`pose.inertial_dr` True) — vision lost but
+  the live pose keeps moving;
+- **RED `⚠ TRACKING LOST`** + red marker when there is no inertial fallback (loose
+  path frozen).
+
+The amber↔red choice is a presentation flip, so the badge can switch live (e.g.
+DR stops → goes red) without re-arming the debounce — the prominent main-view
+counterpart to the side `TelemetryPanel`'s small OK/DR/LOST readout.
+
 **Two different optimisers back the map: VIO runs windowed Bundle Adjustment (BA —
 landmarks + poses) → `pose.refined`; SLAM runs Pose-Graph Optimization (PGO —
 poses only, no landmarks) on loop closure, distributing drift over the whole
@@ -553,7 +569,11 @@ diff -r -x '__pycache__' -x '*.pyc' -x '*.nbc' -x '*.nbi' vio/comms imu_camera/c
 - [x] End-to-end byte-parity vs the pre-split baseline (gap = 0), verified live on
       a real OAK-D; harness in `verification/`
 - [ ] UDP / UART link to flight-controller
-- [ ] Tracking-lost UI badge
+- [x] Tracking-lost UI badge: two-tier debounced master-warning badge on the 3D
+      viewer + drone-marker recolour, driven by `pose.tracking_ok` /
+      `pose.inertial_dr` — RED `⚠ TRACKING LOST` (no inertial fallback) vs AMBER
+      `⚠ VISION LOST · INERTIAL DR` when the `--tight` IMU is still dead-reckoning
+      (latches after 5 consecutive lost poses; clears on the first OK pose)
 - [ ] Calibration check tool
 - [ ] Port to RPi5
 - [ ] `skyslam` Python package (replace Basalt + RTABMap)

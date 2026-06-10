@@ -120,8 +120,13 @@ def _wire_pose_to_ned(wm: WirePoseMsg, prev_pos: np.ndarray | None,
         dt = max(now - prev_t, 1e-6)
         vel_ned = (pos_ned - prev_pos) / dt
     ok = bool(wm.info.get("ok", True))
+    # Inertial dead-reckoning flag (TIGHT path): vision lost but the IMU is
+    # still propagating a valid pose -> the viewer shows the amber "INERTIAL DR"
+    # badge instead of the red "TRACKING LOST" one. Defaults False on the loose
+    # path / when the flag is absent.
+    dr = bool(wm.info.get("inertial_dr", False))
     pose = Pose(t=now, pos_ned=pos_ned, vel_ned=vel_ned,
-                quat_wxyz=q_ned, tracking_ok=ok)
+                quat_wxyz=q_ned, tracking_ok=ok, inertial_dr=dr)
     return pose, pos_ned, now
 
 

@@ -111,8 +111,12 @@ class FlowPoseSource(PoseSource):
         self._prev_t = now
 
         ok = bool(msg.info.get("ok", True))
+        # Inertial dead-reckoning flag (TIGHT path): vision lost but the IMU is
+        # still propagating -> amber "INERTIAL DR" badge vs the red "TRACKING
+        # LOST" one. Defaults False when absent (loose path / no IMU fallback).
+        dr = bool(msg.info.get("inertial_dr", False))
         self._emit(Pose(t=now - self._t0, pos_ned=pos_ned, vel_ned=vel_ned,
-                        quat_wxyz=q_ned, tracking_ok=ok))
+                        quat_wxyz=q_ned, tracking_ok=ok, inertial_dr=dr))
 
         self._frames += 1
         if now - self._last_fps_t >= 0.5:

@@ -18,6 +18,11 @@ class Pose:
     vel_ned: np.ndarray = field(default_factory=lambda: np.zeros(3))   # m/s
     quat_wxyz: np.ndarray = field(default_factory=lambda: np.array([1.0, 0, 0, 0]))
     tracking_ok: bool = True
+    # True when this sample is inertial dead-reckoning on the --tight path
+    # (vision lost but the IMU is still propagating a valid pose). The viewer
+    # shows an AMBER "inertial DR" badge for these vs the RED "tracking lost"
+    # badge when there is no inertial fallback (loose path frozen).
+    inertial_dr: bool = False
     # True when this sample's position step was produced by a loop-closure
     # correction slewing the pose (a "teleport" while the camera barely moved),
     # not by real camera motion. The viewer colours these path segments

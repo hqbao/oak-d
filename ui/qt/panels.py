@@ -125,9 +125,18 @@ class TelemetryPanel(QWidget):
                 self.att_ar.setText("--")
                 self.att_ap.setText("--")
 
-            ok = latest.tracking_ok
-            self.st_state.setText("OK" if ok else "LOST")
-            self.st_state.setObjectName("FieldGood" if ok else "FieldBad")
+            # 3-state to match the big-view badge: OK (green) / DR (amber,
+            # vision lost but the --tight IMU is still dead-reckoning) / LOST
+            # (red, no inertial fallback). Raw per-frame (no debounce -- this is
+            # a tiny readout); reads the abstract pose flags only.
+            if latest.tracking_ok:
+                state, style = "OK", "FieldGood"
+            elif latest.inertial_dr:
+                state, style = "DR", "FieldWarn"
+            else:
+                state, style = "LOST", "FieldBad"
+            self.st_state.setText(state)
+            self.st_state.setObjectName(style)
             self.st_state.style().unpolish(self.st_state)
             self.st_state.style().polish(self.st_state)
 

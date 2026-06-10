@@ -12,6 +12,19 @@ the FIVE trajectory streams of the proc4 single-view UI plus the live marker:
   * SLAM keyframe polyline (HUD cyan) + amber keyframe dots: the SLAM map
 Each line has a visibility setter so the single-view's 5 toggle buttons can
 show/hide it independently.
+
+On top of the trajectory streams the view carries an operator-grade
+TRACKING-LOST master-warning overlay driven solely by the abstract
+``pose.tracking_ok`` / ``pose.inertial_dr`` flags (kept generic / multi-chip --
+no chip specifics): a debounced badge pinned top-centre (see
+``LOST_DEBOUNCE_POSES``) plus a recolour of the live drone origin marker, so a
+tracking loss is impossible to miss on the big 3D view, not only in the side
+TelemetryPanel's small OK/DR/LOST readout. The badge is two-tier: while latched
+lost it shows AMBER ``⚠ VISION LOST · INERTIAL DR`` when the (``--tight``) IMU is
+still dead-reckoning a valid pose (``pose.inertial_dr``), and RED ``⚠ TRACKING
+LOST`` when there is no inertial fallback (loose path frozen). The amber/red
+choice is a per-frame PRESENTATION of the single latched-lost state, so it can
+switch live (e.g. DR stops -> goes red) without re-arming the debounce.
 """
 from __future__ import annotations
 
@@ -22,6 +35,7 @@ import numpy as np
 import pyqtgraph.opengl as gl
 from PyQt6 import QtCore, QtGui
 from PyQt6.QtGui import QColor
+from PyQt6.QtWidgets import QLabel
 
 from ui.comms.lib.misc import frames
 from ui.comms.lib.misc.pose import Pose, PoseHistory
@@ -92,9 +106,33 @@ class _DroneTriad:
             size=12.0,
             pxMode=True,
         )
+        # Tracking-status recolour state. Cached so the dot colour is pushed
+        # only on an actual status transition, never on every per-frame pose
+        # update -- ``set_status`` is the single owner of the dot's colour.
+        self._status = "ok"
 
     def items(self) -> list:
         return [self.fwd, self.right, self.down, self.dot]
+
+    # Tracking status -> origin-marker dot colour. Mirrors the badge tiers:
+    # OK = green, inertial dead-reckoning = amber, hard-lost = red.
+    _STATUS_COLOR = {"ok": theme.GOOD, "dr": theme.WARN, "lost": theme.BAD}
+
+    def set_status(self, status: str) -> None:
+        """Recolour the origin marker for the tracking status (3-state).
+
+        ``status`` is one of ``"ok"`` (green ``theme.GOOD``), ``"dr"`` (amber
+        ``theme.WARN`` -- vision lost, IMU dead-reckoning) or ``"lost"`` (red
+        ``theme.BAD`` -- no inertial fallback). Only touches ``setData`` on an
+        actual status transition so a held state costs nothing (no per-frame
+        ``setData`` churn). The origin dot is the operator's primary eye-target,
+        so recolouring it makes the loss catch the eye on the marker itself,
+        mirroring the overlay badge.
+        """
+        if status == self._status:
+            return
+        self._status = status
+        self.dot.setData(color=_qcolor(self._STATUS_COLOR[status], 1.0))
 
     def update(self, pose: Pose) -> None:
         # body origin in scene coords (ENU)
@@ -119,6 +157,17 @@ class _DroneTriad:
 # ---------------------------------------------------------------------------
 # Main 3D viewport widget
 # ---------------------------------------------------------------------------
+
+# Tracking-lost debounce: number of CONSECUTIVE distinct lost poses before the
+# master-warning badge latches on. VIO emits poses at the source rate (replay /
+# live ~15-30 Hz), so ~5 lost poses is roughly 0.2-0.35 s of continuous loss --
+# inside the 0.25-0.4 s target. We count distinct lost poses (not raw 60 Hz
+# refresh ticks) because ``history.snapshot()`` returns the SAME ``latest`` pose
+# between source updates; counting refreshes would falsely accumulate while the
+# source is merely idle. A single dropped frame (1 lost pose, then OK) never
+# reaches the threshold, so it cannot flash. Recovery clears instantly on the
+# first OK pose -- no lingering nuisance.
+LOST_DEBOUNCE_POSES = 5
 
 # (azimuth_deg, elevation_deg, distance_m)  -- pyqtgraph GLViewWidget conventions
 VIEW_PRESETS: dict[str, tuple[float, float, float]] = {
@@ -298,6 +347,38 @@ class Viewer3D(gl.GLViewWidget):
         self._follow = False
         self.set_view(default_view if default_view in VIEW_PRESETS else "ISO")
 
+        # ---- tracking-lost master-warning badge --------------------------
+        # A child QLabel parented to THIS widget (not a GL scene item): the
+        # GL viewport is a QOpenGLWidget, and compositing a plain QWidget over
+        # it -- then ``raise_()``-ing it above the GL surface -- is the simplest
+        # robust overlay (no GL text rendering, legible over any scene). It is
+        # repositioned in ``resizeEvent`` and hidden whenever tracking is OK.
+        #
+        # Placement: TOP-CENTRE -- the conventional master-caution location in a
+        # cockpit/MFD layout, where the operator's eye returns between glances.
+        # ``theme.BAD`` (#ff3b30) red text on a semi-transparent dark backing so
+        # it stays legible over bright or dark scene geometry; bold + large so a
+        # tracking loss is impossible to miss.
+        self._lost_badge = QLabel("⚠ TRACKING LOST", self)
+        self._lost_badge.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        self._lost_badge.setStyleSheet(self._badge_qss(theme.BAD))
+        self._lost_badge.adjustSize()
+        self._lost_badge.hide()
+
+        # Debounced tracking-lost state (see LOST_DEBOUNCE_POSES). ``_lost_count``
+        # counts CONSECUTIVE distinct lost poses; ``_last_pose_id`` is the id of
+        # the pose object last counted, so a held (unchanged) ``latest`` between
+        # source updates is not double-counted. ``_lost_latched`` is the public
+        # debounced state the badge + marker follow. ``_shown_sev`` is the badge's
+        # currently-DISPLAYED severity (None = hidden / "dr" = amber / "lost" =
+        # red), tracked so ``setText`` / ``setStyleSheet`` / the marker recolour
+        # fire only on an actual severity change -- the amber<->red switch while
+        # latched is a presentation flip, not a debounce re-arm.
+        self._lost_count = 0
+        self._last_pose_id: int | None = None
+        self._lost_latched = False
+        self._shown_sev: str | None = None
+
         # ---- refresh timer (UI 60 Hz, decoupled from source rate) --------
         self._timer = QtCore.QTimer(self)
         self._timer.setInterval(16)
@@ -427,6 +508,7 @@ class Viewer3D(gl.GLViewWidget):
             self._traj.setData(pos=traj_enu, color=col)
         if latest is not None:
             self._drone.update(latest)
+            self._update_tracking_lost(latest)
             # Green VIO head dot at the newest VIO vertex (in ADDITION to the
             # orientation triad). `latest.pos_ned` is the leading pose.
             self._set_head(self._vio_head,
@@ -442,6 +524,104 @@ class Viewer3D(gl.GLViewWidget):
         self._refresh_refined()
         self._refresh_corrected()
         self._refresh_overlay()
+
+    def _update_tracking_lost(self, latest: Pose) -> None:
+        """Advance the debounced tracking-lost state from the newest pose.
+
+        Counts CONSECUTIVE distinct lost poses (keyed on object identity so a
+        held ``latest`` between source updates is not recounted). The badge +
+        marker latch to LOST only after ``LOST_DEBOUNCE_POSES`` such poses, so a
+        single dropped frame cannot flash; recovery clears on the FIRST OK pose.
+
+        The latch is on ``tracking_ok`` ALONE (the debounce never re-arms on the
+        amber<->red switch). Once latched, the SEVERITY shown -- amber inertial
+        DR vs red hard-lost -- is chosen per-frame from ``latest.inertial_dr``,
+        so the badge can flip colour live (e.g. DR stops -> goes red) while it
+        stays latched.
+        """
+        pid = id(latest)
+        is_new = pid != self._last_pose_id
+        self._last_pose_id = pid
+
+        if latest.tracking_ok:
+            # Recovery is immediate -- no debounce on the way back.
+            self._lost_count = 0
+            self._lost_latched = False
+            self._apply_badge(None)             # hidden / marker green
+            return
+
+        if is_new:
+            self._lost_count += 1
+        if self._lost_count >= LOST_DEBOUNCE_POSES:
+            self._lost_latched = True
+        if self._lost_latched:
+            # Amber while the IMU is still dead-reckoning a valid pose (tight),
+            # red when there is no inertial fallback (loose path frozen).
+            self._apply_badge("dr" if latest.inertial_dr else "lost")
+
+    @staticmethod
+    def _badge_qss(color: str) -> str:
+        """Stylesheet for the master-warning badge in the given accent ``color``.
+
+        ``color`` is ``theme.BAD`` (red, hard tracking loss) or ``theme.WARN``
+        (amber, inertial dead-reckoning); both sit on the same semi-transparent
+        dark backing so the badge stays legible over any scene geometry.
+        """
+        return (
+            f"color: {color};"
+            " background-color: rgba(13, 17, 23, 200);"   # theme.BG @ ~78% alpha
+            f" border: 1px solid {color};"
+            " border-radius: 4px;"
+            " font-weight: bold;"
+            " font-size: 20px;"
+            " letter-spacing: 2px;"
+            " padding: 6px 18px;")
+
+    # Latched-lost severity -> (badge text, badge accent colour, marker status).
+    _BADGE_SPEC = {
+        "dr":   ("⚠ VISION LOST · INERTIAL DR", theme.WARN, "dr"),
+        "lost": ("⚠ TRACKING LOST", theme.BAD, "lost"),
+    }
+
+    def _apply_badge(self, severity: str | None) -> None:
+        """Apply the badge + drone-marker presentation for ``severity`` once.
+
+        ``severity`` is ``None`` (not lost -> badge hidden, marker green), ``"dr"``
+        (amber inertial-DR badge) or ``"lost"`` (red tracking-lost badge).
+        Idempotent: a no-op when the displayed severity is unchanged, so neither
+        the QLabel show/hide/restyle nor the marker recolour churns on a held
+        state -- but an amber<->red flip (both latched) DOES restyle, since the
+        severity actually changed.
+        """
+        if severity == self._shown_sev:
+            return
+        self._shown_sev = severity
+        if severity is None:
+            self._drone.set_status("ok")
+            self._lost_badge.hide()
+            return
+        text, color, marker = self._BADGE_SPEC[severity]
+        self._drone.set_status(marker)
+        self._lost_badge.setText(text)
+        self._lost_badge.setStyleSheet(self._badge_qss(color))
+        self._position_badge()                  # re-pin (text width changed)
+        self._lost_badge.show()
+        self._lost_badge.raise_()               # composite above the GL surface
+
+    def _position_badge(self) -> None:
+        """Centre the badge horizontally near the top edge of the viewport."""
+        b = self._lost_badge
+        b.adjustSize()
+        x = (self.width() - b.width()) // 2
+        b.move(max(0, x), 12)                   # 12 px below the top edge
+
+    def resizeEvent(self, ev) -> None:
+        """Keep the master-warning badge pinned to the top-centre of the view."""
+        super().resizeEvent(ev)
+        # The base ``GLViewWidget.__init__`` can fire a resize BEFORE this
+        # subclass builds the badge; ignore those early events.
+        if getattr(self, "_lost_badge", None) is not None:
+            self._position_badge()
 
     def _set_head(self, head, pos_ned) -> None:
         """Point a head scatter item at one NED vertex (or hide it).
