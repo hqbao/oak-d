@@ -568,6 +568,72 @@ def predict_state(R_wb: np.ndarray, p_wb: np.ndarray, v_w: np.ndarray,
     return R, p, v
 
 
+def complementary_correct(R_wb: np.ndarray, p_wb: np.ndarray, v_w: np.ndarray,
+                          R_vis: np.ndarray, p_vis: np.ndarray,
+                          dt_anchor: float,
+                          k_pos: float, k_vel: float, k_rot: float
+                          ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Smooth complementary-filter pull of an IMU dead-reckoned nav-state toward
+    a fresh vision fix -- the soft replacement for a hard ``p = p_vis`` re-anchor.
+
+    The live ``(R_wb, p_wb, v_w)`` dead-reckons from the IMU *continuously*; this
+    nudges it a BOUNDED FRACTION of the way toward the vision pose each time a
+    fresh absolute fix arrives, instead of snapping the whole pose (and injecting
+    a one-shot ``(p_vis - anchor)/dt`` velocity) at keyframes. The result is the
+    instant, smooth response the user asked for: a fast push shows up immediately
+    in the dead-reckoned pose, and vision pulls the accumulated drift back over a
+    few keyframes with no visible snap and no overshoot from a bad injected vel.
+
+    The correction is a first-order complementary blend (the standard
+    error-state feedback form ``x <- x + K (z - x)``)::
+
+        e_p   = p_vis - p_wb                     # position error toward vision
+        p_wb <- p_wb + k_pos * e_p               # close a fraction of it now
+        v_w  <- v_w  + k_vel * e_p / dt_anchor   # bleed the SAME error into vel
+        R_wb <- R_wb @ Exp( k_rot * Log(R_wb^T R_vis) )   # SLERP-toward vision
+
+    * ``k_pos`` (0..1) is the fraction of the *position* error closed this update.
+      ``< 1`` so the live pose never jumps to the vision pose -- the drift is
+      removed gradually but fully over a few corrections (geometric decay).
+    * ``k_vel`` (0..1) feeds the position error back into the *velocity* over the
+      anchor interval ``dt_anchor`` (units 1/s via the ``/dt_anchor``). A small
+      positive ``k_vel`` damps the drift RATE without the destabilising full
+      ``v = displacement/dt`` injection of the old hard re-anchor. With
+      ``dt_anchor <= 0`` (degenerate / first interval) the velocity term is
+      skipped (no division), leaving velocity untouched.
+    * ``k_rot`` (0..1) is the rotational analogue: a fraction of the geodesic
+      rotation error ``Log(R_wb^T R_vis)`` applied on the right (a bounded SLERP
+      toward the vision attitude), so attitude is vision-anchored without a hard
+      orientation jump.
+
+    All gains in ``[0, 1]`` keep the filter stable (each error component decays
+    geometrically, never overshoots). The returned ``(R, p, v)`` are fresh arrays;
+    inputs are not mutated. Vision-frame inputs must already be in the body==camera
+    optical world frame (the caller converts ``T_cw`` -> ``(R_wb, p_wb)``).
+    """
+    R = np.asarray(R_wb, np.float64)
+    p = np.asarray(p_wb, np.float64).copy()
+    v = np.asarray(v_w, np.float64).copy()
+    R_vis = np.asarray(R_vis, np.float64)
+    p_vis = np.asarray(p_vis, np.float64)
+
+    # --- position: close a bounded fraction of the error toward vision --------
+    e_p = p_vis - p
+    p = p + k_pos * e_p
+    # --- velocity: bleed the SAME position error in as a damped rate term ------
+    # (1/dt_anchor turns the metres of error into a m/s correction; skipped when
+    # the interval is degenerate so there is no divide-by-zero / huge velocity.)
+    if dt_anchor > 1e-6 and k_vel != 0.0:
+        v = v + (k_vel / dt_anchor) * e_p
+    # --- rotation: bounded SLERP of the attitude toward the vision attitude ----
+    if k_rot != 0.0:
+        e_phi = so3_log(R.T @ R_vis)          # body-frame geodesic error (rad)
+        R = R @ so3_exp(k_rot * e_phi)
+    else:
+        R = R.copy()
+    return R, p, v
+
+
 def gravity_aligned_R0(accel_cam: np.ndarray) -> np.ndarray:
     """Initial camera->world rotation that levels the optical world to gravity.
 

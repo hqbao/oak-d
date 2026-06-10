@@ -74,6 +74,38 @@ and publishes `pose.refined`. The internal carriers (`step` / `primed` /
 > `from vio.comms import Step as StepBase` so the carrier keeps the plain `Step`
 > name. This collision is unique to `vio` — `imu_camera` has no such carriers.
 
+#### TIGHT live pose — `PropagateImu` (`--tight` only)
+
+On `--tight` (`retain_imu=True`) the live `pose.odom` is **IMU forward-propagated**
+between vision solves (Basalt-like `predictState`), so it reacts instantly to motion
+and keeps moving through a covered camera / textureless wall instead of freezing. The
+step (`vio/modules/propagate_imu.py`) owns a body→world nav-state `(R, p, v)` and on
+every frame:
+
+1. **Gap-free integration.** The retained per-frame IMU block is integrated forward
+   under gravity (`imu.predict_state`). The previous block's last sample is prepended
+   so the interval is exactly `(prev_block_last_ts, this_block_last_ts]` with **no
+   dropped boundary segment** — a fast push registers at full magnitude (the naive
+   per-block cut `(prev_ts, ts]` shares no sample and silently drops ~1-of-N
+   inter-sample segments → only ~60 % of the displacement).
+2. **Velocity-gated ZUPT.** A Zero-Velocity Update freezes translation only when
+   *genuinely* at rest = accel ≈ g **and** gyro ≈ 0 **and** `|v|` small (sustained, with
+   hysteresis). Accel+gyro alone cannot tell rest from a constant-velocity cruise (both
+   read `|accel|≈g`, `|gyro|≈0`), so the velocity gate is what stops the old mid-push
+   *pause*; at-rest drift is still held to ~0.
+3. **Smooth complementary vision correction.** Every frame whose PnP solve is valid
+   (`step.info["ok"]` + enough inliers), the nav-state is nudged a **bounded fraction**
+   toward the fresh vision pose (`imu.complementary_correct`: position + velocity +
+   attitude error-state feedback), replacing the old hard `p = p_vis` re-anchor +
+   `v = displacement/dt` injection — so vision pulls the drift back *continuously* with
+   no snap and no overshoot. On a failed/covered frame the correction is skipped and the
+   pose pure-dead-reckons.
+
+LOOSE path (`retain_imu=False`) is a **pure pass-through no-op** — `pose.odom` stays the
+vision-only odometry pose, so the byte-parity oracle is untouched. Gates:
+`vio.tests.imu_push_response_selftest` (the push-profile gate), `imu_propagate_selftest`,
+`tight_live_pose_selftest`.
+
 ### `vio/main.py` — the VIO process
 
 Two-client startup against the capture endpoint (a **calib client** that blocks on

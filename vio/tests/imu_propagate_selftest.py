@@ -32,8 +32,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from vio.comms.module import ModuleContext                       # noqa: E402
 from vio.comms import LocalPubSub                                # noqa: E402
 from vio.modules.propagate_imu import PropagateImu               # noqa: E402
-from vio.mathlib.imu.imu import (                                # noqa: E402
-    imu_at_rest, predict_state, so3_exp)
+from vio.mathlib.imu.imu import imu_at_rest, predict_state      # noqa: E402
 
 G = 9.81
 G_WORLD = np.array([0.0, G, 0.0])     # optical-world "down" = +y
@@ -144,7 +143,11 @@ def test_covered_camera_dead_reckons() -> None:
     # Frozen vision pose: PnP failed every frame, so step.pose never changes (the
     # loose-path freeze symptom). The IMU, however, carries a real forward push
     # of 4 m/s^2 -- clearly above the ZUPT band so the live pose dead-reckons.
+    # The failed solve is signalled via step.info (ok=False) exactly as
+    # EstimateMotion does on a covered camera, so PropagateImu skips the vision
+    # correction and pure-dead-reckons (does not pull back toward the stale pose).
     frozen = np.eye(4)
+    failed_vis = {"ok": False, "n_inliers": 0}
 
     A = 4.0
     rest = np.array([0.0, -G, 0.0])
@@ -159,7 +162,7 @@ def test_covered_camera_dead_reckons() -> None:
         accel = rest + np.array([0.0, 0.0, sgn * A])
         seg = _accel_seg(seq, accel, np.zeros(3), n_per)
         ctx.state["imu_segs"][seq] = seg
-        st = _Step(_Frame(seq, int(seg[0][-1])), frozen.copy(), {})
+        st = _Step(_Frame(seq, int(seg[0][-1])), frozen.copy(), dict(failed_vis))
         out = step_obj.run(ctx, st)
         poses.append(out.pose[:3, 3].copy())
         seq += 1
