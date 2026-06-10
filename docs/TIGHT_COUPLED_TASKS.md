@@ -11,6 +11,19 @@
 >
 > Vietnamese gloss ("Ý nghĩa") is added per task so the *why* is clear.
 
+> **Status (2026-06-10):** The phase-level rollup lives in
+> `docs/TIGHT_COUPLED_PLAN.md`. Phases 0–2 are **DONE**: the tight IMU
+> preintegration covariance + `Ω_I` weight (Tracks A5/A6 below) are wired into
+> `optimize_vio`, AND the tight estimator is now a **selectable live backend**
+> via `--tight` (`vio.main`/`launcher.main`/`./run.sh`) — `make_vi_engine` +
+> `vio_step`/`_vio_worker_main`, the `Keyframe` carrier superset (`ts_ns` +
+> inter-KF `imu_seg`), and `BackendModule(tight=…, imu_info_weight=True)`. The
+> LOOSE backend stays the default and **byte-identical** (oracle `gap = 0`,
+> comms untouched). Phase-2 RUNS gate proved by
+> `vio/tests/tight_smoke_selftest.py` (tight produces a finite/sane trajectory on
+> gold) + a live `launcher.main --tight` replay (`pose.refined` flows). The
+> loose-vs-tight **ATE benchmark is Phase 3** (Track C2/F1 gates).
+
 ---
 
 ## How to read a task

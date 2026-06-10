@@ -280,15 +280,16 @@ flag-free, which protects byte-parity and portability.
 |---|---|---|
 | `vio/mathlib/imu/imu.py` | **Extend**: add `Σ_ij` to `preintegrate_imu` + `ImuPreintegration` slot; per-edge preint cache (template: `GyroPreintegrator`) | The only new math; needed for `Ω_I`. |
 | `vio/mathlib/backend/vio_window.py` | **Wire `Ω_I`** into the IMU residual weight (else reuse as-is) | Core already complete + tested. |
-| `vio/comms/messages.py` | **Extend** `Keyframe`: add `ts_ns: int` and `imu_seg` (raw ts/gyro/accel block for the inter-KF interval). Defaults `None` → loose ignores them (carrier stays a superset). | Tight needs the timestamp + raw IMU between KFs; loose `accel` field unchanged. |
-| `vio/modules/preintegrate_prior.py` | **Extend**: retain the raw IMU samples per inter-KF interval (the gyro prior already consumes them; keep the block instead of discarding). | The one genuinely new bit of plumbing. |
-| `vio/modules/emit_keyframe.py` | **Extend**: attach `ts_ns` + `imu_seg` to the emitted `Keyframe`. | Threads IMU to the back-end. |
-| `vio/modules/run_ba.py` | **Extend**: `submit` tuple becomes a superset incl. `ts_ns`/`imu_seg` (loose `ba_step` ignores them). | Carrier through the engine boundary. |
-| `vio/mathlib/engine/steps.py` | **Add** `vio_step` / `vio_overlay` mirroring `ba_step`/`ba_overlay` | Submit a KF to `WindowedVIOMap.add_keyframe` + `run_ba`, carrying ts + IMU seg. |
-| `vio/mathlib/engine/subprocess.py` | **Add** `_vio_worker_main` | Tight can run `worker=True` (live, off the GIL). |
-| `vio/mathlib/engine/__init__.py` | **Add** `make_vi_engine(K, cfg, *, worker=False)` | Symmetric with `make_ba_engine`; builds `WindowedVIOMap`. |
-| `vio/modules/pipeline.py` | **Extend** `BackendModule(tight=False)` | `tight` → `make_vi_engine` + IMU stream; default branch is literally today's code. |
-| `vio/main.py` | **Add** `--tight` flag → set tight on `BackendModule` (+ front-end levers) | Opt-in; default unchanged. |
+| `vio/comms/messages.py` | **DONE (P2)** `Keyframe` gains `ts_ns: int = 0` + `imu_seg = None` (synced across all 6 vendored comms copies). `WireKeyframe`/converter UNCHANGED — both fields stay LOCAL-bus only (tight backend is in-process with odometry), so the IPC wire + comms diff-check are byte-identical. | Tight needs the timestamp + raw IMU between KFs; loose `accel` field unchanged. |
+| `vio/modules/preintegrate_prior.py` | **DONE (P2)** retains each frame's raw IMU rotated into the camera frame (`R_imu_cam @ v`) keyed by seq, gated on `retain_imu` (default OFF → loose no-op). | The one genuinely new bit of plumbing. |
+| `vio/modules/emit_keyframe.py` | **DONE (P2)** concatenates the per-frame segs since the last KF (strict-increasing-ts cleaned) → `imu_seg` + sets `ts_ns`, gated on `retain_imu`. | Threads IMU to the back-end. |
+| `vio/modules/run_ba.py` | **DONE (P2)** `submit` shapes the tuple per backend: 6-tuple `(…, ts_ns, imu_seg)` tight / historical 5-tuple loose (reads the `tight` state flag). | Carrier through the engine boundary. |
+| `vio/mathlib/engine/steps.py` | **DONE (P2)** `vio_step` / `vio_overlay` mirror `ba_step`/`ba_overlay`. | Submit a KF to `WindowedVIOMap.add_keyframe` + `run_ba`, carrying ts + IMU seg. |
+| `vio/mathlib/engine/subprocess.py` | **DONE (P2)** `_vio_worker_main` (no stored stream; live block rides `imu_seg`). | Tight can run `worker=True` (live, off the GIL). |
+| `vio/mathlib/engine/__init__.py` | **DONE (P2)** `make_vi_engine(K, cfg, *, worker=False)`. | Symmetric with `make_ba_engine`; builds `WindowedVIOMap`. |
+| `vio/modules/pipeline.py` | **DONE (P2)** `BackendModule(tight=False)` → `make_vi_engine` w/ `imu_info_weight=True`; `OdometryModule(retain_imu=tight)`. Default branch is literally today's code. | `tight` → `make_vi_engine` + IMU stream; default branch is literally today's code. |
+| `vio/main.py` | **DONE (P2)** `--tight` flag threaded through `run_vio` → `OdometryModule(retain_imu=)` + `BackendModule(tight=)`; `launcher/main.py` forwards `--tight`; `./run.sh --tight` via `"$@"`. | Opt-in; default unchanged. |
+| `vio/tests/tight_smoke_selftest.py` | **NEW (P2)** drives the EXACT `--tight` engine path on a gold session → asserts a finite/sane/non-exploding trajectory. | Phase-2 RUNS gate (deterministic, no IPC graph). |
 | `vio/tools/compare_backends.py` (NEW dir) | **NEW** | Loose-vs-tight ATE harness (§6), reusing `baseline/tools/compare_sessions.py`. |
 
 ### Interfaces (standardize on the tight core's already-clean contract)
@@ -408,16 +409,59 @@ Re-run `oracle_replay_selftest.py` after wiring to confirm `gap = 0`.
 - **Gate — MET:** sub-mm / sub-mdeg recovery incl. bias retained under the
   covariance-correct weight; byte-parity preserved.
 
-### Phase 2 — Engine + selection plumbing (LOOSE byte-identical) · ~1–1.5 days
-- Add `make_vi_engine`, `vio_step`/`vio_overlay`, `_vio_worker_main`.
-- Extend `Keyframe` (`ts_ns`, `imu_seg`), `PreintegratePrior` (retain raw seg),
-  `EmitKeyframe`, `RunBA` (superset tuple).
-- Add `BackendModule(tight=False)` branch + `--tight` flag in `main.py`.
-- **Test (tester must actually launch):** (a) `oracle_replay_selftest.py` → `gap = 0`
-  (proves loose byte-identical); (b) `./run.sh` replay default (loose) unchanged;
-  (c) `./run.sh --tight` replay runs end-to-end, `pose.refined` flows, offscreen Qt
-  selftest passes.
-- **Gate:** `gap = 0` AND `--tight` produces a non-trivial trajectory live.
+### Phase 2 — Engine + selection plumbing (LOOSE byte-identical) · DONE (2026-06-10)
+- **DONE — `--tight` selects the tight backend; LOOSE is the byte-identical default.**
+  - **Engine layer (additive, sibling of the BA engine):**
+    `vio/mathlib/engine/steps.py` gains `vio_step` (consumes the SUPERSET
+    snapshot `(T_cw, ids, pts, depth_m, ts_ns, imu_seg)` → `WindowedVIOMap
+    .add_keyframe(..., imu_seg=) → run_ba`) + `vio_overlay`;
+    `vio/mathlib/engine/subprocess.py` gains `_vio_worker_main` (builds
+    `WindowedVIOMap` with NO stored stream — the live block rides `imu_seg`);
+    `vio/mathlib/engine/__init__.py` gains `make_vi_engine(K, cfg, *, worker=)`,
+    symmetric with `make_ba_engine`.
+  - **Carrier superset (default-inert):** `Keyframe` (`comms/messages.py`, synced
+    across all six vendored comms copies) gains `ts_ns: int = 0` +
+    `imu_seg: tuple|None = None`. The IPC `WireKeyframe` / its converter are
+    **unchanged** — those two fields stay LOCAL-bus only (the tight backend runs
+    in the SAME process as the odometry module), so the cross-process wire
+    contract is byte-identical and the comms diff-check stays clean.
+  - **Front-end plumbing (gated on `retain_imu`, default OFF):**
+    `PreintegratePrior` retains each frame's raw IMU samples rotated into the
+    camera optical frame (`R_imu_cam @ v`) keyed by seq; `EmitKeyframe`
+    concatenates the per-frame segments since the previous keyframe (strictly
+    increasing-ts cleaned) into the keyframe's `imu_seg` + sets `ts_ns`. Both
+    are no-ops on the loose/oracle path.
+  - **Selection (clean engine switch, not a fork):** `BackendModule(tight=False)`
+    — `tight=True` builds `make_vi_engine` with `WindowedVIOConfig` whose ONLY
+    override is `imu_info_weight=True` (the live tight weight the PLAN prescribes)
+    and sets a `tight` state flag; `RunBA` reads it to shape the submitted tuple
+    (6-tuple tight / 5-tuple loose). `OdometryModule(retain_imu=tight)`.
+    `vio/main.py` adds `--tight` (threaded through `run_vio`); `launcher/main.py`
+    adds `--tight` → forwards `vio.main --tight`; `./run.sh --tight` works via the
+    existing `"$@"` pass-through. The default branch is literally today's code
+    (`make_ba_engine` → `WindowedBAMap`, no IMU retention).
+- **Test — PASS (tester launched the real graph):**
+  - (a) `oracle_replay_selftest.py` → **`gap = 0`** (loose byte-identical); the
+    five other comms copies still diff-clean vs `ui/comms`; `vio_ba_selftest`,
+    `imu_preint_cov_selftest`, `odometry_selftest`, `gyrofuse_selftest`,
+    `reproj_stub_selftest` all PASS.
+  - (b) **In-process smoke** `vio/tests/tight_smoke_selftest.py` drives the EXACT
+    `--tight` engine path on gold sessions: on `lab_loop_30s` (599 frames, 120
+    KFs, 117 window-solves) and `push_straight_fast_15s` (299 frames, 60 KFs, 57
+    refined) the tight trajectory is **finite, non-trivial, non-exploding** and
+    roughly tracks loose (path ratio 0.80–1.02; on the fast push the tight tip is
+    far smoother — 32 cm vs the loose tip's 226 cm max step — the IMU bridging the
+    fast frame, full ATE deferred to Phase 3). Real IMU factors present
+    (`vio_imu=7`, `vio_reproj_px` ≈ 0.04–1.1).
+  - (c) **Live multi-process** `launcher.main --session … --tight --no-ui` runs
+    capture → vio[TIGHT] → slam end-to-end with a clean `os._exit(0)`; a direct
+    IPC subscriber confirmed **`pose.refined` flows** on the same topic the loose
+    path uses (finite poses), so the UI/oracle harness consumes tight identically.
+    The `--worker --tight` subprocess engine spawns + accepts the 6-tuple +
+    closes cleanly (picklable under `spawn`).
+- **Gate — MET:** `gap = 0` AND `--tight` produces a non-trivial, sane trajectory
+  live + in-process. (Beating loose is NOT a Phase-2 gate — that is benchmarked in
+  Phase 3 and refined in Phase 4.)
 
 ### Phase 3 — Loose-vs-tight benchmark harness · ~1 day
 - New `vio/tools/compare_backends.py` (§6), reusing `_umeyama_se3` + `ate` from
@@ -436,6 +480,9 @@ Re-run `oracle_replay_selftest.py` after wiring to confirm `gap = 0`.
 - **Gate per item:** no ATE regression vs MVP on gold; NEES within χ² bounds for (c).
 
 **Critical path to a usable `--tight`: Phases 0 → 1 → 2 → 3** (~3.5–4.5 days).
+**Status:** Phases 0, 1, 2 DONE (2026-06-10) — `--tight` is wired + runs end-to-end
+on gold sessions (loose stays byte-identical). Phase 3 (loose-vs-tight ATE
+benchmark) is next.
 
 ---
 

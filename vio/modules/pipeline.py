@@ -81,7 +81,8 @@ from vio.mathlib.frontend.frontend import FrontendConfig, KLTFrontend
 from vio.mathlib.odometry.odometry import OdometryConfig, RGBDVisualOdometry
 from vio.mathlib.backend.bundle import BAConfig
 from vio.mathlib.backend.windowed import WindowedConfig
-from vio.mathlib.engine import make_ba_engine
+from vio.mathlib.backend.vio_window import WindowedVIOConfig
+from vio.mathlib.engine import make_ba_engine, make_vi_engine
 from .preintegrate_prior import PreintegratePrior
 from .track_features import TrackFeatures
 from .publish_tracks import PublishTracks
@@ -106,7 +107,7 @@ class OdometryModule(Module):
                  frontend_cfg: FrontendConfig | None = None,
                  kf_every: int = 5, use_gyro: bool = True,
                  latest_only: bool = False, level_tilt: bool = False,
-                 publish_vo: bool = False) -> None:
+                 publish_vo: bool = False, retain_imu: bool = False) -> None:
         super().__init__("odometry", bus, latest_only=latest_only)
         # ``frontend_cfg`` carries the resolution-scaled KLT + corner-detection
         # geometry (window/pyramid/corner budget, and at low res the block_size=3
@@ -122,6 +123,14 @@ class OdometryModule(Module):
         # turns it on. Lets the live view self-level without a startup hold-still.
         self.ctx.state["level_tilt"] = bool(level_tilt)
         self.ctx.state["priors"] = {}
+        # TIGHT path only: retain the per-frame raw IMU samples (camera frame) so
+        # EmitKeyframe can hand the inter-keyframe block to the tight backend. The
+        # default (False) keeps the LOOSE / oracle front-end byte-identical -- the
+        # extra retention is a no-op (PreintegratePrior / EmitKeyframe gate on it).
+        self.ctx.state["retain_imu"] = bool(retain_imu)
+        if retain_imu:
+            self.ctx.state["imu_segs"] = {}
+            self.ctx.state["last_kf_seq"] = -1
         self.ctx.state["R_imu_cam"] = (
             None if R_imu_cam is None else np.asarray(R_imu_cam, dtype=np.float64))
         if accel_align is not None:
@@ -153,13 +162,46 @@ class OdometryModule(Module):
 
 
 class BackendModule(Module):
+    """Windowed back-end over the ``keyframe`` stream.
+
+    Two selectable backends, picked by ``tight`` (a clean engine switch, NOT a
+    pipeline fork):
+
+    * ``tight=False`` (default, LOOSE) -- literally today's code path:
+      :func:`make_ba_engine` builds the vision-only ``WindowedBAMap`` (reproj +
+      depth + optional VO/gravity priors). Byte-identical to the pre-tight build;
+      the offline oracle relies on this.
+    * ``tight=True`` (``--tight``, opt-in) -- :func:`make_vi_engine` builds the
+      tight-coupled ``WindowedVIOMap`` (the joint visual + IMU window optimiser
+      from :mod:`vio.mathlib.backend.vio_window`). The IMU factor is weighted by
+      the per-edge information square root (``imu_info_weight=True``, the
+      covariance-correct Phase-1 weight) -- the live tight path the PLAN
+      prescribes. ``RunBA`` then submits the SUPERSET snapshot (keyframe ts + raw
+      inter-keyframe IMU block) instead of the loose at-rest accel.
+
+    ``window`` / ``iters`` size the loose ``WindowedConfig``; the tight backend
+    uses ``WindowedVIOConfig``'s own (validated) window + iteration defaults.
+    """
+
     def __init__(self, bus: LocalPubSub, K: np.ndarray,
                  window: int = 6, iters: int = 5,
-                 latest_only: bool = False, worker: bool = False) -> None:
+                 latest_only: bool = False, worker: bool = False,
+                 tight: bool = False) -> None:
         super().__init__("backend", bus, latest_only=latest_only)
-        cfg = WindowedConfig(window=window, ba=BAConfig(max_iters=iters))
-        self.engine = make_ba_engine(K, cfg, worker=worker)
+        if tight:
+            # Tight backend: enable the covariance-correct IMU weight (Phase 1's
+            # opt-in flag) on a copy of WindowedVIOConfig's validated defaults.
+            # ``imu_info_weight`` is the only override -- everything else (window,
+            # lock_tilt, tight vel/pos sigmas, kf_every) keeps the values the
+            # vio_ba_selftest / vio oracle entries were tuned against.
+            vio_cfg = WindowedVIOConfig()
+            vio_cfg.vio.imu_info_weight = True
+            self.engine = make_vi_engine(K, vio_cfg, worker=worker)
+        else:
+            cfg = WindowedConfig(window=window, ba=BAConfig(max_iters=iters))
+            self.engine = make_ba_engine(K, cfg, worker=worker)
         self.ctx.state["engine"] = self.engine
+        self.ctx.state["tight"] = bool(tight)    # RunBA picks the snapshot shape
         self.on(topics.KEYFRAME, [RunBA(), PublishRefined()])
         self.forwards_to(topics.POSE_REFINED)
 

@@ -233,6 +233,11 @@ def main() -> int:
                     help="simulate a VL53L9CX-class ToF camera in the capture "
                          "process: compute depth at the source resolution then "
                          "downsample gray + depth to 54x42 (works live + replay)")
+    ap.add_argument("--tight", action="store_true",
+                    help="run the VIO process with its TIGHT-coupled backend "
+                         "(joint visual + IMU window optimiser) instead of the "
+                         "default loose windowed-BA backend. Forwarded to "
+                         "vio.main --tight; loose stays the default.")
     args = ap.parse_args()
 
     # SLAM keeps its live map current via a LATEST-ONLY in-process inbox (set in
@@ -298,6 +303,8 @@ def main() -> int:
         vio_args += ["--no-gyro"]
     if use_worker:
         vio_args += ["--worker"]
+    if args.tight:
+        vio_args += ["--tight"]
 
     # NB: the new `slam.main` is a PURE consumer of VIO's output and -- unlike the
     # pre-split `ours.proc.slam` -- intentionally DROPPED `--capture-endpoint`

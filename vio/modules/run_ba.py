@@ -23,7 +23,17 @@ class RunBA(Step):
             return None
         engine: Engine = ctx.state["engine"]
         T_cw = np.linalg.inv(kf.T_world_cam)
-        engine.submit((T_cw, kf.track_ids, kf.track_px, kf.depth_m, kf.accel))
+        # Submit the snapshot shaped for whichever backend this module built.
+        # LOOSE (default): the historical 5-tuple ``ba_step`` consumes -- the
+        # keyframe's at-rest gravity accel. TIGHT (``--tight``): the SUPERSET
+        # 6-tuple ``vio_step`` consumes -- the keyframe timestamp + the raw
+        # inter-keyframe IMU block (camera optical frame) for preintegration.
+        if ctx.state.get("tight"):
+            engine.submit((T_cw, kf.track_ids, kf.track_px, kf.depth_m,
+                           kf.ts_ns, kf.imu_seg))
+        else:
+            engine.submit((T_cw, kf.track_ids, kf.track_px, kf.depth_m,
+                           kf.accel))
         post = engine.poll()                     # refined latest T_cw, or None
         if post is None:
             return None

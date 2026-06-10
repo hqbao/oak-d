@@ -100,6 +100,20 @@ def _ba_worker_main(K, cfg, in_q, out_q, ov_q, stop_evt, reset_evt) -> None:
            in_q, out_q, ov_q, stop_evt, reset_evt)
 
 
+def _vio_worker_main(K, cfg, in_q, out_q, ov_q, stop_evt, reset_evt) -> None:
+    """Child entry point for tight-coupled VIO (module-level => picklable).
+
+    The live tight path supplies each keyframe's raw IMU segment in the snapshot
+    (``vio_step``), so the map is built with NO stored stream (``ts_ns=None``);
+    the inter-keyframe block rides ``imu_seg`` instead. Same GIL-isolation
+    rationale as the BA worker -- the joint solve runs off the camera read loop.
+    """
+    from ..backend.vio_window import WindowedVIOMap
+    from .steps import vio_step, vio_overlay
+    _serve(lambda: WindowedVIOMap(K, cfg=cfg), vio_step, vio_overlay,
+           in_q, out_q, ov_q, stop_evt, reset_evt)
+
+
 def _slam_worker_main(K, cfg, in_q, out_q, ov_q, stop_evt, reset_evt) -> None:
     """Child entry point for loop-closure SLAM (module-level => picklable)."""
     from ..loop.slam import SlamMap

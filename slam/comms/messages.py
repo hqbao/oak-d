@@ -178,6 +178,21 @@ class Keyframe:
     depth) and the low-level track snapshot the sliding-window BA needs
     (``track_ids`` + ``track_px`` from the odometry front-end, plus an optional
     at-rest ``accel`` for the gravity prior).
+
+    Tight-coupled VIO additions (carrier superset, default-inert)
+    ------------------------------------------------------------
+    The TIGHT backend (``--tight``) needs, in addition to the visual snapshot,
+    the keyframe's device-clock timestamp and the raw IMU samples spanning the
+    interval since the previous keyframe (already rotated into the camera optical
+    frame). Both default to "absent" so the LOOSE / oracle path is byte-identical
+    -- the loose ``ba_step`` / ``RunBA`` never reads them, and ``Keyframe`` stays
+    a strict superset of the pre-tight carrier.
+
+    * ``ts_ns`` -- device-clock nanoseconds of this keyframe (the cut used to
+      preintegrate the inter-keyframe IMU). ``0`` means "unset" (loose path).
+    * ``imu_seg`` -- ``(ts_ns, gyro_cam, accel_cam)`` raw IMU block for the
+      interval ``(prev_kf_ts, ts_ns]``, camera optical frame, time-ordered;
+      ``None`` on the loose path or when no usable samples exist.
     """
 
     seq: int
@@ -191,6 +206,11 @@ class Keyframe:
     #: motion-consistent features). The 3D-map viewer back-projects only these, so
     #: the noisy dense-depth points the solve rejected are never drawn.
     inlier_ids: np.ndarray | None = None
+    #: device-clock timestamp of this keyframe (ns); ``0`` = unset (loose path).
+    ts_ns: int = 0
+    #: raw inter-keyframe IMU block ``(ts_ns, gyro_cam, accel_cam)`` (camera
+    #: optical frame), or ``None`` (loose path / no samples). Tight backend only.
+    imu_seg: tuple[np.ndarray, np.ndarray, np.ndarray] | None = None
 
 
 @dataclass(frozen=True)

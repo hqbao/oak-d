@@ -113,8 +113,17 @@ def run_vio(*,
             worker: bool = False,
             calib_timeout_s: float = 30.0,
             backend_window: int = 6,
-            backend_iters: int = 5) -> int:
-    """Run the VIO process until END / SIGTERM / Ctrl-C."""
+            backend_iters: int = 5,
+            tight: bool = False) -> int:
+    """Run the VIO process until END / SIGTERM / Ctrl-C.
+
+    ``tight`` selects the TIGHT-coupled VIO backend (the joint visual + IMU
+    window optimiser, ``imu_info_weight=True``) instead of the default LOOSE
+    windowed-BA backend. Opt-in: when False the path is byte-identical to before
+    -- the front-end stops retaining raw IMU and the back-end builds the loose
+    engine. When True the odometry module retains the per-frame raw IMU so each
+    keyframe carries the inter-keyframe IMU block the tight backend preintegrates.
+    """
     # 1. Block until capture publishes its calibration bundle.
     LOG.info("vio: waiting for calib.bundle on %s ...", capture_endpoint)
     bundle = _await_calib_bundle(capture_endpoint, calib_timeout_s)
@@ -161,10 +170,14 @@ def run_vio(*,
                           frontend_cfg=fe_cfg,
                           kf_every=kf_every, use_gyro=use_gyro,
                           latest_only=False, level_tilt=True,
-                          publish_vo=True)   # live viewer's pure-vision "VO" line
+                          publish_vo=True,   # live viewer's pure-vision "VO" line
+                          retain_imu=tight)  # tight backend needs inter-KF IMU
+    if tight:
+        LOG.info("vio: TIGHT-coupled VIO backend selected (--tight) "
+                 "[imu_info_weight=True]")
     backend = BackendModule(local, bundle.K,
                             window=backend_window, iters=backend_iters,
-                            latest_only=False, worker=worker)
+                            latest_only=False, worker=worker, tight=tight)
 
     # 5. Open the OUTPUT IPCPubSub server + publisher bridge. KEYFRAME is the only
     #    VIO output that needs shared memory (image + depth payload), so it gets
@@ -291,6 +304,11 @@ def main() -> int:
                     help="seconds to wait for the calib.bundle on boot")
     ap.add_argument("--backend-window", type=int, default=6)
     ap.add_argument("--backend-iters", type=int, default=5)
+    ap.add_argument("--tight", action="store_true",
+                    help="select the TIGHT-coupled VIO backend (joint visual + "
+                         "IMU window optimiser, imu_info_weight=True) instead of "
+                         "the default LOOSE windowed-BA backend. Opt-in; the "
+                         "default (loose) path is byte-identical to before.")
     args = ap.parse_args()
 
     return run_vio(
@@ -302,6 +320,7 @@ def main() -> int:
         calib_timeout_s=args.calib_timeout,
         backend_window=args.backend_window,
         backend_iters=args.backend_iters,
+        tight=args.tight,
     )
 
 

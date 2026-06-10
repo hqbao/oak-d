@@ -78,4 +78,30 @@ class PreintegratePrior(Step):
         if len(priors) > 256:
             for seq in sorted(priors)[:-256]:
                 priors.pop(seq, None)
+
+        # TIGHT path only: retain this interval's RAW IMU samples (rotated into
+        # the camera optical frame) keyed by frame seq, so EmitKeyframe can hand
+        # the inter-keyframe IMU block to the tight backend's preintegrator. This
+        # is a no-op for the LOOSE / oracle path (``retain_imu`` defaults False),
+        # so it never allocates on or perturbs the byte-identical loose path. The
+        # tight backend's body frame == camera optical frame, hence the per-sample
+        # ``R_imu_cam @ v`` rotation here (the gyro prior above already uses the
+        # same extrinsic via integrate_gyro_camera).
+        if ctx.state.get("retain_imu") and R_imu_cam is not None:
+            R_ic = np.asarray(R_imu_cam, dtype=np.float64)
+            imu_segs = ctx.state["imu_segs"]
+            if gyro.shape[0]:
+                gyro_cam = gyro @ R_ic.T          # (M,3) IMU-frame -> camera frame
+                accel_arr = accel @ R_ic.T
+                imu_segs[msg.seq] = (
+                    np.asarray(msg.imu_ts, dtype=np.int64).copy(),
+                    gyro_cam.copy(), accel_arr.copy())
+            else:
+                imu_segs[msg.seq] = (np.zeros(0, np.int64),
+                                     np.zeros((0, 3)), np.zeros((0, 3)))
+            # Same bounded-growth cap as ``priors`` -- EmitKeyframe pops the
+            # consumed segments, but a coalesced latest-only graph can leave gaps.
+            if len(imu_segs) > 512:
+                for seq in sorted(imu_segs)[:-512]:
+                    imu_segs.pop(seq, None)
         return None

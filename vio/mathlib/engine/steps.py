@@ -33,6 +33,28 @@ def ba_step(ba_map, snap: Any):
     return ba_map.run_ba()                    # refined latest T_cw, or None
 
 
+def vio_step(vio_map, snap: Any):
+    """One tight-coupled VIO keyframe: add the track snapshot + IMU block, solve.
+
+    Mirrors :func:`ba_step` but for the tight backend
+    (:class:`vio.mathlib.backend.vio_window.WindowedVIOMap`): the snapshot is a
+    SUPERSET of the loose one carrying the keyframe timestamp + the raw
+    inter-keyframe IMU segment the joint optimiser preintegrates --
+
+        ``snap`` = ``(T_cw, ids, pts, depth_m, ts_ns, imu_seg)``
+
+    where ``imu_seg`` is ``(ts_ns, gyro_cam, accel_cam)`` in the camera optical
+    frame (or ``None`` -> the map slices its stored stream, empty live). Returns
+    the refined latest ``T_cw`` (``4x4``) or ``None`` when the window has not yet
+    enough structure / IMU to optimise.
+    """
+    T_cw, ids, pts, depth_m, ts_ns, imu_seg = snap
+    if ids is None or pts is None:
+        return None
+    vio_map.add_keyframe(T_cw, ids, pts, depth_m, ts_ns, imu_seg=imu_seg)
+    return vio_map.run_ba()                    # refined latest T_cw, or None
+
+
 def slam_step(slam_map, snap: Any):
     """One SLAM keyframe: add it; on a confirmed loop, optimise the pose graph.
 
@@ -71,6 +93,23 @@ def ba_overlay(ba_map):
     for kf in ba_map.keyframes:
         T_cw = kf["T_cw"]
         out[int(kf["id"])] = (np.linalg.inv(T_cw)[:3, 3]).copy()
+    return out
+
+
+def vio_overlay(vio_map):
+    """Tight-VIO window snapshot: ``{kf_index: refined camera-world position}``.
+
+    Mirrors :func:`ba_overlay` but the tight map's keyframes are a plain list
+    (no monotonic ``id`` field), so the snapshot is keyed by the keyframe's index
+    within the current window. ``inv(T_cw)`` maps each keyframe pose to its
+    camera-in-world position (camera-optical frame; the UI applies the single
+    optical->NED display transform). Read-only over real refined map outputs.
+    """
+    import numpy as np
+    out = {}
+    for i, kf in enumerate(vio_map.keyframes):
+        T_cw = kf["T_cw"]
+        out[int(i)] = (np.linalg.inv(T_cw)[:3, 3]).copy()
     return out
 
 
