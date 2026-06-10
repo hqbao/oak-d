@@ -77,6 +77,7 @@ from __future__ import annotations
 import numpy as np
 
 from vio.comms import Module, LocalPubSub, topics
+from vio.comms.messages import END
 from vio.mathlib.frontend.frontend import FrontendConfig, KLTFrontend
 from vio.mathlib.odometry.odometry import OdometryConfig, RGBDVisualOdometry
 from vio.mathlib.backend.bundle import BAConfig
@@ -93,6 +94,7 @@ from .correct_tilt import CorrectTilt
 from .publish_inliers import PublishInliers
 from .publish_gyrofuse import PublishGyroFuse
 from .propagate_imu import PropagateImu
+from .loop_inbox import LoopCorrectionInbox
 from .publish_pose import PublishPose
 from .publish_vo import PublishVo
 from .emit_keyframe import EmitKeyframe
@@ -108,7 +110,8 @@ class OdometryModule(Module):
                  frontend_cfg: FrontendConfig | None = None,
                  kf_every: int = 5, use_gyro: bool = True,
                  latest_only: bool = False, level_tilt: bool = False,
-                 publish_vo: bool = False, retain_imu: bool = False) -> None:
+                 publish_vo: bool = False, retain_imu: bool = False,
+                 loop_correct: bool = False) -> None:
         super().__init__("odometry", bus, latest_only=latest_only)
         # ``frontend_cfg`` carries the resolution-scaled KLT + corner-detection
         # geometry (window/pyramid/corner budget, and at low res the block_size=3
@@ -137,6 +140,25 @@ class OdometryModule(Module):
             # forward-integration + ZUPT. Kept identical to the tight backend so the
             # live dead-reckoning and the keyframe nav-state share one gravity model.
             self.ctx.state["g_world"] = (0.0, 9.81, 0.0)
+        # Closed-loop SLAM correction (LIVE + --tight only). When on, PropagateImu
+        # bleeds the SLAM pose-graph correction (loop.correction) back into the live
+        # nav-state so accumulated drift is BOUNDED on revisits. The correction
+        # arrives on a DIFFERENT thread (the slam-endpoint IPC subscriber that
+        # vio.main wires onto this local bus), so a thread-safe inbox hands it to
+        # the odometry thread; PropagateImu drains it per frame. Gated so the
+        # offline / oracle / loose path is byte-identical (loop_correct stays
+        # False there -> no inbox, no subscription, no blend). Requires retain_imu
+        # (the --tight nav-state); ignored otherwise.
+        if loop_correct and retain_imu:
+            inbox = LoopCorrectionInbox()
+            self.ctx.state["loop_correct"] = True
+            self.ctx.state["loop_inbox"] = inbox
+            # Feed corrections from the local bus (vio.main republishes the slam
+            # endpoint's loop.correction here) into the inbox. END is ignored.
+            bus.subscribe(
+                topics.LOOP_CORRECTION,
+                lambda m: inbox.push(m) if m is not None and m is not END
+                else None)
         self.ctx.state["R_imu_cam"] = (
             None if R_imu_cam is None else np.asarray(R_imu_cam, dtype=np.float64))
         if accel_align is not None:

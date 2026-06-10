@@ -39,7 +39,7 @@ Four long-lived processes, plus transient tool processes that come and go:
 | Process      | Owns                                          | Subscribes (IPC)               | Publishes (IPC) |
 |---           |---                                            |---                             |---|
 | `imu_camera` | OAK-D device + cam/IMU sync + IMU calib + **inline SGM depth** | —              | `cam.sync`, `imu.raw`, `imucam.sample`, `frame.depth`, `calib.bundle` |
-| `vio`        | RGB-D PnP odometry + windowed BA              | `imucam.sample`, `frame.depth`, `calib.bundle` | `pose.odom`, `pose.vo` (pure-vision, LIVE-only), `keyframe`, `frame.tracks`, `frame.inliers`, `pose.refined` |
+| `vio`        | RGB-D PnP odometry + windowed BA              | `imucam.sample`, `frame.depth`, `calib.bundle`; **`loop.correction` from `slam` (LIVE + `--tight` only — closed-loop)** | `pose.odom`, `pose.vo` (pure-vision, LIVE-only), `keyframe`, `frame.tracks`, `frame.inliers`, `pose.refined` |
 | `slam`       | ORB loop closure + SE(3) pose graph          | `keyframe`, `calib.bundle` (from VIO) | `loop.correction` (loop-event rewrite), `slam.map` (continuous keyframe overlay, LIVE-only) **and** `slam.loop` (per-candidate loop-match funnel for the Loop-Closure window, LIVE-only) |
 | `ui`         | Qt `MainWindow`, single 5-trajectory Viewer3D + View/Visualize/Calibration menus | `pose.odom`, `pose.vo`, `pose.refined`, `calib.bundle` (vio); `slam.map`, `slam.loop`, `calib.bundle` (slam); on-demand: `imucam.sample`, `frame.depth`, `imu.raw` (capture) + `frame.tracks`, `frame.inliers`, `keyframe` (vio) | — (sink) |
 
@@ -66,6 +66,7 @@ flowchart LR
     vio -- "keyframe · calib.bundle" --> slam
     vio -- "pose.odom · pose.vo · pose.refined · calib.bundle" --> ui
     slam -- "slam.map · slam.loop · calib.bundle" --> ui
+    slam == "loop.correction (closed-loop, LIVE + --tight only)" ==> vio
     cap -. "imu.raw · imucam.sample · frame.depth (on-demand)" .-> ui
     vio -. "frame.tracks · frame.inliers · keyframe (on-demand)" .-> ui
 ```
@@ -254,6 +255,26 @@ R/t only, **no gyro fusion, no tilt leveling, no BA**. It is accumulated by
 `OdometryModule` is built with `publish_vo=True` (`vio/main.py` sets it). It is
 **LIVE-only**: the offline / deterministic oracle leaves `publish_vo=False`, so it
 never runs and `pose.odom` byte-parity is unaffected (§9 invariant 15).
+
+**Closed-loop SLAM correction (`slam --loop.correction--> vio`, LIVE + `--tight`
+only).** Basalt's realtime VIO has no loop closure, so its live pose drifts
+unboundedly; we feed SLAM's pose-graph correction back into the LIVE `--tight`
+pose so accumulated drift is BOUNDED on revisits. When `vio.main` runs with
+`--tight` AND a `--slam-endpoint` (the launcher passes it on the `--tight` branch),
+VIO opens a SECOND read-only client on the SLAM endpoint, subscribes to
+`loop.correction`, and re-hydrates it onto VIO's own local bus. `OdometryModule`
+(built `loop_correct=True`) registers a thread-safe inbox
+(`vio/modules/loop_inbox.py`) on that topic; `PropagateImu` drains it per frame on
+the odometry thread and SMOOTHLY blends the SE(3) correction into the live
+nav-state (geodesic interpolation over a few frames, bounded per-frame gain — NOT
+a hard snap). The accumulated loop transform also RE-FRAMES the incoming vision
+pose (`loop_applied`) so the every-frame vision complementary pull anchors the live
+pose to the LOOP-CORRECTED trajectory instead of dragging the correction back out.
+This is **LIVE + `--tight` ONLY**: the offline / oracle / loose path never sets
+`loop_correct`, so it is byte-identical (§9 invariant 17). Measured on the gold
+`lab_loop_30s` loop session the revisit drift drops ~50 % (43 cm → 22 cm) vs the
+open-loop (Basalt-like) run, applied smoothly with no teleport
+(`vio/tests/closed_loop_drift_selftest.py`).
 
 ### 5.3 `slam/main.py` (SLAM · `oak.slam`)
 
@@ -589,6 +610,11 @@ argparse:
   VIO's output, so the launcher wires slam with only `--vio-endpoint` / `--endpoint`
   (passing `--capture-endpoint` would make slam's argparse abort).
 
+On the **`--tight` branch** the launcher ALSO passes `--slam-endpoint <slam_ep>` to
+`vio.main`, which turns on the CLOSED-LOOP feedback (`slam --loop.correction--> vio`,
+§5.2 / §9 invariant 17): VIO subscribes to SLAM's loop correction and feeds it back
+into the live pose so drift is bounded on revisits. Loose (default) never wires it.
+
 ## 8. Verification & testing
 
 The byte-parity oracle lives in `verification/` and is **in-process** (single
@@ -610,6 +636,8 @@ proven (see [`verification/README.md`](../verification/README.md)):
 | `verification/ipc_comms_selftest.py` | 5-copy `comms` dir-diff + codec sha256 + cross-decode + `SharedArrayRing` round-trip + full bridge round-trip over a real Unix socket. | PASSING |
 | `imu_camera/tests/codec_roundtrip_selftest.py` | Codec round-trip + frozen sha256 per `Wire*` (vendored into each copy → identical `codec_vectors.json`). | PASSING |
 | `slam/tests/proc3_smoke_selftest.py` | 3-proc spawn (imu_camera replay + vio + slam) over a gold loop; asserts rc=0, `slam.map` advances, `loop.correction` n_loops matches the oracle. | PASSING |
+| `vio/tests/tight_live_regression_selftest.py` | LOCKS the live `--tight` behaviour (push 0→D smooth / covered dead-reckon / ZUPT / shake) with the closed-loop feedback OFF **and** ON-but-idle (proving it is a no-op until a loop closes), + a synthetic closed-loop drift-reduction proof (98 %, applied smoothly over many frames). The gate the closed-loop change must keep passing. | PASSING |
+| `vio/tests/closed_loop_drift_selftest.py` | End-to-end closed-loop drift proof on a gold LOOP session: real SLAM `loop.correction` fed back into the real `--tight` `OdometryModule`; the revisit drift drops ~50 % (43→22 cm) vs the open-loop (Basalt-like) run, with no hard teleport. | PASSING (lab_loop_30s) |
 | Per-project math selftests | `vio.tests.vio_ba_selftest`, `vio.tests.odometry_selftest`, `slam.tests.loop_closure_selftest`, `depth.tests.stereo_sgm_selftest` — each == the pre-split numbers line-for-line. | PASSING |
 
 ## 9. Invariants
@@ -701,6 +729,25 @@ proven (see [`verification/README.md`](../verification/README.md)):
     `SlamConfig` defaults are `kf_min_trans_m=0.0` / `kf_min_rot_deg=0.0`
     (`slam/mathlib/loop/slam.py`), so the offline path keeps the gate OFF and its
     deterministic scoring is unchanged.
+17. **The closed-loop SLAM correction (`slam --loop.correction--> vio`) is LIVE +
+    `--tight` ONLY; the offline / oracle / loose path is byte-identical.** The
+    feedback that bounds drift on revisits ("better than Basalt") is wired ONLY when
+    `vio.main` runs with `--tight` AND a `--slam-endpoint` (the launcher passes it on
+    the `--tight` branch). VIO then opens a SECOND read-only client on the slam
+    endpoint, subscribes to `loop.correction`, re-hydrates it onto its local bus, and
+    `OdometryModule(loop_correct=True)` feeds it into `PropagateImu`'s thread-safe
+    inbox (`vio/modules/loop_inbox.py`). `PropagateImu` blends the SE(3) correction
+    into the live nav-state SMOOTHLY (a bounded per-frame geodesic step, never a hard
+    snap) and re-frames the incoming vision pose by the accumulated loop transform so
+    the every-frame vision pull cannot undo it. **The offline / oracle / loose path
+    NEVER sets `loop_correct`** (no slam endpoint is wired, `retain_imu` is off), so
+    no inbox is allocated, no subscription opens, and the loop blend never runs --
+    `pose.odom` (and the deterministic scoring) stays **byte-identical**. A failed
+    connect to the slam endpoint is non-fatal: VIO runs uncorrected (open-loop). The
+    feedback is locked by the regression test
+    (`vio/tests/tight_live_regression_selftest.py`, which proves it is a no-op until a
+    loop closes) and proven on real data
+    (`vio/tests/closed_loop_drift_selftest.py`, ~50 % revisit-drift reduction).
 
 ## 10. The split (history)
 

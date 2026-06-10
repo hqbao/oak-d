@@ -634,6 +634,154 @@ def complementary_correct(R_wb: np.ndarray, p_wb: np.ndarray, v_w: np.ndarray,
     return R, p, v
 
 
+def loop_correction_delta(R_pre: np.ndarray, p_pre: np.ndarray,
+                          R_corr: np.ndarray, p_corr: np.ndarray
+                          ) -> tuple[np.ndarray, np.ndarray]:
+    """World-frame SE(3) delta that maps a keyframe's PRE-correction body->world
+    pose onto its SLAM-corrected body->world pose.
+
+    SLAM's pose-graph optimisation rewrites a keyframe's pose from ``(R_pre,
+    p_pre)`` to ``(R_corr, p_corr)`` (both body->world == camera->world here). The
+    correction is the LEFT (world-frame) transform ``T_delta`` such that
+    ``T_corr = T_delta @ T_pre``; applying the SAME ``T_delta`` to the live pose
+    (which has dead-reckoned PAST that keyframe carrying the same accumulated
+    drift) pulls the live trajectory back onto the loop-corrected one.
+
+    Because both poses describe the same physical keyframe, ``T_delta`` is the
+    accumulated drift the loop closure removed::
+
+        T_delta = T_corr @ inv(T_pre)
+        R_delta = R_corr @ R_pre^T
+        p_delta = p_corr - R_delta @ p_pre
+
+    Returns ``(R_delta, p_delta)`` -- the rotation + translation of the world-frame
+    delta. Applying it to any body->world pose ``(R, p)`` is
+    ``(R_delta @ R, R_delta @ p + p_delta)`` (see :func:`apply_se3_left`).
+    """
+    R_pre = np.asarray(R_pre, np.float64)
+    p_pre = np.asarray(p_pre, np.float64)
+    R_corr = np.asarray(R_corr, np.float64)
+    p_corr = np.asarray(p_corr, np.float64)
+    R_delta = R_corr @ R_pre.T
+    p_delta = p_corr - R_delta @ p_pre
+    return R_delta, p_delta
+
+
+def scale_se3_delta(R_delta: np.ndarray, p_delta: np.ndarray, gain: float
+                    ) -> tuple[np.ndarray, np.ndarray]:
+    """A BOUNDED fraction ``gain`` of a world-frame SE(3) delta, on-manifold.
+
+    Interpolates the SE(3) transform ``(R_delta, p_delta)`` toward identity by
+    ``gain`` in ``[0, 1]`` via the matrix exponential of a scaled twist:
+    ``T_step = Exp(gain * Log(T_delta))``. ``gain = 1`` returns the full delta,
+    ``gain = 0`` returns identity. This is the SMOOTH partial application used to
+    bleed a loop-closure correction onto the live pose over several frames instead
+    of a hard one-shot snap -- the geodesic interpolation keeps rotation +
+    translation coupled correctly (no shear from scaling R and p independently).
+
+    Returns ``(R_step, p_step)`` -- the partial world-frame delta to left-apply.
+    """
+    g = float(np.clip(gain, 0.0, 1.0))
+    R_delta = np.asarray(R_delta, np.float64)
+    p_delta = np.asarray(p_delta, np.float64)
+    if g <= 0.0:
+        return np.eye(3), np.zeros(3)
+    # se3 twist of the full delta, scaled by the per-frame gain, re-exponentiated.
+    T = np.eye(4)
+    T[:3, :3] = R_delta
+    T[:3, 3] = p_delta
+    xi = _se3_log(T)
+    T_step = _se3_exp(g * xi)
+    return T_step[:3, :3].copy(), T_step[:3, 3].copy()
+
+
+def apply_se3_left(R_delta: np.ndarray, p_delta: np.ndarray,
+                   R: np.ndarray, p: np.ndarray
+                   ) -> tuple[np.ndarray, np.ndarray]:
+    """Left-multiply a world-frame SE(3) delta onto a body->world pose ``(R, p)``.
+
+    ``(R', p') = T_delta @ (R, p)`` == ``(R_delta @ R, R_delta @ p + p_delta)``.
+    Returns fresh arrays; inputs are not mutated.
+    """
+    R_delta = np.asarray(R_delta, np.float64)
+    p_delta = np.asarray(p_delta, np.float64)
+    R_new = R_delta @ np.asarray(R, np.float64)
+    p_new = R_delta @ np.asarray(p, np.float64) + p_delta
+    return R_new, p_new
+
+
+def se3_from_Rp(R: np.ndarray, p: np.ndarray) -> np.ndarray:
+    """Pack a rotation + translation into a 4x4 homogeneous SE(3) matrix."""
+    T = np.eye(4)
+    T[:3, :3] = np.asarray(R, np.float64)
+    T[:3, 3] = np.asarray(p, np.float64)
+    return T
+
+
+def se3_inv(T: np.ndarray) -> np.ndarray:
+    """Inverse of a 4x4 SE(3): ``inv((R, t)) = (R^T, -R^T t)`` (no full solve)."""
+    T = np.asarray(T, np.float64)
+    R = T[:3, :3]
+    t = T[:3, 3]
+    out = np.eye(4)
+    out[:3, :3] = R.T
+    out[:3, 3] = -R.T @ t
+    return out
+
+
+def _skew4(w: np.ndarray) -> np.ndarray:
+    return np.array([[0.0, -w[2], w[1]],
+                     [w[2], 0.0, -w[0]],
+                     [-w[1], w[0], 0.0]])
+
+
+def _se3_exp(xi: np.ndarray) -> np.ndarray:
+    """Exponential map se3 -> SE3. ``xi = [rho(3); phi(3)]`` -> 4x4.
+
+    Local copy of the bundle-module's ``se3_exp`` so this IMU module stays free of
+    backend imports (kept movable per the VIO-library consolidation note); the
+    convention is identical (left-perturbation, ``rho`` first).
+    """
+    rho = xi[:3]
+    phi = xi[3:]
+    theta = float(np.linalg.norm(phi))
+    R = so3_exp(phi)
+    if theta < 1e-12:
+        V = np.eye(3) + 0.5 * _skew4(phi)
+    else:
+        K = _skew4(phi / theta)
+        V = (np.eye(3)
+             + (1.0 - np.cos(theta)) / theta * K
+             + (theta - np.sin(theta)) / theta * (K @ K))
+    T = np.eye(4)
+    T[:3, :3] = R
+    T[:3, 3] = V @ rho
+    return T
+
+
+def _se3_log(T: np.ndarray) -> np.ndarray:
+    """Logarithm map SE3 -> se3 (inverse of :func:`_se3_exp`).
+
+    Returns ``xi = [rho(3); phi(3)]`` with ``_se3_exp(xi) == T``.
+    """
+    R = T[:3, :3]
+    t = T[:3, 3]
+    phi = so3_log(R)
+    theta = float(np.linalg.norm(phi))
+    if theta < 1e-8:
+        V = np.eye(3) + 0.5 * _skew4(phi)
+    else:
+        K = _skew4(phi / theta)
+        V = (np.eye(3)
+             + (1.0 - np.cos(theta)) / theta * K
+             + (theta - np.sin(theta)) / theta * (K @ K))
+    rho = np.linalg.solve(V, t)
+    xi = np.empty(6)
+    xi[:3] = rho
+    xi[3:] = phi
+    return xi
+
+
 def gravity_aligned_R0(accel_cam: np.ndarray) -> np.ndarray:
     """Initial camera->world rotation that levels the optical world to gravity.
 

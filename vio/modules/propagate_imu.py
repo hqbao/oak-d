@@ -54,9 +54,37 @@ The propagated pose REPLACES ``step.pose`` so the downstream
 :class:`PublishPose` emits the IMU-propagated pose on ``pose.odom`` -- the live
 marker dead-reckons through any blind interval instead of freezing.
 
+Closed-loop SLAM correction (LIVE + ``--tight`` only)
+----------------------------------------------------
+Basalt's realtime VIO has NO loop closure, so its live pose drifts unboundedly. We
+do: the SLAM process runs a pose-graph that, on a revisit, rewrites the keyframe
+poses (``loop.correction``). This step feeds that correction back into the LIVE
+nav-state so the accumulated drift is BOUNDED on revisits ("closed loop"):
+
+4. **Smooth loop-correction blend (no hard snap).** PropagateImu remembers, per
+   keyframe seq, the PRE-correction body->world pose it published there
+   (``kf_pose_pre`` ring). When a ``LoopCorrection`` arrives (handed in over a
+   thread-safe inbox by ``vio.main``, LIVE-only), it picks the MOST RECENT
+   corrected keyframe it still has a pre-correction pose for, computes the
+   world-frame SE(3) delta ``T_delta = T_corrected @ inv(T_pre)``
+   (:func:`vio.mathlib.imu.imu.loop_correction_delta`), and queues it as a PENDING
+   correction. On each subsequent frame a BOUNDED FRACTION of the REMAINING delta
+   is applied to the live pose (geodesic SE(3) interpolation,
+   :func:`vio.mathlib.imu.imu.scale_se3_delta` + :func:`apply_se3_left`), so the
+   live trajectory is pulled smoothly back onto the loop-corrected one over a few
+   frames -- NOT a one-shot teleport (we just removed a hard jump; do not
+   reintroduce one). Between corrections the live pose dead-reckons as before.
+
+This path is GATED on ``loop_correct`` (set only by the live ``--tight`` builder):
+when off, no inbox is allocated, no pre-correction ring is kept, and the loop
+blend never runs -- so the feedback is purely additive over the existing tight
+behaviour.
+
 LOOSE path: ``retain_imu`` is False, so this step is a pass-through no-op (it never
 allocates a nav-state and never touches ``step.pose``). The byte-parity oracle is
-therefore untouched -- ``pose.odom`` stays the vision-only odometry pose.
+therefore untouched -- ``pose.odom`` stays the vision-only odometry pose. The loop
+correction is ``--tight``-only and LIVE-only, so the offline / oracle path is
+byte-identical with or without it.
 
 Placement: this step runs AFTER ``CorrectTilt`` (so ``step.pose`` is the final
 vision pose used for the correction) and BEFORE ``PublishPose`` (so the published
@@ -66,13 +94,19 @@ not duplicate the cadence (single source of truth).
 """
 from __future__ import annotations
 
+import logging
+
 import numpy as np
 
 from vio.comms import Step as StepBase
 from vio.mathlib.backend.vio_window import T_cw_to_body_world, body_world_to_T_cw
 from vio.mathlib.imu.imu import (
-    complementary_correct, imu_at_rest, predict_state)
+    apply_se3_left, complementary_correct, imu_at_rest, loop_correction_delta,
+    predict_state, scale_se3_delta, se3_from_Rp as _se3, se3_inv as _se3_inv,
+    so3_log)
 from .step import Step
+
+LOG = logging.getLogger("vio.propagate_imu")
 
 # --- velocity-gated ZUPT tuning -------------------------------------------- #
 # At-rest velocity gate: ZUPT only fires when the live speed estimate is below
@@ -114,6 +148,28 @@ _K_ROT = 0.25
 # pose pure-dead-reckons from the IMU (the covered-camera-keeps-moving win).
 _MIN_VIS_INLIERS = 8
 
+# --- closed-loop SLAM correction blend (LIVE + --tight only) --------------- #
+# A loop closure rewrites the keyframe poses; the world-frame SE(3) delta between
+# the revisited keyframe's pre-correction live pose and its corrected pose is the
+# accumulated drift to remove from the LIVE pose. It is applied SMOOTHLY -- a
+# bounded FRACTION of the REMAINING delta per frame -- so a revisit pulls the live
+# trajectory back onto the loop-corrected one over a few frames, never a one-shot
+# teleport (the hard jump we deliberately avoid). 0.20/frame => the delta decays
+# with a ~3-frame half-life: visibly smooth at ~40 Hz (~75 ms), yet the drift is
+# essentially fully removed within ~0.4 s of the revisit.
+_LOOP_BLEND_GAIN = 0.20
+# Stop blending once the REMAINING correction is below this (m for translation,
+# rad for rotation) -- the geometric decay never reaches exactly zero, so a small
+# floor retires the pending correction cleanly instead of applying ever-tinier
+# deltas forever. 1 mm / ~0.06 deg is well below any visible / meaningful drift.
+_LOOP_DONE_TRANS_M = 1e-3
+_LOOP_DONE_ROT_RAD = 1e-3
+# Keep at most this many recent keyframe pre-correction poses (seq -> (R, p)) so
+# the SE(3) delta can be computed when a (possibly delayed) loop correction
+# arrives. Bounds memory on a long live session; comfortably covers the SLAM
+# solve + IPC latency between a keyframe's emission and its loop correction.
+_LOOP_KF_POSE_KEEP = 256
+
 
 class PropagateImu(StepBase):
     name = "propagate_imu"
@@ -152,11 +208,27 @@ class PropagateImu(StepBase):
         vis_ok = bool(info.get("ok", True)) and \
             int(info.get("n_inliers", _MIN_VIS_INLIERS)) >= _MIN_VIS_INLIERS
 
+        if nav is not None and ctx.state.get("loop_correct") \
+                and nav.get("loop_applied") is not None:
+            # Closed-loop frame consistency: the per-frame vision pose lives in the
+            # ORIGINAL (pre-loop, drifted) world frame, but the live nav-state has
+            # been shifted by the accumulated loop correction (``loop_applied``).
+            # If we corrected the nav toward the RAW vision pose, the every-frame
+            # complementary pull would drag the loop correction straight back out
+            # (vision fires every frame; the loop closes rarely). So transform the
+            # vision fix by the SAME loop correction before using it: vision then
+            # anchors the live pose to the LOOP-CORRECTED trajectory, not the
+            # drifted one. This is the standard "apply the loop transform to BOTH
+            # the pose and the incoming measurements" re-framing.
+            R_vis, p_vis = apply_se3_left(
+                nav["loop_applied"][:3, :3], nav["loop_applied"][:3, 3],
+                R_vis, p_vis)
+
         if nav is None:
             # First frame on the tight path: anchor the live state to the vision
             # pose with zero velocity and zero bias. From here on it dead-reckons
             # continuously and is pulled toward vision by a smooth correction.
-            ctx.state["live_nav"] = {
+            nav = {
                 "R": R_vis, "p": p_vis, "v": np.zeros(3),
                 "bg": np.zeros(3), "ba": np.zeros(3),
                 # anchor_dt accumulates wall time since the last vision
@@ -169,7 +241,23 @@ class PropagateImu(StepBase):
                 # accel_cam) of the previously integrated block, prepended to the
                 # next block so the inter-block segment is never dropped.
                 "prev_tail": None,
+                # --- closed-loop SLAM correction (LIVE + --tight only) ---------
+                # kf_pose_pre: recent keyframe seq -> PRE-correction (R, p) live
+                # pose (the STABLE anchor the loop SE(3) delta is measured against;
+                # never re-anchored, so it always reflects the true drift).
+                # loop_delta: the REMAINING world-frame correction (R_d, p_d) still
+                # to bleed into the live pose, None when none is pending.
+                # loop_applied: the 4x4 world-frame correction ALREADY blended into
+                # the live pose so far (None = identity); a newer full-graph
+                # correction subtracts this to get its remainder.
+                "kf_pose_pre": {},
+                "loop_delta": None,
+                "loop_applied": None,
             }
+            ctx.state["live_nav"] = nav
+            # Seed the pre-correction pose for THIS keyframe too (so an early loop
+            # closure that revisits frame 0 still has an anchor).
+            self._record_kf_pose(ctx, nav, step.frame.seq)
             return step
 
         # --- pull this frame's retained raw IMU block (camera optical frame) ----
@@ -206,7 +294,7 @@ class PropagateImu(StepBase):
             # valid (so the drift is pulled back), then hold/publish the nav pose.
             if vis_ok:
                 self._vision_correct(nav, R_vis, p_vis)
-            step.pose = np.linalg.inv(body_world_to_T_cw(nav["R"], nav["p"]))
+            step.pose = self._finalize(ctx, nav, step.frame.seq, is_kf)
             return step
 
         # --- (2) velocity-gated ZUPT: only freeze when GENUINELY at rest --------
@@ -250,8 +338,10 @@ class PropagateImu(StepBase):
         if vis_ok:
             self._vision_correct(nav, R_vis, p_vis)
 
-        # Replace the published live pose with the IMU-propagated one (camera->world).
-        step.pose = np.linalg.inv(body_world_to_T_cw(nav["R"], nav["p"]))
+        # Replace the published live pose with the IMU-propagated one (camera->world),
+        # AFTER the smooth closed-loop SLAM correction is bled in (no-op when no
+        # loop correction is pending or the feedback is disabled).
+        step.pose = self._finalize(ctx, nav, step.frame.seq, is_kf)
         return step
 
     @staticmethod
@@ -269,3 +359,147 @@ class PropagateImu(StepBase):
             float(nav.get("anchor_dt", 0.0)), _K_POS, _K_VEL, _K_ROT)
         nav["R"], nav["p"], nav["v"] = R_new, p_new, v_new
         nav["anchor_dt"] = 0.0
+
+    # ------------------------------------------------------------------ #
+    # Closed-loop SLAM correction (LIVE + --tight only)
+    # ------------------------------------------------------------------ #
+    def _finalize(self, ctx, nav: dict, seq: int, is_kf: bool) -> np.ndarray:
+        """Apply the smooth loop-correction blend, record the keyframe anchor, and
+        return the published camera->world pose for this frame.
+
+        Called from every nav-advancing exit path so the closed-loop correction +
+        keyframe-pose recording happen exactly once per frame, AFTER the vision
+        correction and IMU propagation have settled the nav-state. When the
+        closed-loop feedback is disabled (``loop_correct`` unset, e.g. no slam
+        endpoint wired) this is a thin wrapper that only re-serialises the pose --
+        the existing tight behaviour is unchanged.
+        """
+        if ctx.state.get("loop_correct"):
+            # 1. Drain any loop correction(s) that arrived since the last frame and
+            #    queue the world-frame SE(3) delta to bleed in.
+            self._drain_loop_inbox(ctx, nav)
+            # 2. Bleed a bounded fraction of the pending delta into the live pose.
+            self._apply_loop_blend(nav)
+            # 3. Remember this keyframe's PRE-(next-)correction pose as the anchor
+            #    a future loop closure measures its SE(3) delta against.
+            if is_kf:
+                self._record_kf_pose(ctx, nav, seq)
+        return np.linalg.inv(body_world_to_T_cw(nav["R"], nav["p"]))
+
+    @staticmethod
+    def _record_kf_pose(ctx, nav: dict, seq: int) -> None:
+        """Stash the current live body->world pose under keyframe ``seq``.
+
+        This is the PRE-correction anchor: when a loop closure later rewrites
+        keyframe ``seq``'s pose, the world-frame delta is measured between this
+        stored pose and the corrected one. Bounded to the most recent
+        ``_LOOP_KF_POSE_KEEP`` keyframes so a long live session stays bounded.
+        """
+        if not ctx.state.get("loop_correct"):
+            return
+        store = nav["kf_pose_pre"]
+        store[int(seq)] = (nav["R"].copy(), nav["p"].copy())
+        if len(store) > _LOOP_KF_POSE_KEEP:
+            # Evict the oldest keyframe anchors (smallest seqs) -- those are well
+            # past any plausible loop-correction latency.
+            for old in sorted(store)[:len(store) - _LOOP_KF_POSE_KEEP]:
+                del store[old]
+
+    @staticmethod
+    def _drain_loop_inbox(ctx, nav: dict) -> None:
+        """Consume queued ``LoopCorrection``s; set the REMAINING world-frame delta.
+
+        ``vio.main`` (LIVE + --tight) hands each ``LoopCorrection`` from the slam
+        endpoint into the thread-safe ``loop_inbox`` holder. We process them on the
+        ODOMETRY thread here (so the nav-state is only ever touched by one thread).
+
+        Each SLAM correction is a FULL pose-graph re-optimisation (``kf_poses`` =
+        ``{seq: T_world_cam}`` for the WHOLE graph), so a newer correction
+        SUPERSEDES an older one rather than stacking on it. The total world-frame
+        correction the live pose should have, measured at the most-recent corrected
+        keyframe we hold a STABLE pre-correction anchor for, is::
+
+            D_target = T_corrected[seq] @ inv(T_pre[seq])
+
+        ``T_pre[seq]`` is the live pose AS IT WAS when that keyframe passed (the
+        accumulated drift) -- recorded once in ``kf_pose_pre`` and NEVER re-anchored,
+        so ``D_target`` is always the true total drift to remove. Part of a PRIOR
+        correction may already be blended into the live pose (tracked in
+        ``loop_applied``); the still-to-apply remainder is therefore::
+
+            loop_delta = D_target @ inv(loop_applied)
+
+        (the freshest target, minus what is already in the live pose). The blend
+        then bleeds this remainder in smoothly (``_apply_loop_blend``).
+        """
+        inbox = ctx.state.get("loop_inbox")
+        if inbox is None:
+            return
+        corrections = inbox.drain()
+        if not corrections:
+            return
+        store = nav["kf_pose_pre"]
+        # Only the FRESHEST correction matters (full graph rewrite supersedes), but
+        # walk all drained so the newest with a usable anchor wins.
+        for corr in reversed(corrections):
+            kf_poses = getattr(corr, "kf_poses", None)
+            if not kf_poses:
+                continue
+            cand = [s for s in kf_poses if int(s) in store]
+            if not cand:
+                continue
+            seq = max(int(s) for s in cand)
+            T_corr = np.asarray(kf_poses[seq], np.float64)
+            R_corr, p_corr = T_cw_to_body_world(np.linalg.inv(T_corr))
+            R_pre, p_pre = store[seq]
+            # Total target world-frame correction (full drift to remove).
+            R_t, p_t = loop_correction_delta(R_pre, p_pre, R_corr, p_corr)
+            T_target = _se3(R_t, p_t)
+            # Subtract what is already blended into the live pose -> remainder.
+            T_applied = nav.get("loop_applied")
+            T_rem = T_target if T_applied is None \
+                else T_target @ _se3_inv(T_applied)
+            nav["loop_delta"] = (T_rem[:3, :3].copy(), T_rem[:3, 3].copy())
+            # A loop closure is a RARE event; log the drift it removes so the
+            # closed-loop feedback is observable in a live run (and provable).
+            LOG.info("vio: closed-loop SLAM correction at kf seq=%d (n_loops=%d) "
+                     "-- pulling %.1f cm / %.2f deg of accumulated drift back into "
+                     "the live pose (smoothly)", seq,
+                     int(getattr(corr, "n_loops", 0)),
+                     float(np.linalg.norm(T_rem[:3, 3])) * 100.0,
+                     float(np.degrees(np.linalg.norm(so3_log(T_rem[:3, :3])))))
+            return            # freshest usable correction wins; ignore older ones
+
+    @staticmethod
+    def _apply_loop_blend(nav: dict) -> None:
+        """Bleed a bounded fraction of the pending loop correction into the live
+        pose (SMOOTH -- no hard snap), retiring it once negligible.
+
+        Applies ``_LOOP_BLEND_GAIN`` of the REMAINING world-frame SE(3) delta this
+        frame via geodesic interpolation, left-multiplies the partial step onto the
+        live ``(R, p)``, reduces the remaining delta by the same step, and ACCRUES
+        the step into ``loop_applied`` (the total correction now in the live pose,
+        used by the next full-graph correction to compute its remainder). Velocity
+        is left untouched (the correction is a position/attitude re-anchor, not a
+        motion). When the remaining delta falls below the done floor it is cleared.
+        """
+        pend = nav.get("loop_delta")
+        if pend is None:
+            return
+        R_rem, p_rem = pend
+        # Retire a negligible remainder so we don't apply ever-tinier deltas.
+        if (float(np.linalg.norm(p_rem)) < _LOOP_DONE_TRANS_M
+                and float(np.linalg.norm(so3_log(R_rem))) < _LOOP_DONE_ROT_RAD):
+            nav["loop_delta"] = None
+            return
+        # Partial (bounded) world-frame step to apply this frame.
+        R_step, p_step = scale_se3_delta(R_rem, p_rem, _LOOP_BLEND_GAIN)
+        nav["R"], nav["p"] = apply_se3_left(R_step, p_step, nav["R"], nav["p"])
+        # Remaining = full_delta composed with the inverse of the step (so the
+        # product of all per-frame steps converges to the full delta).
+        T_step = _se3(R_step, p_step)
+        T_rem_new = _se3(R_rem, p_rem) @ _se3_inv(T_step)
+        nav["loop_delta"] = (T_rem_new[:3, :3].copy(), T_rem_new[:3, 3].copy())
+        # Accrue the step into the total correction already in the live pose.
+        T_applied = nav.get("loop_applied")
+        nav["loop_applied"] = T_step if T_applied is None else T_step @ T_applied

@@ -19,9 +19,13 @@ got from capture AFTER allocating its kf_* rings, so receiving it here proves
 need to attach to already exist. (We deliberately don't subscribe to capture at
 all -- SLAM is a pure consumer of VIO's output.)
 
-The correction stream is ONE-WAY: SLAM publishes ``loop.correction`` for the UI
-but never closes the loop back into VIO. Behaviour is UNCHANGED from the pre-split
-``ours.proc.slam`` (which proved this on the gold loop sessions).
+SLAM still only PUBLISHES ``loop.correction`` here (it has no reverse channel and
+does not subscribe to VIO's pose). The CLOSED-LOOP feedback is wired on the OTHER
+side: when VIO runs with ``--tight`` it opens its own read-only client on THIS
+endpoint and subscribes to ``loop.correction``, feeding the pose-graph correction
+back into its live pose so accumulated drift is bounded on revisits (see
+``vio.main`` / ``vio/modules/propagate_imu.py``). SLAM itself is unchanged from the
+pre-split ``ours.proc.slam`` -- it just exposes the correction; VIO consumes it.
 
 Run::
 

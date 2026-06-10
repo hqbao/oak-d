@@ -305,6 +305,11 @@ def main() -> int:
         vio_args += ["--worker"]
     if args.tight:
         vio_args += ["--tight"]
+        # CLOSED-LOOP feedback (slam -> vio): give VIO the slam endpoint so its
+        # --tight live pose subscribes loop.correction and the SLAM pose-graph
+        # correction is fed back into the live pose (drift bounded on revisits).
+        # Only on the --tight path; the loose pipeline never wires it.
+        vio_args += ["--slam-endpoint", slam_ep]
 
     # NB: the new `slam.main` is a PURE consumer of VIO's output and -- unlike the
     # pre-split `ours.proc.slam` -- intentionally DROPPED `--capture-endpoint`

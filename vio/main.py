@@ -63,9 +63,15 @@ LOG = logging.getLogger("vio.main")
 
 DEFAULT_CAPTURE_ENDPOINT = "oak.capture"
 DEFAULT_VIO_ENDPOINT = "oak.vio"
+DEFAULT_SLAM_ENDPOINT = "oak.slam"
 
 #: Topics VIO subscribes to from capture.
 _INPUT_TOPICS = [topics.IMUCAM_SAMPLE, topics.FRAME_DEPTH]
+
+#: Topic VIO subscribes to from SLAM for the CLOSED-LOOP feedback (LIVE + --tight
+#: only): the pose-graph loop correction, fed back into the live nav-state so
+#: accumulated drift is BOUNDED on revisits (Basalt's realtime VIO has none).
+_SLAM_FEEDBACK_TOPICS = [topics.LOOP_CORRECTION]
 
 #: Topics VIO republishes (downstream is SLAM + UI). POSE_VO is the pure-vision
 #: frame-to-frame trajectory (live "VO" line) -- pure POD pose, no ring, like
@@ -108,6 +114,7 @@ def _await_calib_bundle(endpoint: str, timeout_s: float) -> WireCalibBundle:
 def run_vio(*,
             capture_endpoint: str = DEFAULT_CAPTURE_ENDPOINT,
             endpoint: str = DEFAULT_VIO_ENDPOINT,
+            slam_endpoint: str | None = None,
             kf_every: int = 5,
             use_gyro: bool = True,
             worker: bool = False,
@@ -123,7 +130,20 @@ def run_vio(*,
     -- the front-end stops retaining raw IMU and the back-end builds the loose
     engine. When True the odometry module retains the per-frame raw IMU so each
     keyframe carries the inter-keyframe IMU block the tight backend preintegrates.
+
+    ``slam_endpoint`` enables the CLOSED-LOOP feedback (``slam -> vio``): when set
+    AND ``tight`` is True, VIO opens a read-only client on the SLAM endpoint,
+    subscribes to ``loop.correction``, and feeds each pose-graph correction back
+    into the live nav-state (``PropagateImu``) so accumulated drift is BOUNDED on
+    revisits -- better than Basalt's realtime VIO (which has no loop closure and
+    drifts unboundedly). This is LIVE + ``--tight`` ONLY: the offline / oracle /
+    loose path never sets it, so those paths are byte-identical. Drift bounding is
+    SMOOTH (the correction is bled over a few frames, never a hard snap).
     """
+    # Closed-loop feedback is --tight + LIVE only: a slam endpoint must be wired
+    # AND the tight nav-state must exist (retain_imu, set by tight). The loose /
+    # oracle path never reaches here with both, so it stays byte-identical.
+    loop_correct = bool(tight and slam_endpoint)
     # 1. Block until capture publishes its calibration bundle.
     LOG.info("vio: waiting for calib.bundle on %s ...", capture_endpoint)
     bundle = _await_calib_bundle(capture_endpoint, calib_timeout_s)
@@ -171,10 +191,14 @@ def run_vio(*,
                           kf_every=kf_every, use_gyro=use_gyro,
                           latest_only=False, level_tilt=True,
                           publish_vo=True,   # live viewer's pure-vision "VO" line
-                          retain_imu=tight)  # tight backend needs inter-KF IMU
+                          retain_imu=tight,  # tight backend needs inter-KF IMU
+                          loop_correct=loop_correct)  # closed-loop SLAM feedback
     if tight:
         LOG.info("vio: TIGHT-coupled VIO backend selected (--tight) "
                  "[imu_info_weight=True]")
+    if loop_correct:
+        LOG.info("vio: CLOSED-LOOP SLAM correction ENABLED (slam=%s -> live "
+                 "pose.odom) -- drift bounded on revisits", slam_endpoint)
     backend = BackendModule(local, bundle.K,
                             window=backend_window, iters=backend_iters,
                             latest_only=False, worker=worker, tight=tight)
@@ -213,6 +237,29 @@ def run_vio(*,
     in_client = IPCPubSub(capture_endpoint, role="client")
     in_bridge = IPCSubscriber(local, in_client, cap_rings, _INPUT_TOPICS)
 
+    # 6b. CLOSED-LOOP feedback bridge (LIVE + --tight only): subscribe SLAM's
+    #     loop.correction on the slam endpoint and re-hydrate it onto THIS local
+    #     bus, where OdometryModule's loop-correction inbox picks it up. The
+    #     correction carries only POD poses (no shared-memory rings), so it needs
+    #     none of VIO's rings. SLAM boots AFTER VIO, so its endpoint may not exist
+    #     yet -- the client retries on a generous timeout, and a failed connect is
+    #     non-fatal (VIO still runs; closed-loop just stays off). The offline /
+    #     loose path never sets loop_correct, so this whole block is skipped there.
+    loop_bridge = None
+    loop_client = None
+    if loop_correct:
+        try:
+            loop_client = IPCPubSub(slam_endpoint, role="client",
+                                    connect_timeout_s=calib_timeout_s)
+            loop_bridge = IPCSubscriber(local, loop_client, vio_rings,
+                                        _SLAM_FEEDBACK_TOPICS)
+        except (TimeoutError, ConnectionError) as e:
+            LOG.warning("vio: closed-loop feedback DISABLED -- could not connect "
+                        "to slam endpoint %s (%s); live VIO runs uncorrected",
+                        slam_endpoint, e)
+            loop_bridge = None
+            loop_client = None
+
     # 7. END-detection sink: when capture finishes the replay session it
     #    publishes WireEnd on its data topics; the bridge translates it to the
     #    local-bus END. We want to know when both data topics have ENDed so we
@@ -237,6 +284,10 @@ def run_vio(*,
     odom.start()
     backend.start()
     in_bridge.start()
+    # Closed-loop feedback bridge last (its connect retries until SLAM is up; a
+    # failed connect logs + exits its thread without affecting the rest of VIO).
+    if loop_bridge is not None:
+        loop_bridge.start()
 
     stop = [False]
     def _on_sigterm(_signo, _frame):
@@ -267,6 +318,11 @@ def run_vio(*,
         # top of its next loop iteration. Natural END (finished.is_set()) keeps
         # the generous 120 s ceiling so a busy backend can finish.
         in_bridge.stop()
+        # Stop the closed-loop feedback bridge too (no more corrections needed
+        # once we're tearing down). Idempotent + safe if its connect never
+        # succeeded (the thread already exited).
+        if loop_bridge is not None:
+            loop_bridge.stop()
         drain_timeout = 2.0 if stop[0] else 120.0
         odom.done.wait(timeout=drain_timeout)
         odom.stop()
@@ -296,6 +352,10 @@ def main() -> int:
                     help=f"capture IPC endpoint (default: {DEFAULT_CAPTURE_ENDPOINT!r})")
     ap.add_argument("--endpoint", default=DEFAULT_VIO_ENDPOINT,
                     help=f"this process's IPC endpoint (default: {DEFAULT_VIO_ENDPOINT!r})")
+    ap.add_argument("--slam-endpoint", default=None,
+                    help="SLAM IPC endpoint to subscribe loop.correction from for "
+                         "the CLOSED-LOOP feedback (slam->vio). Only takes effect "
+                         "with --tight; off when unset (open-loop, like before).")
     ap.add_argument("--kf-every", type=int, default=5)
     ap.add_argument("--no-gyro", action="store_true")
     ap.add_argument("--worker", action="store_true",
@@ -314,6 +374,7 @@ def main() -> int:
     return run_vio(
         capture_endpoint=args.capture_endpoint,
         endpoint=args.endpoint,
+        slam_endpoint=args.slam_endpoint,
         kf_every=args.kf_every,
         use_gyro=not args.no_gyro,
         worker=args.worker,
