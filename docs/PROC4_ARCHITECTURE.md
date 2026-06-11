@@ -251,7 +251,7 @@ cross-process codec.
 `pose.vo` (`topics.POSE_VO`) is the PURE-VISION frame-to-frame trajectory — raw PnP
 R/t only, **no gyro fusion, no tilt leveling, no BA**. It is accumulated by
 `RGBDVisualOdometry.pose_vo` (a separate accumulator from the gyro-fused `pose`,
-`vio/mathlib/odometry/odometry.py`) and emitted by the `publish_vo` step
+`sky/front/odometry.py`) and emitted by the `publish_vo` step
 (`vio/modules/publish_vo.py`), wired into the frame chain **only** when
 `OdometryModule` is built with `publish_vo=True` (`vio/main.py` sets it). It is
 **LIVE-only**: the offline / deterministic oracle leaves `publish_vo=False`, so it
@@ -370,12 +370,12 @@ UI lines:
 
 - **VIO runs windowed Bundle Adjustment (BA).** `BackendModule` (`run_ba` step)
   solves a sliding window jointly over **keyframe poses AND landmarks** (3D points),
-  minimising reprojection error — analytic Schur in `vio/mathlib/backend/`. Output:
+  minimising reprojection error — analytic Schur in `sky.backend`. Output:
   `pose.refined`, the blue **VIO-BA** line. BA refines the *local* geometry of the
   recent window.
 - **SLAM runs Pose-Graph Optimization (PGO).** `SlamModule` (`slam_step`) runs ORB
   loop detection, then on a confirmed loop optimises a graph of **poses only — no
-  landmarks** (`slam/mathlib/loop/`). The graph has odometry edges (relative motion
+  landmarks** (`sky.slam`). The graph has odometry edges (relative motion
   between consecutive keyframes) + loop-closure edges (the relative motion implied by
   a revisited place); PGO **distributes the accumulated drift over the whole
   trajectory** so the loop closes consistently. Output: `loop.correction` (the
@@ -692,7 +692,7 @@ the calib bundle, §9 invariant 11) and writes it to a per-device store; `imu_ca
 `<id>` … next capture start" to make the deferred effect explicit. Three calibrations
 follow this one pattern:
 
-- **gyro bias / accel calib** → `imu_camera/mathlib/imu/calib_store.py`
+- **gyro bias / accel calib** → `sky/sensors/calib_store.py`
   (`load_gyro_bias` / `load_accel_calib`), read in `read_live_calibration`.
 - **stereo CAMERA calib** → `imu_camera/mathlib/device/camera_calib_store.py`
   (`save_camera_calib` / `load_camera_calib`, store `.cache/camera_calib.json`). On the
@@ -887,7 +887,7 @@ proven (see [`verification/README.md`](../verification/README.md)):
     kf_min_rot_deg=5.0)` (`slam/main.py`) so a keyframe joins the pose graph only after
     ≥10 cm of translation OR ≥5° of rotation since the last inserted keyframe. The
     `SlamConfig` defaults are `kf_min_trans_m=0.0` / `kf_min_rot_deg=0.0`
-    (`slam/mathlib/loop/slam.py`), so the offline path keeps the gate OFF and its
+    (`sky/slam/slam.py`), so the offline path keeps the gate OFF and its
     deterministic scoring is unchanged.
 17. **The closed-loop SLAM correction (`slam --loop.correction--> vio`) is LIVE +
     `--tight` ONLY; the offline / oracle / loose path is byte-identical.** The

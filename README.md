@@ -325,6 +325,24 @@ to the C `libsky*` layering. Sub-packages so far:
   be vendored byte-identically in both `imu_camera/mathlib/stereo` and
   `depth/mathlib/stereo` under a `diff -r` lock-step gate; consolidating to a
   single import here retired that gate.
+- **`sky.front`** (`pnp`, `klt`, `klt_numba`, `corners`, `frontend`, `odometry`)
+  — the VIO front-end: library-free RGB-D PnP RANSAC, the Numba-JIT KLT tracker +
+  Shi-Tomasi corners, the frame-to-frame frontend, and the loose `RGBDVisualOdometry`.
+- **`sky.backend`** (`bundle`, `windowed`, `marginalize`) — the optimizer core:
+  the factor-agnostic Gauss-Newton/Schur `bundle`, the windowed-BA map, and the
+  (opt-in) sqrt marginalization helper.
+- **`sky.imu`** (`imu`, `inertial_filter`, `timed_buffer`) — the **loose** IMU
+  path: Forster on-manifold preintegration, the complementary inertial filter, and
+  the time-aligned sample buffer. (`vio`'s tight-VIO superset stays in
+  `vio/mathlib/imu/imu.py` for Phase 4.)
+- **`sky.sensors`** (`imu_calib`, `accel_calib`, `calib_collect`, `calib_store`)
+  — the IMU gyro/accel calibration math + the on-device collection / persistence.
+- **`sky.slam`** (`orb`, `loopclosure`, `posegraph`, `slam`) — the loop-closure
+  stack: ORB (oriented-FAST + rotated-BRIEF, no cv2), appearance+geometric loop
+  verification, the SE(3) pose graph, and the `SlamMap` orchestrator.
+- **`sky.calib`** (`detect`, `collector`, `solve`, `writer`, `checkerboard`) — the
+  stereo camera-calibration wizard math: checkerboard detection / generation, view
+  collection, the K + distortion + `T_left_right` solve, and the `calib.json` writer.
 
 **Movability rule (enforced).** `sky.*` may import only `numpy` (+ `cv2` / `numba`
 where the moved algorithm already used them) and must NEVER import any oak-d
@@ -332,8 +350,13 @@ process / `comms` / `io` module. `sky.assert_import_clean()` checks this after a
 bare `import sky.*` (run by the consolidation self-tests), keeping the library a
 leaf so it stays portable as-is.
 
-The algorithms not yet consolidated (KLT, PnP, windowed BA, IMU preintegration,
-the SE(3) pose graph) stay where they live in each project's `mathlib/` for now.
+What REMAINS in each project's `mathlib/` is the process-coupled glue, not the
+shared algorithms: `imu_camera` keeps `device/*` (live OAK-D handles) + the IMU
+`decode.py` + `resolution_build` / `warmup`; `vio` keeps its tight-VIO Phase-4
+code (`backend/vio_window.py`, the `imu/imu.py` superset) + `engine/` +
+`resolution_build` / `warmup`; `slam` keeps `engine/` + `resolution_build`; `ui`
+keeps a thin `calib/checkerboard.py` wrapper (re-exports `sky.calib.checkerboard`
+plus the Qt / PNG-save side); `depth`'s `mathlib/` is now empty.
 
 | New name | Was | Role |
 |---|---|---|

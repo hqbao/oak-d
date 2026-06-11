@@ -30,7 +30,7 @@ matching the oracle loop count.
 | Package | Role | Source it was ported from |
 |---------|------|---------------------------|
 | `slam/comms/` | the **FROZEN** vendored comms contract | copied **bit-identically** from `imu_camera/comms` |
-| `slam/mathlib/` | the math SLAM owns (loop + engine) + its FORCED deps | `ours/lib/{loop,engine}` (+ forced `odometry/pnp`, `imu/imu`, `backend/bundle`) |
+| `slam/mathlib/` | the engine SLAM owns (`engine/` + `resolution_build`); the loop-closure math now comes from `sky.slam` | `ours/lib/engine` (loop algorithms consolidated into `sky.slam`) |
 | `slam/modules/` | the loop-closure reactive module | `ours/flows/slam` |
 | `slam/main.py` | the SLAM process | `ours/proc/slam.py` |
 | `slam/tests/` | regression self-tests | `ours/tools/posegraph_selftest.py` |
@@ -54,47 +54,50 @@ rotation-gate verdict, published for EVERY verified candidate (confirmed OR reje
 It carries NO keyframe images (SLAM keeps only descriptors); the UI joins it by seq to
 the `keyframe` grays it buffers.
 
-### `slam/mathlib/` — the math SLAM owns + the FORCED-vendor deps
+### `slam/mathlib/` — the engine SLAM owns; the loop math lives in `sky.slam`
 
-The math SLAM genuinely owns is the verbatim port of `ours/lib/loop` + a private
-copy of `ours/lib/engine`:
+The loop-closure algorithms have been **consolidated into the shared `sky/`
+library**: SLAM no longer carries a private `loop/` package nor any forced-vendor
+copies — it **imports** them from `sky.*`:
 
-- `slam/mathlib/loop/` — `orb` (from-scratch oriented-FAST + rotated-BRIEF +
-  Hamming matcher + fundamental-matrix RANSAC, **no cv2**), `loopclosure`
-  (appearance gate + geometric verification → metric `T_cur_old`), `posegraph`
-  (SE(3) Gauss-Newton/LM PGO with a Huber kernel on loop edges), and `slam`
-  (`SlamMap` / `SlamConfig` — the persistent-keyframe orchestrator).
+- `sky.slam.orb` — from-scratch oriented-FAST + rotated-BRIEF + Hamming matcher +
+  fundamental-matrix RANSAC (**no cv2**).
+- `sky.slam.loopclosure` — appearance gate + geometric verification → metric
+  `T_cur_old` (its `LoopConfig` is what `slam/mathlib/resolution_build.py` tunes).
+- `sky.slam.posegraph` — SE(3) Gauss-Newton/LM PGO with a Huber kernel on loop
+  edges.
+- `sky.slam.slam` — `SlamMap` / `SlamConfig`, the persistent-keyframe
+  orchestrator (`slam/main.py` and `slam/modules/pipeline.py` import these).
+
+The transitive math those use is also shared, not vendored: the loop verifier's
+PnP is `sky.front.pnp` (`solve_pnp_ransac`), and the SE(3)/SO(3) Lie helpers that
+drive the PGO are `sky.math` (`se3_exp`, `skew`, `so3_exp`) — the old
+forced-vendor copies (`slam/mathlib/odometry/pnp.py`, `slam/mathlib/imu/imu.py`,
+`slam/mathlib/backend/bundle.py`) and the `slam/mathlib/loop/` package are
+**gone**. `sky.*` is a `numpy`-only leaf library (no process / `comms` / `io`
+imports), so importing it keeps SLAM portable.
+
+What SLAM's `mathlib/` still owns:
+
 - `slam/mathlib/engine/` — SLAM's **own** copy of the swappable in-process /
-  subprocess runners (byte-copied; `worker=False` is byte-identical offline,
-  `worker=True` runs the solve in a child process so it never holds the read
-  loop's GIL).
+  subprocess runners (`worker=False` is byte-identical offline, `worker=True`
+  runs the solve in a child process so it never holds the read loop's GIL). The
+  worker lazy-imports the heavy map from `sky.slam.slam`.
 
-**FORCED-vendor dependencies** (resolved from the loop-closure import graph;
-vendored at the **minimal** surface, mirroring how `vio` had to vendor `imu`):
-
-| Vendored | Why it is forced | Importer |
-|----------|------------------|----------|
-| `slam/mathlib/odometry/pnp.py` | `solve_pnp_ransac` is the metric verifier of every loop | `loop/loopclosure.py` → `..odometry.pnp` |
-| `slam/mathlib/imu/imu.py` | `so3_exp` (SO(3) helper); numpy-only, self-contained | `odometry/pnp.py` → `..imu.imu` (transitive) |
-| `slam/mathlib/backend/bundle.py` | `se3_exp` + `skew` (SE(3)/Lie helpers) drive the PGO | `loop/posegraph.py` → `..backend.bundle` |
-
-Nothing else is vendored. In particular the **windowed BA** is *not* part of
-SLAM: SLAM only ever calls `make_slam_engine` (loop closure), so the engine
-carries **only** the loop-closure path (`make_slam_engine` / `slam_step` /
-`_slam_worker_main`). The never-fired `make_ba_engine` / `_ba_worker_main` path
-that the byte-copied engine used to carry (a lazy `..backend.windowed` import that
-SLAM never resolved) has been removed — SLAM has no `backend/windowed.py`. The
-relative import layout under `mathlib` is preserved, so every
-`from ..odometry.pnp` / `..imu.imu` / `..backend.bundle` / `..loop.slam` resolves
-unchanged.
+The **windowed BA** is *not* part of SLAM: SLAM only ever calls
+`make_slam_engine` (loop closure), so the engine carries **only** the
+loop-closure path (`make_slam_engine` / `slam_step` / `_slam_worker_main`). The
+never-fired `make_ba_engine` / `_ba_worker_main` path the byte-copied engine used
+to carry (a lazy import of the windowed-BA backend that SLAM never resolved) has
+been removed — there is no BA backend under `slam/mathlib/`.
 
 **ARCHITECTURE RULE.** The math-coupled config builder lives in `slam/mathlib/`,
 **not** in the generic, bit-identical `slam/comms/`:
 
 - `slam/mathlib/resolution_build.py` — `loop_config(res)` (ported verbatim from
-  the pre-split `ResolutionProfile.loop`), which imports SLAM's own
-  `loop.loopclosure.LoopConfig`. The profile in `slam.comms.lib.config.resolution`
-  stays data-only and headless.
+  the pre-split `ResolutionProfile.loop`), which imports the shared
+  `sky.slam.loopclosure.LoopConfig`. The profile in
+  `slam.comms.lib.config.resolution` stays data-only and headless.
 
 > **No `warmup.py`.** Unlike `vio` (which warms its KLT numba kernel), SLAM has
 > **no numba JIT** to pre-compile — its ORB frontend is pure NumPy — so no warmup

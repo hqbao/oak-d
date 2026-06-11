@@ -67,12 +67,13 @@ proposition of the whole stack — each stage tightens the line.
 z-fwd) is the lingua franca of all VIO/SLAM math and the wire pose. The UI converts to
 NED for state and ENU for rendering.
 
-**An honesty note on where math lives vs. runs.** The IMU math library
-(`imu_camera/mathlib/imu/imu.py`, `inertial_filter.py`) physically lives in the
-`imu_camera` project but is **consumed downstream by `vio`**. The sensing stage's real
-output is the *calibrated per-frame IMU segment* plus a *gravity-align seed*; the
-preintegration / fusion that uses them runs in `vio`. Likewise `depth/` is a
-deployment **fork** of the SGM step (byte-identical math), not new algorithms. These
+**An honesty note on where math lives vs. runs.** The loose IMU math library
+(`sky/imu/imu.py`, `inertial_filter.py`) now lives in the shared `sky/` package,
+but is **consumed downstream by `vio`** (the sensing stage `imu_camera` only emits
+the data the math needs). The sensing stage's real output is the *calibrated
+per-frame IMU segment* plus a *gravity-align seed*; the preintegration / fusion
+that uses them runs in `vio`. Likewise `depth/` is a deployment **fork** of the
+SGM step (byte-identical math, now `sky.depth.stereo`), not new algorithms. These
 distinctions are flagged inline so you know what each process actually produces.
 
 ---
@@ -112,7 +113,7 @@ into this frame* — the segment a VIO preintegrates.
 
 **Steps.**
 1. The IMU I/O thread pushes every sample into a thread-safe, time-indexed ring
-   (`TimedImuBuffer.append`, `imu_camera/mathlib/imu/timed_buffer.py:59`). Capacity-bounded
+   (`TimedImuBuffer.append`, `sky/imu/timed_buffer.py:59`). Capacity-bounded
    deque; evictions counted.
 2. `read_cam` owns the schedule: one stereo pair per scheduler tick at `fps` Hz, paired
    by hardware `seq` (`read_cam.py:101`), tagged with the **left frame's device
@@ -133,7 +134,7 @@ into this frame* — the segment a VIO preintegrates.
 **I/O.** In: `CamSync{seq, ts_ns, gray_left, gray_right}` + IMU buffer. Out:
 `ImuCamPacket{seq, ts_ns, gray_left, gray_right, imu_ts(M,), gyro(M,3), accel(M,3)}`.
 
-**Code.** `imu_camera/modules/pack_synced.py:18`; `mathlib/imu/timed_buffer.py:86,107`;
+**Code.** `imu_camera/modules/pack_synced.py:18`; `sky/imu/timed_buffer.py:86,107`;
 `modules/read_cam.py:101,133,202`; offline `io/synced.py:93`.
 
 **How to see it.** *New view needed.* A **scrolling time-ruler**: horizontal axis =
@@ -172,7 +173,7 @@ The bias is subtracted for every drained sample by `ImuCalibration.apply`
 **I/O.** In: raw gyro stream + stillness thresholds. Out: `gyro_bias (3,)` rad/s
 (persisted per device); a `CalibVerdict{ok, message, metric}` for the SAVE gate.
 
-**Code.** `mathlib/device/live_calib.py:99,196`; `mathlib/imu/calib_collect.py:70,103`;
+**Code.** `imu_camera/mathlib/device/live_calib.py:99,196`; `sky/sensors/calib_collect.py:70,103`;
 replay `modules/pipeline.py:144`.
 
 **How to see it.** *Partially exists — extend.* `ui/viz/imucam_render.py:GyroChart`
@@ -198,17 +199,17 @@ visibly resets the bar — the operator sees *why* a noisy rest is rejected.
 - **Gravity-align seed:** `accel_align = R_imu_cam @ mean(accel over startup)` in the
   camera frame (`live_calib.py:_collect_startup` `_level`, line 123; replay
   `pipeline.py:172`). This seed flows out in the calib bundle. The rotation it produces,
-  `gravity_aligned_R0` (`mathlib/imu/imu.py:300`), builds a camera→world rotation:
+  `gravity_aligned_R0` (`sky/imu/imu.py:257`), builds a camera→world rotation:
   `down = −a/|a|` (world +y), forward = horizontalized optical +z, right = down×forward.
   Defined here, **consumed by the vio odometry** to seed initial attitude (verified <1°
   vs Basalt on near-static starts).
-- **Six-face affine model:** `a_cal = T (a_raw − b)` (`accel_calib.py:AccelCalibration`,
-  line 63). Constraining only magnitude is under-determined (it only fixes the symmetric
+- **Six-face affine model:** `a_cal = T (a_raw − b)` (`sky/sensors/accel_calib.py:AccelCalibration`,
+  line 64). Constraining only magnitude is under-determined (it only fixes the symmetric
   `TᵀT`). Using the *known direction* gives a well-posed linear system per pose:
   `T·a_k − c = g·dir_k` (with `c := T·b`) — 3 equations × N poses, 12 unknowns
   `[vec(T), c]`, one `lstsq`, then `b = T⁻¹c` (`solve_accel_calibration`, line 121;
   stacked system at lines 149–164). `residual_g = RMS(|a_cal| − g)` is the quality figure.
-- **Capture state machine:** `SixFaceCollector` (`calib_collect.py:217`) waits for a still
+- **Capture state machine:** `SixFaceCollector` (`sky/sensors/calib_collect.py:217`) waits for a still
   window, identifies the up-face by *squareness* (dominant axis ≥ 0.95 of vector length,
   judged relative to the measured vector so a mis-scaled axis is still capturable —
   `_identify_face`, line 269), requires a move between captures, solves on the 6th, and
@@ -219,8 +220,8 @@ cam-frame seed (in calib bundle); `AccelCalibration{T(3×3), bias(3,), residual_
 persisted per device; applied via `AccelCalibration.apply` → `a_cal = (a − b) @ Tᵀ`
 (line 83).
 
-**Code.** `mathlib/imu/accel_calib.py:63,121`; `mathlib/imu/calib_collect.py:217,269,244`;
-gravity-align `mathlib/imu/imu.py:300` + seed `mathlib/device/live_calib.py:123`,
+**Code.** `sky/sensors/accel_calib.py:64,121`; `sky/sensors/calib_collect.py:217,269,244`;
+gravity-align `sky/imu/imu.py:257` + seed `imu_camera/mathlib/device/live_calib.py:123`,
 `modules/pipeline.py:172`.
 
 **How to see it (the most illuminating one for this stage).** *New view needed.* The
@@ -255,7 +256,7 @@ and rotation-induced phantom.
 **I/O.** In: `dt`, `R_wc`, `accel_cam`, vision displacement. Out: world position `p`.
 **Produced here as library code; driven by the vio/odometry layer, not by acquisition.**
 
-**Code.** `mathlib/imu/inertial_filter.py:102` (`InertialFilterConfig` at line 53).
+**Code.** `sky/imu/inertial_filter.py:102` (`InertialFilterConfig` at line 53).
 
 **How to see it.** *New view needed.* Three stacked time-series — `|accel net|`,
 `|velocity|`, and vision-vs-fused displacement — on a yaw/translation-labeled timeline,
@@ -395,7 +396,7 @@ invalid).
 
 ---
 
-# STAGE 2 — VIO Frontend (`vio/mathlib/frontend/`)
+# STAGE 2 — VIO Frontend (`sky.front`)
 
 The frontend maintains a set of point *tracks* across the grayscale stream: each track is
 a real corner, followed frame-to-frame by optical flow, carrying a persistent integer id
@@ -612,7 +613,7 @@ back-projected inlier points** next to the 2D overlay, flagged when near-degener
 
 ---
 
-# STAGE 3 — VIO Motion Estimation (`vio/mathlib/odometry/`, `vio/mathlib/backend/`)
+# STAGE 3 — VIO Motion Estimation (`sky.front.odometry`, `sky.backend`)
 
 Three nested layers: **(1) RGB-D PnP** estimates frame-to-frame motion; **(2) Gyro
 fusion** corrects it with the IMU; **(3) Windowed BA** re-optimizes a sliding window of
@@ -766,7 +767,7 @@ Convention: `vision_rot_deg = degrees(‖so3_log(R_pnp)‖)`,
 `gyro_rot_deg = degrees(‖so3_log(R_gyro)‖)`,
 `disagree_deg = degrees(‖so3_log(R_pnp · R_gyroᵀ)‖)`.
 
-## 3.3 Windowed Bundle Adjustment (`vio/mathlib/backend/`)
+## 3.3 Windowed Bundle Adjustment (`sky.backend`)
 
 **Intuition.** Frame-to-frame PnP is a relay race — each handoff adds error, and it
 accumulates (drift). BA holds the last few keyframes and their shared 3D landmarks
@@ -840,7 +841,7 @@ exposure of `map.landmarks` + window poses + `ba_reproj_px`, a new IPC topic, an
 
 ---
 
-# STAGE 4 — SLAM: Loop Closure + Pose-Graph Optimization (`slam/mathlib/loop/`)
+# STAGE 4 — SLAM: Loop Closure + Pose-Graph Optimization (`sky.slam`)
 
 SLAM sits *behind* VIO. VIO/windowed-BA gives accurate **relative** motion but drifts
 **globally**; SLAM keeps every keyframe, recognizes revisited places, turns each revisit
@@ -936,7 +937,7 @@ same (two identical corridors).
    (loopclosure.py:134).
 3. **Metric PnP verification** (loopclosure.py:138-165): back-project the *old* KF's matched
    keypoints to 3D using its stored depth, then RANSAC-PnP onto the *current* KF's matched
-   pixels (`solve_pnp_ransac`, slam/mathlib/odometry/pnp.py). Reject unless
+   pixels (`solve_pnp_ransac`, sky/front/pnp.py). Reject unless
    ≥ `min_inliers=30`. **Output: `T_cur_old`** (4×4, OLD-cam → CUR-cam) + counts. A confirmed
    loop is a real geometric fact, not just appearance.
 
@@ -1079,17 +1080,17 @@ flowchart LR
    `getImuToCameraExtrinsics(left)` (`imu_camera/mathlib/device/live_calib.py:92`); replay
    reads `calib.T_imu_left` (`imu_camera/main.py:66`). Raw accel rotated into optical with
    `R_imu_cam @ a` (`live_calib.py:126`). Gyro rotation is **conjugated**:
-   `R_cam = R_imu_cam @ R_imu @ R_imu_camᵀ` (`vio/mathlib/imu/imu.py:262, :297`). *Why:* the
+   `R_cam = R_imu_cam @ R_imu @ R_imu_camᵀ` (`sky/imu/imu.py:195, :219`). *Why:* the
    IMU and camera are physically rotated; gyro/accel must speak the camera's optical axes
    before seeding PnP or leveling attitude. The cm-scale lever arm is treated as noise
    (`vio/mathlib/backend/vio_window.py:16`).
 2. **Optical world origin leveled to gravity** — `gravity_aligned_R0(accel_cam)`
-   (`vio/mathlib/imu/imu.py:300`) builds the initial `R_cam←world` so optical +y (down)
+   (`sky/imu/imu.py:257`) builds the initial `R_cam←world` so optical +y (down)
    aligns with measured gravity; yaw stays at the camera's start heading (no magnetometer).
    *Why:* makes "down" real instead of the arbitrary start tilt; ATE is Umeyama-aligned so
    it doesn't change the score, but it displays upright.
 3. **Per-frame attitude leveling** — `level_attitude()` / `correct_tilt()`
-   (`vio/mathlib/odometry/odometry.py:33`): a complementary filter nudging the implied
+   (`sky/front/odometry.py:36`): a complementary filter nudging the implied
    gravity (`R @ down_cam`) onto the measured accel target `[0,1,0]` (optical down),
    correcting only roll/pitch (axis horizontal), adaptive gain + `|a|≈1g` gate. *Why:*
    vision slowly tilt-drifts; the accelerometer is an absolute roll/pitch reference.
