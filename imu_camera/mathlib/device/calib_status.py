@@ -12,8 +12,8 @@ Device-agnostic + UI-importable (no cv2, no depthai)
 This pulls in ONLY the three persisted-calib LOADERS, each of which is itself
 cv2-free and depthai-free:
 
-* :func:`imu_camera.mathlib.imu.calib_store.load_gyro_bias`
-* :func:`imu_camera.mathlib.imu.calib_store.load_accel_calib`
+* :func:`sky.sensors.calib_store.load_gyro_bias`
+* :func:`sky.sensors.calib_store.load_accel_calib`
 * :func:`imu_camera.mathlib.device.camera_calib_store.load_camera_calib`
 
 So the multi-chip-generic UI can import :func:`calibration_status` directly, keyed by
@@ -41,8 +41,9 @@ The three items' semantics (be accurate -- the operator acts on these strings)
 """
 from __future__ import annotations
 
+from sky.sensors.calib_store import load_accel_calib, load_gyro_bias
+
 from imu_camera.mathlib.device.camera_calib_store import load_camera_calib
-from imu_camera.mathlib.imu.calib_store import load_accel_calib, load_gyro_bias
 
 # Stable item keys/names. The dialog renders rows in THIS order (gyro, accel,
 # camera), and ``missing`` preserves it, so the operator always sees the same layout.

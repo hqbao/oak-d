@@ -2,7 +2,7 @@
 
 A PURE, hardware-agnostic, unit-testable state machine that drives the on-screen
 "point at the board, hold, move, repeat" wizard. Modelled directly on
-:class:`ui.mathlib.imu.calib_collect.SixFaceCollector`: the UI feeds raw samples
+:class:`sky.sensors.calib_collect.SixFaceCollector`: the UI feeds raw samples
 (here, synced left+right grayscale frames) one at a time and polls a status
 snapshot to render the wizard; the capture *logic* lives here so it is tested
 offline, not buried in an untested Qt callback.
@@ -125,7 +125,7 @@ class AcceptedView:
 class FrameStatus:
     """Snapshot the UI polls each feed() to render the capture wizard.
 
-    Mirrors :class:`ui.mathlib.imu.calib_collect.SixFaceStatus`: a small, plain,
+    Mirrors :class:`sky.sensors.calib_collect.SixFaceStatus`: a small, plain,
     serialisable record describing what just happened and overall progress.
     """
 

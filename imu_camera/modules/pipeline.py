@@ -22,9 +22,10 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
+from sky.sensors.imu_calib import ImuCalibration
+
 from imu_camera.comms import LocalPubSub, Module, topics
 from imu_camera.io.reader import SessionReader
-from imu_camera.mathlib.imu.imu_calib import ImuCalibration
 from imu_camera.mathlib.imu.timed_buffer import TimedImuBuffer
 from sky.depth.stereo import (
     SGMConfig, SGMStereoMatcher)

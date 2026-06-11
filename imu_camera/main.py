@@ -137,7 +137,7 @@ def run_capture_replay(session: Path, endpoint: str, *,
     """Replay-driven capture: SessionReader -> bridge -> IPC."""
     from imu_camera.modules.pipeline import (
         TOF_W, TOF_H, _replay_imu_startup, build_replay_frontend)
-    from imu_camera.mathlib.imu.imu_calib import ImuCalibration
+    from sky.sensors.imu_calib import ImuCalibration
 
     reader = SessionReader(session)
     # Use the session's native resolution so the rings line up with the frames.

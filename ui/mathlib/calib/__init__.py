@@ -1,7 +1,7 @@
 """``ui.mathlib.calib`` -- camera-calibration math the Calibration menu needs.
 
-Parallel to :mod:`ui.mathlib.imu` (the IMU-calibration collectors + store): this
-subpackage owns the **camera** side of calibration -- the printable/displayable
+Parallel to :mod:`sky.sensors` (the shared IMU-calibration collectors + store):
+this subpackage owns the **camera** side of calibration -- the printable/displayable
 target, the corner detector, the diversity-gated collector, the stereo solve, and
 the calib.json writer. The wizard that drives them is a four-phase operator flow;
 this package holds Phases 1 + 3 (the device-free math), with the data path and UI

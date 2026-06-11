@@ -1,9 +1,9 @@
 """Qt calibration wizards: gyroscope bias and six-position accelerometer.
 
 Both dialogs drive the *tested* state machines from
-:mod:`ui.mathlib.imu.calib_collect` (the stillness gate + six-face collector) with
+:mod:`sky.sensors.calib_collect` (the stillness gate + six-face collector) with
 live IMU samples from an injected stream, and persist the result through
-:mod:`ui.mathlib.imu.calib_store`.
+:mod:`sky.sensors.calib_store`.
 
 Stream contract (device-free)
 -----------------------------
@@ -33,14 +33,15 @@ from PyQt6.QtWidgets import (
     QPushButton, QDialog, QVBoxLayout, QWidget,
 )
 
-from ui.mathlib.imu.calib_collect import (
+from sky.sensors.calib_collect import (
     SixFaceCollector,
     StaticCollector,
     StaticCollectorConfig,
     face_name,
     gyro_bias_verdict,
 )
-from ui.mathlib.imu.calib_store import save_accel_calib, save_gyro_bias
+from sky.sensors.calib_store import save_accel_calib, save_gyro_bias
+
 from . import theme
 
 

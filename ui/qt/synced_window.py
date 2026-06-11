@@ -156,7 +156,7 @@ class ReplayTripletWorker(TripletWorker):
 
     ``calibration`` is the IMU correction the ``imu_cam`` module applies (``None``
     -> the subscribed IMU is raw, the title shows ``RAW``); pass a non-identity
-    :class:`~ui.mathlib.imu.imu_calib.ImuCalibration` to show ``CALIBRATED``.
+    :class:`~sky.sensors.imu_calib.ImuCalibration` to show ``CALIBRATED``.
     """
 
     mode = "REPLAY"

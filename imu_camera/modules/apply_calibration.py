@@ -4,7 +4,7 @@ The imu_cam module publishes the raw IMU separately (``topics.IMU_RAW``); the
 synced :class:`~imu_camera.comms.messages.ImuCamPacket` that downstream
 state-estimation consumes must carry the CALIBRATED inertial data when a
 per-device calibration exists. This step applies the gyro-bias + six-position
-accel correction (:class:`~imu_camera.mathlib.imu.imu_calib.ImuCalibration`) to
+accel correction (:class:`~sky.sensors.imu_calib.ImuCalibration`) to
 the drained samples and returns a new packet with the corrected ``gyro`` /
 ``accel``.
 
@@ -18,9 +18,10 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
+from sky.sensors.imu_calib import ImuCalibration
+
 from imu_camera.comms import Step
 from imu_camera.comms.messages import ImuCamPacket
-from imu_camera.mathlib.imu.imu_calib import ImuCalibration
 
 
 class ApplyCalibrationStep(Step):
