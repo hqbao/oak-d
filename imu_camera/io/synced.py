@@ -21,8 +21,8 @@ So "synchronise the three" reduces to one well-defined operation: for each frame
 at time ``t_cur``, take the IMU samples that fall in the interval since the
 previous frame, ``(t_prev, t_cur]``. That block of IMU is exactly the motion that
 happened DURING the step from the previous image to this one -- the segment a VIO
-preintegrates (:func:`imu_camera.mathlib.imu.imu.preintegrate_imu` /
-:meth:`imu_camera.mathlib.imu.imu.GyroPreintegrator.delta_rotation`). Nothing here invents
+preintegrates (:func:`sky.imu.imu.preintegrate_imu` /
+:meth:`sky.imu.imu.GyroPreintegrator.delta_rotation`). Nothing here invents
 data; it only groups real samples by time.
 
 Conventions

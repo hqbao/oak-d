@@ -8,7 +8,8 @@ Pure-numpy inertial math the acquisition pipeline composes:
   collector :mod:`sky.sensors.calib_collect`, the on-disk
   :mod:`sky.sensors.calib_store`, and the accel model
   :mod:`sky.sensors.accel_calib`).
-* :mod:`~imu_camera.mathlib.imu.imu` -- SO(3) preintegration + gyro integration.
+* :mod:`sky.imu.imu` -- the shared (loose) SO(3) preintegration + gyro
+  integration the acquisition pipeline references.
 * :mod:`~imu_camera.mathlib.imu.timed_buffer` -- the thread-safe timestamped IMU
   buffer the ``imu_cam`` module drains per camera trigger.
 * :mod:`~imu_camera.mathlib.imu.decode` -- depthai IMU packet decode (live only).
