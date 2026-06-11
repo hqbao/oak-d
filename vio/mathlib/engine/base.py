@@ -1,7 +1,7 @@
 """Engine contract: a swappable runner for the heavy keyframe optimisers.
 
-An *engine* owns one heavy map optimiser (windowed BA or loop-closure SLAM) and
-exposes a tiny, uniform interface so the flow tasks (``RunBA`` / ``SlamStep``)
+An *engine* owns one heavy map optimiser (windowed BA or tight-coupled VIO) and
+exposes a tiny, uniform interface so the flow tasks (``RunBA`` / ``RunVIO``)
 never care *where* the solve runs:
 
 * :class:`InProcessEngine` -- runs the solve synchronously on the calling thread.
@@ -31,26 +31,7 @@ live, is free to be latest-wins (it drops backlog on purpose).
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
 from typing import Any
-
-import numpy as np
-
-
-@dataclass(frozen=True)
-class SlamResult:
-    """A SLAM step's output: the rewritten keyframe poses + loop count.
-
-    Returned by :func:`vio.mathlib.engine.steps.slam_step` only on a keyframe that
-    confirmed a loop (so the pose graph was optimised). ``SlamStep`` frames it
-    into a :class:`~vio.comms.messages.LoopCorrection` for the bus.
-
-    * ``kf_poses`` -- ``{keyframe seq: T_world_cam}`` after pose-graph optimise.
-    * ``n_loops`` -- total confirmed loop closures so far.
-    """
-
-    kf_poses: dict[int, np.ndarray]
-    n_loops: int
 
 
 class Engine(ABC):
@@ -62,8 +43,8 @@ class Engine(ABC):
 
     @abstractmethod
     def poll(self) -> Any:
-        """Return a ready result (refined ``T_cw`` for BA, :class:`SlamResult`
-        for SLAM) or ``None`` if nothing is ready."""
+        """Return a ready result (the refined latest ``T_cw`` for both the BA and
+        the tight-coupled VIO engines) or ``None`` if nothing is ready."""
 
     @abstractmethod
     def poll_overlay(self) -> Any:

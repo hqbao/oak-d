@@ -2,7 +2,7 @@
 
 Why a process and not a thread
 ------------------------------
-The windowed-BA refine and the SLAM ORB + pose-graph solve are mostly
+The windowed-BA refine and the tight-coupled VIO window solve are mostly
 **pure-Python** (only the inner ``np.linalg.solve`` releases the GIL). Run on a
 thread they steal ~17-30 % of the GIL from the device frame-read loop (measured on
 ``fast_push_15s``); a starved read loop drains its camera queues to the latest
@@ -114,14 +114,6 @@ def _vio_worker_main(K, cfg, in_q, out_q, ov_q, stop_evt, reset_evt) -> None:
            in_q, out_q, ov_q, stop_evt, reset_evt)
 
 
-def _slam_worker_main(K, cfg, in_q, out_q, ov_q, stop_evt, reset_evt) -> None:
-    """Child entry point for loop-closure SLAM (module-level => picklable)."""
-    from ..loop.slam import SlamMap
-    from .steps import slam_step, slam_overlay
-    _serve(lambda: SlamMap(K, cfg), slam_step, slam_overlay,
-           in_q, out_q, ov_q, stop_evt, reset_evt)
-
-
 class SubprocessEngine:
     """Engine that runs ``worker_main`` in a spawned process. See module docstring.
 
@@ -154,7 +146,7 @@ class SubprocessEngine:
         """Spawn the worker process (idempotent; no-op after close/failure).
 
         A spawn failure is non-fatal: the engine goes inert (``submit``/``poll`` are
-        no-ops), so ours-ba/ours-slam keep running with the responsive marker and
+        no-ops), so ours-ba/ours-tight keep running with the responsive marker and
         simply show no refined-map overlay -- never a crash on the flow thread.
         """
         if self._proc is not None or self._closed or self._failed:
