@@ -37,6 +37,8 @@ works -- it triggers the lazy import on first access:
 
 * :class:`~ui.modules.ipc_sources.IpcImuRawSource` -- capture ``imu.raw`` for the
   gyro / accel calib dialogs.
+* :class:`~ui.modules.ipc_sources.IpcStereoRawSource` -- capture ``imucam.sample``
+  RAW left+right pairs for the stereo camera-calibration wizard.
 * :class:`~ui.modules.ipc_sources.IpcTripletWorker` -- capture
   ``imucam.sample`` + ``frame.depth`` for the triplet window.
 * :class:`~ui.modules.ipc_sources.IpcKeypointWorker` -- capture ``frame.depth`` +
@@ -55,8 +57,9 @@ from .triplet import UiTripletModule
 # bus sinks above stay importable WITHOUT PyQt6 (the adapters' worker base
 # classes live in ui.qt). Accessing any of these names triggers the import.
 _IPC_ADAPTERS = frozenset({
-    "IpcImuRawSource", "IpcGyroFuseSource", "IpcLoopMatchSource",
-    "IpcTripletWorker", "IpcKeypointWorker", "IpcSlamMapSource",
+    "IpcImuRawSource", "IpcStereoRawSource", "IpcGyroFuseSource",
+    "IpcLoopMatchSource", "IpcTripletWorker", "IpcKeypointWorker",
+    "IpcSlamMapSource",
     "ipc_triplet_factory", "ipc_keypoint_factory", "ipc_slam_map_factory",
     "ipc_loop_factory",
 })
@@ -70,6 +73,7 @@ __all__ = [
     "UiTripletModule",
     # IPC source adapters (lazy)
     "IpcImuRawSource",
+    "IpcStereoRawSource",
     "IpcGyroFuseSource",
     "IpcLoopMatchSource",
     "IpcTripletWorker",

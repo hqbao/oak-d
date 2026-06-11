@@ -203,6 +203,7 @@ def build_replay_frontend(bus: LocalPubSub, reader: SessionReader, *,
 def build_live_frontend(bus: LocalPubSub, *, width: int = 640, height: int = 400,
                         fps: int = 20, use_gyro: bool = True,
                         depth_fast: bool = True, recalibrate_bias: bool = False,
+                        use_camera_calib: bool = False,
                         latest_only: bool = False,
                         tof_sim: bool = False):
     """Open the OAK-D and wire ONLY the acquisition front-end (``read_cam`` +
@@ -210,7 +211,9 @@ def build_live_frontend(bus: LocalPubSub, *, width: int = 640, height: int = 400
 
     For consumers that read ``frame.depth`` / ``imucam.sample`` directly and need
     no odometry/backend/slam. The depth matcher rectifies BOTH cameras
-    (``rectify_left=True``) since the raw left is unrectified. ``tof_sim`` enables
+    (``rectify_left=True``) since the raw left is unrectified.
+    ``use_camera_calib`` opts into the operator's saved per-device stereo calib
+    (default off -> the trusted factory calib is used). ``tof_sim`` enables
     the VL53L9CX simulation (depth at source res, then gray + depth downsampled to
     ``TOF_W x TOF_H`` before publish). Returns
     ``(device, cam_module, imu_module, cal)`` where ``cal`` is the
@@ -242,7 +245,8 @@ def build_live_frontend(bus: LocalPubSub, *, width: int = 640, height: int = 400
 
     cal = read_live_calibration(device, width=width, height=height,
                                 use_gyro=use_gyro, depth_fast=depth_fast,
-                                recalibrate_bias=recalibrate_bias)
+                                recalibrate_bias=recalibrate_bias,
+                                use_camera_calib=use_camera_calib)
     matcher = SGMStereoMatcher.from_calib(cal.calib, cal.sgm_cfg,
                                           rectify_left=True)
     imu_module = ImuCamModule(bus, LiveImuSource(device), matcher=matcher,

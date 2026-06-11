@@ -559,6 +559,56 @@ def _await_calib_bundle(endpoint: str, timeout_s: float) -> WireCalibBundle:
 
 
 # --------------------------------------------------------------------------- #
+# Startup calibration nag (factored out so it's unit-testable offscreen).
+# --------------------------------------------------------------------------- #
+def install_calib_nag(win, toolbar, status: dict, open_dialog) -> object | None:
+    """Surface the startup calibration notification on ``win`` -- NON-BLOCKING.
+
+    Given the unified ``status`` dict (from
+    :func:`~imu_camera.mathlib.device.calib_status.calibration_status`):
+
+    * If anything is missing: show a prominent (but auto-fading, dismissible)
+      status-bar message naming the missing items + the accuracy risk, AND add a
+      PERSISTENT clickable "⚠ CALIB INCOMPLETE" indicator to ``toolbar`` that calls
+      ``open_dialog`` (opens the status dialog). Returns the indicator button so the
+      caller / a test can find it; also stashed on ``win._calib_nag_btn``.
+    * If everything is calibrated: show a brief "calibration OK" confirmation, add NO
+      indicator (no nag), and return ``None``.
+
+    No blocking modal is ever shown on launch -- the indicator is the durable signal,
+    the status-bar line is the immediate (fading) one. Qt is imported lazily so the
+    module stays importable without PyQt6 (mirroring :func:`run_ui`).
+    """
+    from PyQt6.QtWidgets import QPushButton
+    from ui.qt import theme
+
+    if status["all_calibrated"]:
+        win.statusBar().showMessage("Calibration OK — gyro, accel & camera.", 4000)
+        win._calib_nag_btn = None
+        return None
+
+    missing = ", ".join(status["missing"])
+    win.statusBar().showMessage(
+        f"⚠ Calibration incomplete: {missing} not calibrated — flying "
+        f"uncalibrated is inaccurate. Open Calibration ▸ Calibration status…",
+        12000)
+    # Persistent, clickable indicator. Red BAD-coloured so it reads as a warning;
+    # clicking it opens the unified status dialog. Kept on `win` as a lifetime
+    # anchor + test hook.
+    nag = QPushButton("⚠ CALIB INCOMPLETE")
+    nag.setObjectName("CalibNag")
+    nag.setStyleSheet(
+        f"QPushButton#CalibNag {{ color: {theme.BAD}; font-weight: bold; "
+        f"border-color: {theme.BAD}; }}")
+    nag.setToolTip(f"Not calibrated: {missing}. Click to open the calibration status.")
+    nag.clicked.connect(lambda _c=False: open_dialog())
+    toolbar.addSeparator()
+    toolbar.addWidget(nag)
+    win._calib_nag_btn = nag
+    return nag
+
+
+# --------------------------------------------------------------------------- #
 def run_ui(*, vio_endpoint: str = DEFAULT_VIO_ENDPOINT,
            slam_endpoint: str = DEFAULT_SLAM_ENDPOINT,
            capture_endpoint: str = DEFAULT_CAPTURE_ENDPOINT,
@@ -583,9 +633,13 @@ def run_ui(*, vio_endpoint: str = DEFAULT_VIO_ENDPOINT,
     from ui.qt.loop_window import LoopClosureWindow
     from ui.qt.map_window import MapWindow
     from ui.qt.calib_dialogs import GyroCalibDialog, AccelCalibDialog
+    from ui.qt.camera_calib_dialog import CameraCalibWizard
+    from ui.qt.calib_status_dialog import CalibrationStatusDialog
+    from imu_camera.mathlib.device.calib_status import calibration_status
     from ui.modules import (
-        IpcImuRawSource, IpcGyroFuseSource, ipc_triplet_factory,
-        ipc_keypoint_factory, ipc_slam_map_factory, ipc_loop_factory,
+        IpcImuRawSource, IpcStereoRawSource, IpcGyroFuseSource,
+        ipc_triplet_factory, ipc_keypoint_factory, ipc_slam_map_factory,
+        ipc_loop_factory,
     )
 
     # 1. Wait for VIO + SLAM to be ready (and learn the capture resolution).
@@ -887,6 +941,53 @@ def run_ui(*, vio_endpoint: str = DEFAULT_VIO_ENDPOINT,
     accel_act = QAction("Accelerometer (6-position)…", win)
     accel_act.triggered.connect(_open_accel_calib)
     cal_menu.addAction(accel_act)
+
+    # Stereo camera calibration: like the IMU wizards, inject a FRESH RAW stereo
+    # source (capture's imucam.sample left+right) at the bundle's W/H + dev_id, and
+    # WE stop it in `finally` (the wizard does not own the injected stream).
+    def _open_camera_calib() -> None:
+        src = IpcStereoRawSource(capture_endpoint, W, H, device_id=dev_id,
+                                 connect_timeout_s=calib_timeout_s)
+        try:
+            CameraCalibWizard(win, device_id=dev_id, width=W, height=H,
+                              stream=src).exec()
+        finally:
+            src.stop()
+
+    camera_act = QAction("Camera (stereo) calibration…", win)
+    camera_act.triggered.connect(_open_camera_calib)
+    cal_menu.addAction(camera_act)
+
+    # 6b. Unified "Calibration status…" -- the ONE place showing all three calib
+    #     states + a per-item "Open wizard". The status dialog is device-agnostic
+    #     (keyed by `dev_id`) and cv2/depthai-free; it re-queries `calibration_status`
+    #     on every show, so a wizard finished from inside it is reflected on the next
+    #     open. We INSERT it ABOVE the three wizards (it references their handlers, so
+    #     it's defined here but placed first via insertAction).
+    def _open_calib_status() -> None:
+        dlg = getattr(win, "_calib_status_dlg", None)
+        if dlg is None:
+            dlg = CalibrationStatusDialog(
+                win,
+                status_provider=lambda: calibration_status(dev_id),
+                openers={"gyro": _open_gyro_calib,
+                         "accel": _open_accel_calib,
+                         "camera": _open_camera_calib})
+            win._calib_status_dlg = dlg
+        dlg.show()                              # showEvent re-queries the status
+        dlg.raise_()
+        dlg.activateWindow()
+
+    status_act = QAction("Calibration status…", win)
+    status_act.triggered.connect(_open_calib_status)
+    cal_menu.insertAction(gyro_act, status_act)   # first item, above the wizards
+    cal_menu.insertSeparator(gyro_act)            # divider before the three wizards
+
+    # 6c. Startup calibration nag -- NON-BLOCKING. Query the unified status and, if
+    #     anything is missing, surface a prominent (but dismissible) status-bar
+    #     message + a PERSISTENT clickable toolbar indicator. No modal on launch.
+    #     Factored into `install_calib_nag` so it's unit-testable offscreen.
+    install_calib_nag(win, tb, calibration_status(dev_id), _open_calib_status)
 
     win.show()
 

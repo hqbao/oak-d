@@ -53,6 +53,7 @@ into ``self.error`` for the window to display.
 """
 from __future__ import annotations
 
+import logging
 import threading
 import time
 
@@ -60,11 +61,17 @@ import numpy as np
 
 from ui.comms import topics
 from ui.comms.messages import END
-from ui.comms import IPCPubSub, IPCSubscriber, RingRegistry
+from ui.comms import IPCPubSub, IPCSubscriber, LocalPubSub, RingRegistry
 from ui.comms.converters import to_local
 from ui.comms.ring_registry import default_capture_specs, default_vio_specs
 from ui.qt.keypoints_window import KeypointWorker
 from ui.qt.synced_window import TripletWorker
+
+#: Lifecycle-level diagnostics for the calib sources. Kept at INFO for the
+#: handful of one-shot lifecycle events (rings attached, client connected, first
+#: packet, watchdog) so the terminal the operator is watching pinpoints WHERE a
+#: live-path stall stalls; per-frame work stays silent (no spam).
+LOG = logging.getLogger("ui.modules.ipc_sources")
 
 
 def _attach_capture_rings(endpoint: str, width: int, height: int) -> RingRegistry:
@@ -172,6 +179,230 @@ class IpcImuRawSource:
         if client is not None:
             try:
                 client.stop()
+            except Exception:                                      # noqa: BLE001
+                pass
+
+
+# --------------------------------------------------------------------------- #
+# (1a2) Stereo RAW-pair source for the camera-calibration wizard
+# --------------------------------------------------------------------------- #
+class IpcStereoRawSource:
+    """Duck-typed RAW stereo-pair stream over capture's ``imucam.sample`` topic.
+
+    The stereo camera-calibration wizard needs a stream of UNRECTIFIED left+right
+    pairs (lens distortion must still be present -- a calibration-from-scratch is
+    exactly what recovers it). Capture's ``imucam.sample`` (:class:`ImuCamPacket`)
+    carries those RAW frames: ``read_cam.py``'s live source polls the OAK-D's raw
+    mono outputs (``dev.poll("left")`` / ``dev.poll("right")``), NOT a rectified
+    ``StereoDepth`` output, and the pack/calibrate steps pass the grays through
+    unchanged (only the IMU is calibrated). So subscribing this topic delivers the
+    raw pairs the wizard requires.
+
+    Mirrors :class:`IpcImuRawSource`'s "stream contract" -- the four touch-points
+    the calib UI drives: ``start(callback)``, ``stop()``, :attr:`error` and
+    :attr:`device_id` -- but, because the grays ride capture's shared-memory rings
+    (they are not pure POD like ``imu.raw``), it ALSO attaches the consumer-side
+    capture rings so :func:`~ui.comms.converters.to_local` can ``read_copy`` each
+    frame out of shared memory into a private array. Each delivered frame is a
+    small record ``(seq, ts_ns, gray_left, gray_right)``.
+
+    Mono guard
+    ----------
+    A mono recording publishes ``gray_right is None``. Stereo calibration needs
+    BOTH frames, so on the first such packet we latch a clear :attr:`error` and
+    STOP emitting -- the wizard polls :attr:`error` and never receives a half-pair
+    (which it could not calibrate from anyway).
+
+    Why the :class:`~ui.comms.IPCSubscriber` transport (not a bare client)
+    ---------------------------------------------------------------------
+    This source delivers ``imucam.sample`` the SAME proven way the live
+    "Camera+Depth+IMU triplet" window does (:class:`IpcTripletWorker`): an
+    :class:`~ui.comms.IPCSubscriber` re-hydrates each wire packet (``read_copy``-ing
+    the grays out of capture's rings) and republishes the in-proc
+    :class:`~ui.comms.messages.ImuCamPacket` onto a PRIVATE
+    :class:`~ui.comms.LocalPubSub`, which we tap to emit the wizard callback. The
+    triplet window demonstrably renders capture's live ``imucam.sample`` through
+    exactly this bridge, so reusing it (rather than a bespoke
+    ``IPCPubSub(role="client")`` + hand-rolled handler) removes any chance of a
+    late-joining subscriber drifting from the path that is known to deliver this
+    topic. ``IPCSubscriber`` also OWNS its client's lifecycle (it starts the client
+    on its own thread inside ``run`` and stops it on ``stop``), so the connect /
+    receive / teardown all match the triplet's behaviour byte-for-byte.
+
+    No-frame watchdog
+    -----------------
+    If :meth:`start` succeeds (rings attached + the subscriber thread is alive) but
+    ZERO frames arrive within :attr:`frame_timeout_s`, a watchdog latches a clear,
+    actionable :attr:`error` ("connected to capture but no stereo frames arrived
+    ...") so the wizard surfaces it instead of hanging on the placeholder preview
+    forever. The wizard already polls :attr:`error` on every drain tick.
+
+    Device-agnostic: consumes only the abstract ``imucam.sample`` topic + the Wire
+    POD type; no depthai / OAK-D specifics cross into the UI.
+    """
+
+    #: Default no-frame watchdog window (s). If the subscriber connects but no
+    #: stereo packet arrives within this long, :meth:`start`'s watchdog latches a
+    #: clear error. ~5 s comfortably covers a live OAK-D's first-frame latency at
+    #: any sane fps while still failing fast enough that the operator isn't left
+    #: staring at a frozen placeholder.
+    FRAME_TIMEOUT_S = 5.0
+
+    def __init__(self, capture_endpoint: str, width: int, height: int, *,
+                 device_id: str = "default",
+                 connect_timeout_s: float = 30.0,
+                 frame_timeout_s: float | None = None) -> None:
+        self._endpoint = capture_endpoint
+        self._w = int(width)
+        self._h = int(height)
+        self._connect_timeout_s = float(connect_timeout_s)
+        self.frame_timeout_s = (self.FRAME_TIMEOUT_S if frame_timeout_s is None
+                                else float(frame_timeout_s))
+        # Public attrs the wizard reads (mirror the IMU stream's contract).
+        self.device_id: str = device_id
+        self.error: str | None = None
+
+        # Proven triplet transport: IPCSubscriber re-hydrates capture's
+        # imucam.sample onto this PRIVATE local bus; we tap it for the callback.
+        self._rings: RingRegistry | None = None
+        self._client: IPCPubSub | None = None
+        self._sub: IPCSubscriber | None = None
+        self._local = LocalPubSub()
+        # Latched once a mono packet is seen, so we emit no further half-pairs.
+        self._mono = False
+        # Count of delivered packets -- the watchdog reads this to decide whether
+        # any frame ever arrived. Written only on the subscriber's recv thread.
+        self._n_packets = 0
+        # cb(seq:int, ts_ns:int, gray_left:(H,W) uint8, gray_right:(H,W) uint8)
+        self._cb = None
+        # No-frame watchdog: fires once `frame_timeout_s` after a clean start if
+        # `_n_packets` is still 0.
+        self._watchdog: threading.Timer | None = None
+
+    # ------------------------------------------------------------------ #
+    def start(self, callback) -> None:
+        """Attach capture's rings, connect, and stream RAW pairs to ``callback``.
+
+        On a missing ring (capture down) or a connect failure set :attr:`error`
+        and return (do NOT raise): the wizard polls :attr:`error` on its UI timer
+        and surfaces it itself, exactly like :class:`IpcImuRawSource`. Mirrors the
+        :class:`IpcTripletWorker` bring-up: attach rings -> build the client ->
+        wire an :class:`~ui.comms.IPCSubscriber` -> ``start`` it (which starts the
+        client on its own thread). A no-frame watchdog is armed last.
+        """
+        self._cb = callback
+        try:
+            # The grays live in capture's shared-memory rings; the converter
+            # read_copies them out, so the consumer side must be attached first.
+            # A missing ring almost always means capture is not running -> map it
+            # to a clear, device-agnostic reason rather than a raw shm-path error.
+            self._rings = _attach_capture_rings(self._endpoint, self._w, self._h)
+        except RuntimeError as e:
+            self.error = str(e)
+            LOG.info("stereo-src[%s]: ring attach failed: %s", self._endpoint, e)
+            return
+        LOG.info("stereo-src[%s]: capture rings attached (%dx%d)",
+                 self._endpoint, self._w, self._h)
+
+        # Tap the private bus where the subscriber will republish each re-hydrated
+        # ImuCamPacket (this is the exact stream the triplet window renders live).
+        self._local.subscribe(topics.IMUCAM_SAMPLE, self._on_packet)
+        client = IPCPubSub(self._endpoint, role="client",
+                           connect_timeout_s=self._connect_timeout_s)
+        # IPCSubscriber.__init__ calls client.subscribe for the topic; run() then
+        # starts the client. It swallows a connect failure onto a log line + a
+        # dead thread, so we detect that below (mirrors IpcTripletWorker).
+        sub = IPCSubscriber(self._local, client, self._rings,
+                            [topics.IMUCAM_SAMPLE])
+        sub.start()
+        # A connect failure leaves the subscriber thread dead before it can block
+        # on its stop event; surface it as the wizard's error rather than hanging.
+        if not sub.is_alive():
+            self.error = (f"capture stereo stream connect failed "
+                          f"({self._endpoint})")
+            LOG.info("stereo-src[%s]: subscriber thread died at start -- "
+                     "client never connected", self._endpoint)
+            sub.stop()
+            self._rings.close()
+            self._rings = None
+            return
+        self._client = client
+        self._sub = sub
+        LOG.info("stereo-src[%s]: subscriber connected, awaiting first packet",
+                 self._endpoint)
+        # Arm the no-frame watchdog LAST, once the transport is genuinely up.
+        self._watchdog = threading.Timer(self.frame_timeout_s,
+                                         self._on_frame_timeout)
+        self._watchdog.daemon = True
+        self._watchdog.start()
+
+    def _on_packet(self, pkt) -> None:
+        """Local-bus tap (subscriber recv thread): emit one RAW stereo pair.
+
+        Receives the ALREADY re-hydrated :class:`~ui.comms.messages.ImuCamPacket`
+        (the :class:`~ui.comms.IPCSubscriber` ran ``to_local``, so the grays are
+        already ``read_copy``-ed out of shared memory and the record owns them).
+        """
+        if pkt is END:                                # WireEnd -> local END
+            return
+        if self._mono:                                # already gave up on this stream
+            return
+        if self._n_packets == 0:
+            LOG.info("stereo-src[%s]: first imucam.sample packet received "
+                     "(seq=%s)", self._endpoint, getattr(pkt, "seq", "?"))
+        self._n_packets += 1
+        if pkt.gray_right is None:
+            # Mono recording: latch the reason ONCE and stop emitting -- the
+            # wizard needs both frames; a lone left frame is not calibratable.
+            self._mono = True
+            self.error = ("stereo calibration needs a stereo capture; "
+                          "this stream has no right frame")
+            LOG.info("stereo-src[%s]: mono packet (gray_right is None) -- "
+                     "stereo calib needs both frames", self._endpoint)
+            return
+        cb = self._cb
+        if cb is not None:
+            cb(int(pkt.seq), int(pkt.ts_ns), pkt.gray_left, pkt.gray_right)
+
+    def _on_frame_timeout(self) -> None:
+        """Watchdog: latch a clear error if no frame arrived after the timeout.
+
+        Runs on the timer thread. Only fires when the transport came up cleanly
+        (no prior error) yet ZERO packets were delivered -- the exact silent-hang
+        condition the operator hit. Does nothing once any packet has arrived or an
+        error is already latched.
+        """
+        if self.error is not None or self._n_packets > 0:
+            return
+        self.error = (
+            f"connected to capture on {self._endpoint!r} but no stereo frames "
+            f"arrived within {self.frame_timeout_s:.0f}s -- is capture running "
+            f"and producing a stereo pair?")
+        LOG.info("stereo-src[%s]: WATCHDOG fired -- 0 frames in %.0fs",
+                 self._endpoint, self.frame_timeout_s)
+
+    def stop(self) -> None:
+        """Stop the subscriber + detach the rings (idempotent; swallow errors)."""
+        watchdog = self._watchdog
+        self._watchdog = None
+        if watchdog is not None:
+            watchdog.cancel()
+        # Stopping the IPCSubscriber stops its underlying client + joins the recv
+        # thread; the client is owned by the subscriber, so we do NOT stop it
+        # separately (that would double-close).
+        sub = self._sub
+        self._sub = None
+        self._client = None
+        if sub is not None:
+            try:
+                sub.stop()
+            except Exception:                                      # noqa: BLE001
+                pass
+        rings = self._rings
+        self._rings = None
+        if rings is not None:
+            try:
+                rings.close()
             except Exception:                                      # noqa: BLE001
                 pass
 

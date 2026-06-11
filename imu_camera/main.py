@@ -261,6 +261,7 @@ def run_capture_live(endpoint: str, *,
                      depth_fast: bool = True,
                      use_gyro: bool = True,
                      recalibrate_bias: bool = False,
+                     use_camera_calib: bool = False,
                      tof_sim: bool = False) -> int:
     """Live OAK-D capture: device -> bridge -> IPC."""
     from imu_camera.modules.pipeline import TOF_W, TOF_H, build_live_frontend
@@ -293,7 +294,8 @@ def run_capture_live(endpoint: str, *,
         device, cam_module, imu_module, cal = build_live_frontend(
             bus=local, width=width, height=height, fps=fps,
             use_gyro=use_gyro, depth_fast=depth_fast,
-            recalibrate_bias=recalibrate_bias, latest_only=False,
+            recalibrate_bias=recalibrate_bias,
+            use_camera_calib=use_camera_calib, latest_only=False,
             tof_sim=tof_sim)
     except Exception as e:                                         # noqa: BLE001
         LOG.error("capture: live build failed: %s", e)
@@ -372,6 +374,11 @@ def main() -> int:
                     help="live: disable IMU gyro use in the calibration bundle")
     ap.add_argument("--recalibrate-bias", action="store_true",
                     help="live: ignore the cached gyro bias and re-measure it")
+    ap.add_argument("--use-camera-calib", action="store_true",
+                    help="live: apply the operator's SAVED per-device stereo calib "
+                         "(from the wizard) instead of the FACTORY calib. Default "
+                         "OFF -- factory is the trusted metrology reference; this "
+                         "flag opts into the stored user calib if one exists.")
     ap.add_argument("--vl53l9cx", action="store_true",
                     help="simulate a VL53L9CX-class ToF camera: compute depth at "
                          "the source resolution then downsample gray + depth to "
@@ -384,6 +391,7 @@ def main() -> int:
             fps=args.fps, depth_fast=args.depth_fast,
             use_gyro=not args.no_gyro,
             recalibrate_bias=args.recalibrate_bias,
+            use_camera_calib=args.use_camera_calib,
             tof_sim=args.vl53l9cx)
     return run_capture_replay(
         session=Path(args.session), endpoint=args.endpoint,

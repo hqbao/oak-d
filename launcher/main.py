@@ -167,6 +167,45 @@ def _cleanup_orphans() -> None:
 
 
 # --------------------------------------------------------------------------- #
+def build_capture_args(args, cap_ep: str) -> list[str]:
+    """Build the ``imu_camera.main`` argv from the parsed launcher ``args``.
+
+    Pure (no I/O, no spawning) so the flag-forwarding contract is unit-testable
+    without launching subprocesses. ``imu_camera.main`` defaults to REPLAY and takes
+    an explicit ``--live`` for hardware (inverse of the old ours.proc.capture, which
+    defaulted to live):
+
+    * replay -> ``--session PATH [--max-frames N]``
+    * live   -> ``--live [--no-gyro] [--recalibrate-bias] [--use-camera-calib]``
+
+    ``--use-camera-calib`` is forwarded ONLY in the live branch and ONLY when set --
+    it opts the capture process into the operator's saved stereo calib (default OFF =
+    factory). Only capture needs it; vio/slam get whatever calib capture publishes on
+    the retained ``calib.bundle``. ``--vl53l9cx`` applies to both modes, so it is
+    appended after the mode branch.
+    """
+    capture_args: list[str] = ["--endpoint", cap_ep,
+                               "--width", str(args.width),
+                               "--height", str(args.height),
+                               "--fps", str(args.fps)]
+    if args.session:
+        capture_args += ["--session", args.session]
+        if args.max_frames > 0:
+            capture_args += ["--max-frames", str(args.max_frames)]
+    else:
+        capture_args += ["--live"]
+        if args.no_gyro:
+            capture_args += ["--no-gyro"]
+        if args.recalibrate_bias:
+            capture_args += ["--recalibrate-bias"]
+        if args.use_camera_calib:
+            capture_args += ["--use-camera-calib"]
+    if args.vl53l9cx:
+        capture_args += ["--vl53l9cx"]
+    return capture_args
+
+
+# --------------------------------------------------------------------------- #
 def _spawn(py: str, mod: str, args: list[str], *, env: dict[str, str],
            name: str) -> subprocess.Popen:
     """Spawn a child python process; stdout / stderr inherited from launcher."""
@@ -218,6 +257,11 @@ def main() -> int:
                     help="live: disable IMU gyro use (pure-vision)")
     ap.add_argument("--recalibrate-bias", action="store_true",
                     help="live: re-measure gyro bias instead of using the cached one")
+    ap.add_argument("--use-camera-calib", action="store_true",
+                    help="live: apply the operator's SAVED per-device stereo calib "
+                         "(from the wizard) instead of the FACTORY calib. Default "
+                         "OFF -- factory is the trusted reference. Forwarded to the "
+                         "capture subprocess.")
     ap.add_argument("--worker", action="store_true",
                     help="run the heavy BA/SLAM solves in worker subprocesses "
                          "(GIL-free). Off by default -- SLAM already stays "
@@ -274,28 +318,9 @@ def main() -> int:
     env = dict(os.environ)
 
     # ---- Build per-proc argv ---------------------------------------------
-    # imu_camera.main defaults to REPLAY and takes an explicit `--live` for
-    # hardware (inverse of the old ours.proc.capture, which defaulted to live):
-    #   replay -> `--session PATH [--max-frames N]`
-    #   live   -> `--live [--no-gyro] [--recalibrate-bias]`
-    capture_args: list[str] = ["--endpoint", cap_ep,
-                               "--width", str(args.width),
-                               "--height", str(args.height),
-                               "--fps", str(args.fps)]
-    if args.session:
-        capture_args += ["--session", args.session]
-        if args.max_frames > 0:
-            capture_args += ["--max-frames", str(args.max_frames)]
-    else:
-        capture_args += ["--live"]
-        if args.no_gyro:
-            capture_args += ["--no-gyro"]
-        if args.recalibrate_bias:
-            capture_args += ["--recalibrate-bias"]
-    # ToF simulation applies to BOTH live + replay capture (the downsample stage
-    # is the same), so forward it after the mode branch.
-    if args.vl53l9cx:
-        capture_args += ["--vl53l9cx"]
+    # Capture argv (mode branch + flag forwarding) lives in build_capture_args so
+    # the contract is unit-testable without spawning subprocesses.
+    capture_args = build_capture_args(args, cap_ep)
 
     vio_args = ["--capture-endpoint", cap_ep, "--endpoint", vio_ep,
                 "--kf-every", str(args.kf_every)]

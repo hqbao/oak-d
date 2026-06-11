@@ -34,6 +34,7 @@ from imu_camera.mathlib.imu.calib_store import (
 from imu_camera.mathlib.imu.decode import decode_imu_packets
 from imu_camera.mathlib.imu.imu_calib import ImuCalibration
 from imu_camera.io.reader import StereoCalib
+from .camera_calib_store import load_camera_calib
 from .oak_live import SharedLiveDevice
 
 # Startup stillness gates (identical to the legacy capture path): the gravity
@@ -158,9 +159,62 @@ def _collect_startup(device: SharedLiveDevice, R_imu_cam, accel_cal,
     return (_level(accel) if accel else None), None
 
 
+def select_camera_calib(dev_id: str | None, factory_K: np.ndarray,
+                        factory_calib: StereoCalib,
+                        user_calib: StereoCalib | None,
+                        *, use_camera_calib: bool = False
+                        ) -> tuple[np.ndarray, StereoCalib]:
+    """Choose the LIVE stereo calibration. FACTORY is the default; the user's saved
+    calib is applied ONLY when explicitly opted into.
+
+    Factored out of :func:`read_live_calibration` so the decision is unit-testable
+    HEADLESS (no OAK-D, no depthai) -- the only device-dependent input is the
+    already-read factory ``(K, StereoCalib)``; ``user_calib`` is whatever
+    :func:`~imu_camera.mathlib.device.camera_calib_store.load_camera_calib` returned
+    (the caller is expected to pass ``None`` when ``use_camera_calib`` is off, so the
+    store is never even read in the default path).
+
+    Behaviour (factory is the trusted metrology reference, hence the default):
+
+    * ``use_camera_calib=False`` (DEFAULT) -> use the factory ``(K, StereoCalib)``.
+      No warning is emitted -- factory is the intended default, not an error state.
+    * ``use_camera_calib=True`` and ``user_calib`` present -> OVERRIDE with the user's
+      ``K`` (= left intrinsics) and their full :class:`StereoCalib`
+      (intrinsics_left/right + ``T_left_right``), logged prominently. The IMU<->cam
+      extrinsic ``R_imu_cam`` is NOT part of the wizard solve, so the caller keeps the
+      factory ``R_imu_cam`` -- it is intentionally untouched here.
+    * ``use_camera_calib=True`` but ``user_calib`` absent -> the operator asked for
+      their calib but none is saved: emit ONE prominent WARNING and fall back to
+      factory.
+
+    Returns ``(K, StereoCalib)`` for the live graph to use.
+    """
+    if not use_camera_calib:
+        # Default path: factory is the trusted reference. No store read, no warning --
+        # this is the intended configuration, not a missing-calibration error.
+        return factory_K, factory_calib
+    if user_calib is not None:
+        # The user's left intrinsics ARE the live K (the same K StereoCalib exposes
+        # as ``calib.left.K``); rebuild it from the parsed calib so the two never
+        # disagree, rather than trusting a separately-passed array.
+        K = np.asarray(user_calib.left.K, dtype=np.float64)
+        baseline_mm = user_calib.baseline_m * 1000.0
+        print(f"[live] using SAVED camera calibration for device {dev_id} "
+              f"(baseline {baseline_mm:.1f} mm) -- factory calib overridden",
+              file=sys.stderr)
+        return K, user_calib
+    # Asked for the user calib but none is saved: fall back to factory, but tell the
+    # operator their request could not be honoured so they can run the wizard.
+    print(f"[live] WARNING: asked for user camera calib (--use-camera-calib) but "
+          f"none saved for {dev_id} -- using factory; run the Camera (stereo) "
+          f"calibration wizard.", file=sys.stderr)
+    return factory_K, factory_calib
+
+
 def read_live_calibration(device: SharedLiveDevice, *, width: int, height: int,
                           use_gyro: bool, depth_fast: bool,
-                          recalibrate_bias: bool = False) -> LiveFrontEndCalib:
+                          recalibrate_bias: bool = False,
+                          use_camera_calib: bool = False) -> LiveFrontEndCalib:
     """Acquire the shared device and read all VIO boot references.
 
     The device is :meth:`~imu_camera.mathlib.device.oak_live.SharedLiveDevice.acquire`-d here and
@@ -176,6 +230,18 @@ def read_live_calibration(device: SharedLiveDevice, *, width: int, height: int,
     # Read the per-device id up front so the calib bundle carries it regardless
     # of whether the gyro/IMU branch runs (the UI keys saved IMU calib by it).
     dev_id = device.device_id
+
+    # FACTORY calib is the default trusted metrology reference. The operator's OWN
+    # saved stereo calibration is applied ONLY when explicitly opted into via
+    # ``--use-camera-calib`` -- in which case we read the per-device store (keyed by
+    # the SAME id the wizard saved under) and override K + the StereoCalib
+    # (intrinsics + L->R extrinsic); R_imu_cam stays factory (the wizard does not
+    # calibrate it). In the default path we do NOT even read the store. This is
+    # purely the LIVE device path -- the replay/oracle path reads its calib from the
+    # recorded session and never reaches here.
+    user_calib = load_camera_calib(dev_id) if use_camera_calib else None
+    K, calib = select_camera_calib(dev_id, K, calib, user_calib,
+                                   use_camera_calib=use_camera_calib)
 
     accel_align = None
     imu_calibration = None

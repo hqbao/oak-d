@@ -81,6 +81,7 @@ long-lived trajectory sources use:
 | In-UI window / dialog         | Adapter (`ui/modules/ipc_sources.py`) | Subscribes (endpoint · topics) |
 |---                            |---                            |---|
 | Gyro / Accel calibration      | `IpcImuRawSource`             | capture · `imu.raw` (RAW IMU) |
+| Camera (stereo) calibration   | `IpcStereoRawSource`          | capture · `imucam.sample` (RAW left+right pair, via the same `IPCSubscriber` bridge the triplet uses) |
 | Camera + Depth + IMU triplet  | `IpcTripletWorker`           | capture · `imucam.sample`, `frame.depth` |
 | Keypoint Depth Tracker        | `IpcKeypointWorker`          | capture · `frame.depth`  +  vio · `frame.tracks`, `frame.inliers` |
 | Gyro Fusion (strip chart)     | `IpcGyroFuseSource`          | vio · `frame.gyrofuse` |
@@ -347,7 +348,8 @@ IPCPubSub(endpoint="oak.capture", role="client")  # imu.raw, imucam.sample, fram
               View         : VIEW_PRESETS / Follow Camera (on the single viewer)
               Visualize    : triplet window  ← capture imucam.sample/frame.depth
                              keypoint tracker ← capture frame.depth + vio tracks/inliers
-              Calibration  : gyro / accel dialogs ← capture imu.raw (RAW)
+              Calibration  : gyro / accel dialogs   ← capture imu.raw (RAW)
+                             camera (stereo) wizard ← capture imucam.sample (RAW L+R)
 ```
 
 A single `SlamMapTracker` subscribes `slam.map` (slam endpoint) plus `pose.odom` /
@@ -520,20 +522,140 @@ The menu is plain Qt (`QMenuBar` / `QAction`); `ui.main` calls
   `L_OCC_THRESH`/`L_DISPLAY`; `NEIGHBOR_RADIUS`/`MIN_NEIGHBORS`; `MAX_VOXELS`) are exposed
   + commented. Each window is cached
   so repeated opens reuse the one IPC source.
-- **Calibration** — **"Gyroscope Bias…"** (`GyroCalibDialog`) and **"Accelerometer
-  (6-position)…"** (`AccelCalibDialog`). Each opens with a fresh `IpcImuRawSource`
-  injected as its `stream`; the menu handler owns the stream and closes it in its
-  `finally`.
+- **Calibration** — the FIRST item is **"Calibration status…"** (`CalibrationStatusDialog`,
+  `ui/qt/calib_status_dialog.py`): the ONE unified view of all three calibrations.
+  It re-queries the **device-agnostic, cv2/depthai-free** API
+  `calibration_status(dev_id)` (`imu_camera/mathlib/device/calib_status.py`, which imports
+  only the three `load_gyro_bias` / `load_accel_calib` / `load_camera_calib` loaders) on
+  every show and renders one row per item — a ✓ (`theme.GOOD`) / ✗ (`theme.BAD`) badge +
+  the name + a semantics-accurate detail (gyro auto-measures on first capture start; accel
+  falls back to raw-accel leveling; **camera is informational** — factory calib is the
+  default, a saved user calib is opt-in via `--use-camera-calib`) + an
+  **"Open wizard"** button wired to the matching handler. The **camera item is always
+  reported `calibrated=True`** (never in `missing`): factory is a valid default, not an
+  error, so its detail just reports which calib is in play (`using factory calib (default)`
+  or `user calib saved (enable with --use-camera-calib)`). On window build the UI calls the
+  same API and, if `not all_calibrated`, installs a **non-blocking** nag (`install_calib_nag`
+  in `ui/main.py`): a status-bar message naming the missing items + the inaccuracy risk **and**
+  a persistent clickable **"⚠ CALIB INCOMPLETE"** toolbar indicator opening the status dialog
+  (no launch modal). The nag therefore fires **only** for an uncalibrated gyro/accel — never
+  for an empty camera store. All three are then the wizards: **"Gyroscope Bias…"**
+  (`GyroCalibDialog`), **"Accelerometer (6-position)…"** (`AccelCalibDialog`), and **"Camera
+  (stereo) calibration…"** (`CameraCalibWizard`). Each opens with a fresh injected `stream` — the IMU dialogs
+  get an `IpcImuRawSource` (capture `imu.raw`), the camera wizard an
+  `IpcStereoRawSource` (capture `imucam.sample`, the RAW left+right pair) sized at the
+  bundle's `W/H` — and the menu handler owns the stream and closes it in its `finally`.
+  The camera wizard ties the Phase 1–3 calib core together: it shows the Phase-1
+  checkerboard fullscreen, feeds stereo pairs to the tested
+  `StereoCheckerboardCollector` (live left-frame preview + corner overlay + per-axis
+  coverage + "tilt the board more" guidance until the count **and** tilt-coverage gates
+  pass), then runs `solve_stereo` **off the UI thread** (a `QThread` worker — cv2 stays
+  lazy), grades the result with the shipped `calib_check` suite (PASS/WARN/FAIL), and
+  on Save **persists the calib to the per-device store** (`save_camera_calib`, keyed by
+  `device_id` — applied on the live path **only with `--use-camera-calib`**; factory is
+  the default, §6.4) **and** exports a reader-compatible `calib.json` via
+  `write_calib_json` (warning the operator if the verdict was not PASS).
+  The data path is end-to-end device-free: capture's RAW
+  `imucam.sample` left+right → `IpcStereoRawSource` → `StereoCheckerboardCollector` →
+  `solve_stereo` (K_l/K_r + distortion + the LEFT→RIGHT `T_left_right`, metres) →
+  `write_calib_json`. **L↔R corner-order reconciliation (the PRIMARY real-device garbage
+  fix):** `cv2.findChessboardCorners` runs **independently** on the left and right image,
+  and a `cols×rows` board has a **180° corner-order ambiguity** — depending on which way
+  round the detector locked onto the board, the same physical grid comes back either as the
+  list `c` or as its full reversal `c[::-1]`. A board imaged at different in-plane rotations
+  on the two cameras can therefore return the RIGHT corners in the **reversed** order
+  relative to the LEFT; fed straight to `stereoCalibrate`, the mismatched
+  `object[k]`/`left[k]` vs `right[k]` correspondence is "explained" as a **~168°
+  inter-camera rotation and a runaway ~960 mm baseline** — the exact reported failure (and
+  the wide-FOV model fix below does **not** cure it). So the **collector reconciles each
+  accepted view** before it stores the pair: `detect.reconcile_lr(L, R, cols, rows)` keeps
+  the LEFT array as the reference (object points follow its raster order) and reverses the
+  RIGHT iff R's grid axes (`corner[1]−corner[0]`, `corner[cols]−corner[0]`) point **opposite**
+  the left's — i.e. `dot(col_L,col_R)+dot(row_L,row_R) < 0` — so every (L,R) pair names the
+  same board points by the time it reaches the solve. (A handedness/cross-product test is
+  blind to a full reversal, which negates **both** axes and keeps the cross-product sign;
+  the axis-direction dot product is the correct, in-plane-rotation-robust detector.)
+  **Wide-FOV (OAK-D *W*) solve model:** the real lens is a ~95–110°
+  wide fisheye; the default OpenCV 5-coeff distortion model (`k1,k2,p1,p2,k3`) **cannot**
+  represent that much barrel distortion, so the optimiser fakes it by inflating the focal
+  length (observed `fx`→1884 on a 640-wide image whose true `fx`≈285), which then diverges
+  `stereoCalibrate` to ~1e13 px and a ~960 mm baseline. `solve_stereo` therefore (1) fits
+  with `CALIB_RATIONAL_MODEL` (8-coeff `k1..k6,p1,p2` — the model the OAK-D factory
+  14-coeff rational+thin-prism calib is a near-superset of, written back as a
+  `calib_check`-recognised dist length), (2) **seeds** a wide-FOV intrinsic guess
+  (`cx,cy`=image centre, `fx=fy=width/(2·tan(HFOV/2))` for an assumed ~100° HFOV) under
+  `CALIB_USE_INTRINSIC_GUESS` (passed **with** the seed `K` — the seed is a silent no-op
+  without the flag) so the focal length starts near the truth instead of running
+  away, (3) **rejects per-view reprojection outliers** via a **MAD gate** — drop a view
+  whose `cv2.calibrateCameraExtended` per-view RMS exceeds `max(1.5 px, median + 3·1.4826·MAD)`
+  in either camera (one drop→refit, not iterated; the MAD cut is robust to legitimate
+  high-tilt views that carry slightly elevated RMS but pin the focal length, where a bare
+  `2.5×median` would preferentially delete them) and re-fits on the survivors (≥8 required,
+  else an honest "too few clean views — recapture" failure), and (4) **sanity-floors** the
+  result against physical bounds — a focal length with `fx/width` outside `[0.25, 0.60]`
+  (width-relative, ≈HFOV 90–120°), a **baseline outside `[60, 90] mm`**, an **inter-camera
+  rotation `‖log R‖ > 5°`**, or a diverged stereo RMS (`> 5 px`) returns `ok=False`, so the
+  wizard shows "calibration did not converge — recapture" and leaves **Save disabled**
+  rather than persisting garbage (the baseline + rotation bounds catch the corner-order
+  divergence even if it ever slipped past reconciliation). The rational fit is tried first;
+  if it is implausible (a genuinely *mild* lens over-fits the extra rational terms) the
+  solve **falls back to the standard 5-coeff model**, so the right model self-selects per
+  lens with no operator input.
+  `StereoCalibResult` carries the diagnostics (`n_views_used`, per-camera RMS,
+  `calibrate_flags`, `ok`/`failure_reason`). **Always-on debug dump:** the solve saves the
+  operator's REAL captured corners (object + L/R image points, board geometry, image size,
+  solved result) to a stable `/tmp/oakd_calib_views_<n_views>.npz` (the wizard logs/shows
+  the path) so a real-device failure can be reproduced offline from the exact data. `IpcStereoRawSource` delivers `imucam.sample` through the
+  **same proven `IPCSubscriber` + private `LocalPubSub` bridge** the live
+  Camera+Depth+IMU triplet window uses (`IpcTripletWorker`), not a bespoke
+  `IPCPubSub(role="client")` handler — so a *late-joining* wizard subscriber (it
+  opens after capture is already streaming to VIO) takes the identical, known-good
+  delivery path. It latches `.error` on a **mono** recording (no right frame), and
+  a **no-frame watchdog** (default ~5 s, `frame_timeout_s`) latches a clear,
+  actionable `.error` if the transport connects but **zero** stereo frames arrive —
+  so the wizard surfaces "is capture running and producing a stereo pair?" instead
+  of hanging forever on its placeholder preview. Lifecycle diagnostics (rings
+  attached, subscriber connected, first packet, mono, watchdog-fired) log at INFO so
+  an on-device stall is pinpointed in the terminal. **Frame-pump (never block the UI
+  thread):** board detection (`collector.feed` → `cv2.findChessboardCorners`) is
+  **slow on a board-less frame** (~100–300 ms ×2) — the normal case while the
+  operator aims — so it runs **off the UI thread** on a dedicated `_DetectWorker`
+  `QThread` (mirroring the solve worker). The ~30 Hz `_drain` tick **drains the queue
+  to the newest pair** (dropping the stale backlog — a live preview only needs the
+  latest frame), paints that gray cheaply **every tick** (so the preview is always
+  smooth, never gated on detection), re-syncs the bars from the last detection, polls
+  the watchdog, and hands the latest pair to the worker **only when none is in flight**
+  (so detection is self-throttling and one slow detect can never stall the GUI). The
+  dialog also shows an always-visible in-dialog **liveness readout** (connection +
+  frames received + detections/sec) so a dead stream or a stalled detect is visible
+  to the operator even though the UI process's stdout never reaches them. The detect
+  worker is torn down on capture-stop/close (bounded `wait()`), so no thread outlives
+  the dialog. **Two conventions a developer
+  must not flip:** `(cols, rows)` are the
+  board's INNER corners (OpenCV `patternSize`), NOT squares; and `solve_stereo`
+  produces the `T_left_right` translation in **metres**, so `write_calib_json` emits
+  it in **centimetres** (the depthai/`calib.json` convention) for `StereoCalib.from_json`'s
+  load-time `*0.01` to round-trip it back to metres — the wizard verifies this by
+  re-loading through that exact loader before running `calib_check`. Offscreen-tested
+  headless in `ui/tests/camera_calib_dialog_selftest.py` (fake stereo stream +
+  GT-rasterized tilted board pairs). The unified status path is tested by
+  `imu_camera/tests/calib_status_selftest.py` (the API's all/none/partial combinations,
+  monkeypatching the loaders so the real `.cache` is untouched),
+  `ui/tests/calib_status_dialog_selftest.py` (offscreen: badge state for all-✓ + a
+  partial case, the "Open wizard" buttons fire the right opener, and re-show re-queries),
+  and `ui/tests/calib_nag_selftest.py` (offscreen: incomplete → a persistent clickable
+  indicator + a naming status message, all-✓ → no nag).
 
 ### 6.3 IPC adapters — `ui/modules/ipc_sources.py`
 
-Three drop-in adapters let the unchanged `ui/qt` windows/dialogs run with no
+Four drop-in adapters let the unchanged `ui/qt` windows/dialogs run with no
 in-process acquisition graph. The module is **device-agnostic by contract**: it
 consumes only the abstract IPC topics + wire POD types and never imports depthai.
 
 | Adapter             | Duck-types / extends                  | Consumes (endpoint · topics)                                   | Notes |
 |---                  |---                                    |---                                                            |---|
 | `IpcImuRawSource`   | `ui.qt` IMU stream contract           | capture · `imu.raw`                                            | Subscribes capture's **RAW** IMU and re-emits one `(3,)` gyro+accel sample at a time with a **seconds** timestamp. RAW — not calibrated — is correct: calibrating off an already-calibrated stream would be circular. |
+| `IpcStereoRawSource`| camera-calib wizard stream contract   | capture · `imucam.sample`                                      | Subscribes capture's RAW left+right pair and emits one `(seq, ts_ns, gray_left, gray_right)` record per packet (attaching the capture rings so the grays `read_copy` out of shared memory). RAW — unrectified, distortion intact — is correct: a from-scratch stereo calibration is what recovers the intrinsics + distortion. Latches `.error` on a **mono** recording (no right frame) and stops emitting half-pairs. |
 | `IpcTripletWorker`  | `ui.qt.synced_window` triplet worker  | capture · `imucam.sample`, `frame.depth`                       | Republishes both topics onto a local `LocalPubSub`; the unchanged triplet sink joins them by `seq` and renders. |
 | `IpcKeypointWorker` | `ui.qt.keypoints_window` worker       | capture · `frame.depth`  +  **vio** · `frame.tracks`, `frame.inliers` | Two endpoints: depth imagery from capture, KLT tracks + PnP inliers from VIO. The unchanged tracks sink joins them by `seq`. Keeps `FrameTracks` pure POD so VIO never writes capture's rings (§9 invariant 6). |
 
@@ -564,11 +686,33 @@ side-along-wall, that picked the +2.0 default; `ui/tests/_map_sor_sweep.py` — 
 ### 6.4 Calibration semantic — "saves for the NEXT capture start"
 
 The UI does **not** own the device; `imu_camera` does. So a calibration the UI saves
-is **not** applied live mid-run. The dialog keys the saved value (gyro bias / accel
-calib) by `device_id` (from the calib bundle, §9 invariant 11) and writes it to the
-per-device store; `imu_camera` **loads** it by the same key on its **next start**
-(`load_gyro_bias` / `load_accel_calib` in `imu_camera/mathlib/device/live_calib.py`).
-The dialog shows "Saved for device `<id>`" to make the deferred effect explicit.
+is **not** applied live mid-run. The dialog keys the saved value by `device_id` (from
+the calib bundle, §9 invariant 11) and writes it to a per-device store; `imu_camera`
+**loads** it by the same key on its **next start**. The dialog shows "Saved for device
+`<id>` … next capture start" to make the deferred effect explicit. Three calibrations
+follow this one pattern:
+
+- **gyro bias / accel calib** → `imu_camera/mathlib/imu/calib_store.py`
+  (`load_gyro_bias` / `load_accel_calib`), read in `read_live_calibration`.
+- **stereo CAMERA calib** → `imu_camera/mathlib/device/camera_calib_store.py`
+  (`save_camera_calib` / `load_camera_calib`, store `.cache/camera_calib.json`). On the
+  live path `read_live_calibration` reads the factory `K`/`StereoCalib` off the device.
+  **FACTORY is the default** (the trusted metrology reference): with **no** flag,
+  `read_live_calibration` does **not** even read the store and `select_camera_calib`
+  returns the factory calib **silently** (no warning — factory is the intended default,
+  not an error). Only with **`--use-camera-calib`** (threaded capture-entry →
+  `build_live_frontend` → `read_live_calibration(use_camera_calib=True)`, mirroring
+  `use_gyro`/`recalibrate_bias`) does it load the saved calib and `select_camera_calib`
+  **override** the factory `K`/`StereoCalib` with it (the factory `R_imu_cam` is kept —
+  the wizard does not calibrate the IMU↔cam extrinsic), logging `using SAVED camera
+  calibration … factory calib overridden`. With the flag set but **none** saved it falls
+  back to factory and prints one prominent `WARNING: asked for user camera calib
+  (--use-camera-calib) but none saved … using factory; run the Camera (stereo)
+  calibration wizard`. The launcher forwards `--use-camera-calib` to the capture
+  subprocess only (vio/slam get whatever calib capture publishes on the retained
+  `calib.bundle`). This whole path is **only** on the live device — the replay/oracle
+  path reads its calib from the recorded session and never reaches
+  `read_live_calibration`, so byte-parity stays **gap=0**.
 
 ## 7. Launcher — `launcher/main.py` + `run.sh`
 

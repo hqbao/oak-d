@@ -146,6 +146,9 @@ Tips:
   for a denser keyframe map.
 - **`--recalibrate-bias`** on a new device (hold still ~1 s, once); **`--no-gyro`**
   for pure-vision if the IMU calibration is untrusted.
+- **`--use-camera-calib`** to apply your **own** saved stereo calib instead of the
+  factory one (default OFF — the OAK-D factory calib is the trusted metrology
+  reference). Opt in only after running the camera wizard.
 - The half-res live SGM preset (`depth_fast`) is always on — no flag needed.
 - ⚠️ **160×100 is the practical stereo VIO floor.** Below it the depth map is
   structurally starved (the disparity-search floor spans an ever-larger fraction
@@ -444,10 +447,19 @@ The menu bar renders **in-window on every platform** (`setNativeMenuBar(False)`)
     `ui/modules/ipc_sources.py` (capture's `imucam.sample` / `frame.depth`; the tracker
     also VIO's `frame.tracks` / `frame.inliers`; the SLAM map VIO's `keyframe` + SLAM's
     `slam.map`).
-- **Calibration** — *Gyroscope Bias* and *Accelerometer (6-position)*, fed by
-  capture's **raw** `imu.raw`. Because capture (not the UI) owns the device, a
-  saved calibration is keyed per device (`device_id` from the calib bundle) and
-  **takes effect on the next capture start**, not live mid-run.
+- **Calibration** — first ***Calibration status…*** (the ONE place: a row per
+  calibration with a ✓/✗ badge + detail + an *Open wizard* button), then the three
+  wizards *Gyroscope Bias*, *Accelerometer (6-position)*, and *Camera (stereo)
+  calibration…*. The IMU wizards are fed by capture's **raw** `imu.raw`. Because
+  capture (not the UI) owns the device, a saved calibration is keyed per device
+  (`device_id` from the calib bundle) and **takes effect on the next capture
+  start**, not live mid-run. On launch the UI queries the unified
+  `calibration_status(dev_id)` (a small **cv2/depthai-free** API in
+  `imu_camera/mathlib/device/calib_status.py`): if anything is missing it shows a
+  **non-blocking** nag — a status-bar message naming the missing items + the
+  accuracy risk, plus a persistent clickable **"⚠ CALIB INCOMPLETE"** toolbar
+  indicator that opens the status dialog; when all three are done it just confirms
+  "calibration OK" (no nag, no modal).
 
 ## VIO algorithm notes
 
@@ -540,7 +552,82 @@ README lists its own; the headline gates:
 
 # comms byte-identical across copies (build caches excluded)
 diff -r -x '__pycache__' -x '*.pyc' -x '*.nbc' -x '*.nbi' vio/comms imu_camera/comms
+
+# calibration pre-flight / CI gate (offline; nonzero exit on FAIL)
+.venv/bin/python -m imu_camera.tools.calib_check \
+    --session sessions/gold/lab_loop_30s                        # validate a session's calib
+.venv/bin/python -m imu_camera.tests.calib_check_selftest       # calib-check gate (good + injected faults)
+
+# stereo camera-calibration wizard (offline; no device)
+.venv/bin/python -m ui.tests.checkerboard_selftest             # board generator + cv2 detection oracle
+.venv/bin/python -m ui.tests.calib_solve_selftest             # detect/collector/solve/writer + calib_check
+.venv/bin/python -m ui.tests.camera_calib_dialog_selftest     # offscreen wizard end-to-end (synthetic stream)
+
+# unified calibration status + startup nag (offline; no device)
+.venv/bin/python -m imu_camera.tests.calib_status_selftest     # status API: all/none/partial combos (cache-safe)
+QT_QPA_PLATFORM=offscreen .venv/bin/python -m ui.tests.calib_status_dialog_selftest  # status dialog rows + re-query
+QT_QPA_PLATFORM=offscreen .venv/bin/python -m ui.tests.calib_nag_selftest            # startup nag indicator + click
 ```
+
+The calib check (`imu_camera/tools/calib_check.py`, see
+[imu_camera/tools/README.md](imu_camera/tools/README.md)) reuses the live loader
+(`StereoCalib.from_json`), so it validates the exact object VIO/depth consume; it
+touches no runtime path. Add `--strict` to also fail on WARN.
+
+## Camera calibration
+
+On live capture the pipeline uses the **OAK-D factory calibration by default** — it
+is the trusted metrology reference, so factory is the intended default, not an error.
+To run on **your own** saved stereo calib instead, start capture with
+**`--use-camera-calib`**: it loads the per-device saved calib and **overrides** the
+factory `K`/`StereoCalib` (logging `using SAVED camera calibration … factory calib
+overridden`). If you pass `--use-camera-calib` but nothing is saved for the device, it
+prints one warning (`asked for user camera calib … but none saved … using factory;
+run the Camera (stereo) calibration wizard`) and falls back to factory. The wizard
+solves both intrinsics + distortion and the LEFT→RIGHT extrinsic from checkerboard
+views, **saves the result for this device** (applied only when you opt in with
+`--use-camera-calib`), and also exports a `calib.json` the live loader
+(`StereoCalib.from_json`) consumes unchanged (for replay / sharing). The saved calib
+is keyed by the abstract device id, mirroring the per-device IMU calibration; the
+replay/oracle path is untouched (it reads its calib from the recorded session, so
+byte-parity stays gap=0). Because factory is a valid default, the unified calibration
+status treats the camera row as **informational** (never a ✗ / "missing" item) — the
+startup nag only fires for an uncalibrated gyro/accel, not for an empty camera store.
+
+Operator flow:
+
+1. **Generate the board** — `.venv/bin/python -m ui.mathlib.calib.checkerboard`
+   (`--cols/--rows` = INNER corners, not squares; `--square-mm`/`--dpi` for print,
+   `--show` to display it fullscreen). Print at **100%** ("fit to page" OFF), or
+   display it on a **second** monitor.
+2. **Open the wizard** — *Calibration → Camera (stereo) calibration…* in the UI menu
+   (needs the live pipeline up so capture is publishing). Enter the board's inner
+   `cols`/`rows` and the **real** square size in mm.
+3. **Capture** — press START and sweep the board across both cameras: near/far, corner
+   to corner, and genuinely **TILTED** (not flat-on). The wizard accepts only diverse
+   views and will not finish until both the count (~15) **and** tilt-coverage gates
+   pass ("tilt the board more" until they do). If the live preview never appears, the
+   stereo source's **no-frame watchdog** surfaces a clear status (e.g. *"connected to
+   capture … but no stereo frames arrived … is capture running and producing a stereo
+   pair?"*) within ~5 s instead of hanging on the placeholder — check the launcher
+   terminal, where `ui.modules.ipc_sources` logs each stage (rings attached, subscriber
+   connected, first packet, watchdog).
+4. **Review + Save** — the off-thread solve reports per-camera + stereo reprojection
+   RMS, the baseline (≈75 mm for an OAK-D), and a `calib_check` **PASS/WARN/FAIL**
+   verdict. Save **stores the calib for this device** (the live pipeline uses FACTORY
+   calib by default; run with `--use-camera-calib` to apply this saved one) **and**
+   exports a `calib.json` for replay/sharing — warning first if the verdict is not PASS.
+
+> ⚠️ **Square size = the REAL size.** A printed board at 100% really is `--square-mm`
+> wide; on a **screen** the px/DPI figure is meaningless (it depends on the monitor's
+> pixel pitch) — **measure one displayed square with a ruler** and enter that mm value.
+> A wrong square size silently scales the whole calibration (and the baseline).
+
+The capture process owns the device, so a saved calibration takes effect on the
+**next capture start** (like the IMU wizards), not live mid-run. The store lives at
+`.cache/camera_calib.json` (gitignored), keyed by device id — multiple cameras never
+clobber each other, and `imu_camera/mathlib/device/camera_calib_store.py`
+(`save_camera_calib` / `load_camera_calib`) is the only thing that reads/writes it.
 
 ## Status
 
@@ -574,7 +661,18 @@ diff -r -x '__pycache__' -x '*.pyc' -x '*.nbc' -x '*.nbi' vio/comms imu_camera/c
       `pose.inertial_dr` — RED `⚠ TRACKING LOST` (no inertial fallback) vs AMBER
       `⚠ VISION LOST · INERTIAL DR` when the `--tight` IMU is still dead-reckoning
       (latches after 5 consecutive lost poses; clears on the first OK pose)
-- [ ] Calibration check tool
+- [x] Calibration check tool (`imu_camera/tools/calib_check.py`): offline CLI that
+      validates a session's parsed `StereoCalib` (intrinsics, stereo + IMU↔cam
+      extrinsics) against physical sanity bands and the recorded frames; nonzero
+      exit on any FAIL (`--strict` also fails on WARN) → a pre-run / CI gate
+- [x] Stereo camera-calibration wizard: a checkerboard generator
+      (`ui/mathlib/calib/checkerboard.py` + `python -m ui.mathlib.calib.checkerboard`)
+      and a UI wizard ("Camera (stereo) calibration…", `ui/qt/camera_calib_dialog.py`)
+      that captures diverse + tilted stereo views off capture's RAW `imucam.sample`
+      pair, solves K_l/K_r + distortion + the `T_left_right` extrinsic
+      (`ui/mathlib/calib`), and writes a reader-compatible `calib.json` with a live
+      `calib_check` PASS/WARN/FAIL verdict — this *re-derives* a calibration (the
+      check tool above only *validates* one). cv2 stays lazy → flight path cv2-free
 - [ ] Port to RPi5
 - [ ] `skyslam` Python package (replace Basalt + RTABMap)
 
