@@ -34,7 +34,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from skymath import (                                            # noqa: E402
+from sky.math import (                                            # noqa: E402
     se3_adjoint, se3_exp, se3_inv, se3_log_robust as se3_log, so3_exp,
 )
 from slam.mathlib.loop.posegraph import PoseGraph                # noqa: E402

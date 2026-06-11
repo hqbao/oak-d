@@ -39,7 +39,7 @@ import numpy as np
 from imu_camera.comms import Step, topics
 from imu_camera.comms.messages import DepthFrame, ImuCamPacket
 from imu_camera.comms.runtime import NUMBA_PARALLEL_LOCK
-from imu_camera.mathlib.stereo.stereo import SGMStereoMatcher
+from sky.depth.stereo import SGMStereoMatcher
 
 
 def _block_median_valid(depth: np.ndarray, out_h: int, out_w: int) -> np.ndarray:

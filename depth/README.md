@@ -27,7 +27,7 @@ imu_camera.main ──(oak.capture: cam.sync raw L/R + calib.bundle)──▶ de
 | Package | Role | Source |
 |---------|------|--------|
 | `depth/comms/` | the **FROZEN** vendored comms contract | copied **bit-identically** from `imu_camera/comms` |
-| `depth/mathlib/stereo/` | the SGM matcher + rectifiers depth **OWNS** (the source of truth) | the canonical copy; `imu_camera/mathlib/stereo` vendors it |
+| `sky/depth/stereo.py` | the SGM matcher + rectifiers (shared, **one canonical copy**) | the top-level `sky.depth` library; imported by both `depth` and `imu_camera` |
 | `depth/io/` | recorded-session reading (used **only** for the full stereo calibration) | re-rooted copy of `imu_camera/io` |
 | `depth/modules/` | the `compute_depth` + `publish_depth` steps | re-rooted copy of `imu_camera/modules/{compute_depth,publish_depth}.py` |
 | `depth/main.py` | the standalone depth process | new (mirrors `imu_camera.modules.pipeline` wiring + `vio.main` IPC topology) |
@@ -45,15 +45,16 @@ Public API depth uses: `LocalPubSub`, `IPCPubSub(role="server"|"client")`,
 `IPCPublisher`, `IPCSubscriber`, `Module`, `Step`, `RingRegistry`, `topics`,
 `messages.{DepthFrame,CamSync,END}`, `converters`, and `wire.WireCalibBundle`.
 
-### `depth/mathlib/stereo/` — the source of truth, kept in lock-step
+### `sky.depth.stereo` — the shared canonical SGM math
 
-`depth/mathlib/stereo` is the **canonical** SGM math (numpy + numba, fully
-self-contained — no top-level cv2 / project imports). A gate runs `diff -r
---exclude=__pycache__ depth/mathlib/stereo imu_camera/mathlib/stereo`; the only
-permitted delta is the three docstring lines that name the host project's
-`io.reader.StereoCalib` (`depth.` vs `imu_camera.`). Every line of MATH is
-byte-identical, so the depth the standalone process runs is **numerically
-identical** to the depth the capture process computes inline (proven —
+The SGM matcher + rectifiers live in the top-level shared library at
+`sky/depth/stereo.py` (numpy + numba, fully self-contained — no top-level cv2 /
+project imports). It used to be vendored byte-identically in both
+`depth/mathlib/stereo` and `imu_camera/mathlib/stereo` under a `diff -r`
+lock-step gate; it has since been consolidated into the single shared
+`sky.depth.stereo`, so that gate is **retired** — there is one copy, imported by
+both projects. The standalone depth process therefore runs the **numerically
+identical** matcher the capture process computes inline (proven —
 `depth.tests.stereo_sgm_selftest` reports the same numbers as
 `imu_camera.tests.stereo_sgm_selftest` line-for-line).
 
@@ -182,7 +183,6 @@ production depth output, and the capture hook leaves `sgm_disparity` unchanged.
 
 ```bash
 diff -r --exclude=__pycache__ depth/comms imu_camera/comms          # must be empty
-diff -r --exclude=__pycache__ depth/mathlib/stereo imu_camera/mathlib/stereo  # must be empty
 .venv/bin/python -c "import depth.main, depth.modules.compute_depth"  # imports OK
 .venv/bin/python -m depth.tests.stereo_sgm_selftest                  # byte-parity vs ours stereo
 ```

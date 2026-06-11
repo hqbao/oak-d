@@ -36,7 +36,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from imu_camera.io.reader import SessionReader                       # noqa: E402
-from imu_camera.mathlib.stereo.stereo import (                       # noqa: E402
+from sky.depth.stereo import (                       # noqa: E402
     SGMConfig, SGMStereoMatcher,
 )
 from imu_camera.tests.stereo_sgm_selftest import (                   # noqa: E402
@@ -148,7 +148,7 @@ def _edge_cases() -> bool:
     """Degenerate-frame robustness of the denoise filter (no replay needed)."""
     from dataclasses import replace as _replace
 
-    from imu_camera.mathlib.stereo.stereo import (
+    from sky.depth.stereo import (
         SGMConfig as _Cfg, _denoise_disparity)
     base = _Cfg.live()
     ok = True

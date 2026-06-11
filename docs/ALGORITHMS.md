@@ -295,7 +295,7 @@ grid (the tracking grid the frontend must use, or depth is sampled at the wrong 
 **I/O.** In: `StereoCalib` (both K, both dist, left→right `T`); per frame a raw image.
 Out: precomputed `map_u, map_v (H,W) float32`; per frame a rectified `float32 (H,W)`.
 
-**Code.** `mathlib/stereo/stereo.py:383` (rotations), `:401` (distortion), `:430`
+**Code.** `sky/depth/stereo.py:383` (rotations), `:401` (distortion), `:430`
 (remap), `:456` (RightRectifier), `:507` (LeftRectifier), `:949` (rectified-left+depth).
 
 **How to see it.** *New view needed.* Overlaid **horizontal epipolar lines** on a
@@ -360,7 +360,7 @@ Out: `dense_disparity (H,W)` float (NaN=invalid) → `dense_depth (H,W)` float32
 pixels. The ToF-sim path (`tof_downsample.py:92`) computes full-res depth then
 block-medians valid pixels to a 54×42 grid.
 
-**Code.** `mathlib/stereo/stereo.py:743` (orchestrator); census `:569`; cost volume
+**Code.** `sky/depth/stereo.py:743` (orchestrator); census `:569`; cost volume
 `:589`; aggregation `:605` + starts `:657`; WTA/subpixel/uniqueness/LR `:673`; speckle
 `:794`; downscale `:746,860,868`; depth `:939`; `SGMConfig` `:288`, live preset `:309`;
 `compute_depth.py:25`; `resolution_build.py:18`.
@@ -386,9 +386,10 @@ The full-frame depth *output* already exists and is well-handled: the triplet de
 (`ui/viz/depth_render.py:colorize_depth`, line 71 — fixed 0.3–8.0 m khaki ramp, black =
 invalid).
 
-**Cross-cutting.** `depth/mathlib/stereo/stereo.py` ≡ `imu_camera`'s (docstring paths
-only); `depth/modules/compute_depth.py` + `publish_depth.py` are the same two steps
-standalone. Honesty flags: accel prediction in the inertial filter is OFF on purpose
+**Cross-cutting.** the SGM matcher is now the single shared `sky/depth/stereo.py`
+(imported by both `depth` and `imu_camera` — the old per-project copies + their
+`diff -r` lock-step gate are retired); `depth/modules/compute_depth.py` +
+`publish_depth.py` are the same two steps standalone. Honesty flags: accel prediction in the inertial filter is OFF on purpose
 (un-calibrated accel adds drift); the gyro preintegration prior is currently a no-op seed
 (vision PnP already converges) kept for degraded-vision robustness.
 

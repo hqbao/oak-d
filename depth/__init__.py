@@ -1,12 +1,11 @@
-"""``depth`` -- the stereo-depth PROJECT (SOURCE-OF-TRUTH for the SGM math).
+"""``depth`` -- the stereo-depth PROJECT (the two depth steps + standalone harness).
 
-depth owns the from-scratch SGM dense-stereo matcher + the two depth steps
-(``compute_depth`` -> ``publish_depth``). It is the canonical copy of that math:
-the capture project (:mod:`imu_camera`) vendors a BYTE-IDENTICAL copy because
-depth runs INLINE on the capture process's ``imu_cam`` thread at runtime today.
-A ``diff -r`` gate keeps the two copies in lock-step, so this tree is the place
-the stereo math is edited and the place a future "depth-as-its-own-process"
-promotion would graduate from.
+depth runs the from-scratch SGM dense-stereo matcher (now the shared
+:mod:`sky.depth.stereo`) through the two depth steps (``compute_depth`` ->
+``publish_depth``). The stereo math used to be vendored here and copied
+byte-identically into ``imu_camera`` under a ``diff -r`` lock-step gate; it has
+since been consolidated into the single shared :mod:`sky.depth.stereo`, so that
+gate is retired -- there is one copy, edited in one place.
 
 This package is a STANDALONE, independently-runnable source tree (it is NOT
 spawned by the launcher -- depth runs inline in imu_camera in the live
@@ -19,8 +18,8 @@ Layers
 ------
 * :mod:`depth.comms` -- the FROZEN vendored comms contract (bit-identical across
   all five split projects); this project only consumes its public API.
-* :mod:`depth.mathlib.stereo` -- the SGM stereo math this project OWNS (the
-  source of truth; imu_camera vendors a byte-identical copy).
+* :mod:`sky.depth.stereo` -- the shared SGM stereo math (one canonical copy,
+  imported by both this project and imu_camera).
 * :mod:`depth.io` -- recorded-session reading, used ONLY to read the full
   :class:`~depth.io.reader.StereoCalib` the matcher's rectifiers need (the wire
   ``calib.bundle`` carries only the rectified-left intrinsic, not the per-camera

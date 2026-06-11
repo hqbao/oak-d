@@ -33,12 +33,12 @@ from __future__ import annotations
 
 import numpy as np
 
-# SO(3) primitives live in the shared ``skymath`` kernel. The IMU module uses the
+# SO(3) primitives live in the shared ``sky.math`` kernel. The IMU module uses the
 # "unit" exponential (exact identity at zero); numerics are byte-identical to the
 # former local copies.
-from skymath import skew as _skew
-from skymath import so3_exp_unit as so3_exp
-from skymath import so3_right_jacobian
+from sky.math import skew as _skew
+from sky.math import so3_exp_unit as so3_exp
+from sky.math import so3_right_jacobian
 
 
 class ImuPreintegration:

@@ -14,9 +14,9 @@ oak-d/
                 calibration, computes dense depth (SGM, INLINE). main.py = the
                 capture process.
                 publishes: cam.sync, imu.raw, imucam.sample, frame.depth, calib.bundle
-  depth/        SGM stereo SOURCE-OF-TRUTH + the 2 depth steps. imu_camera vendors
-                a byte-identical copy and runs depth inline; depth/ is a standalone
-                depth-as-a-process harness (cam.sync -> frame.depth) + the tree a
+  depth/        the 2 depth steps + a standalone depth-as-a-process harness
+                (cam.sync -> frame.depth). The SGM stereo math is the shared
+                sky.depth.stereo (imu_camera runs the same matcher inline); depth/ a
                 future 5th process graduates from.
   vio/          KLT frontend + RGB-D PnP (+ gyro fusion) + windowed bundle
                 adjustment. main.py = the VIO process.
@@ -239,8 +239,9 @@ python3.13 -m venv .venv && .venv/bin/pip install -r requirements.txt
 
 Each project is a standalone Python package with its own `main.py` (the process),
 `comms/` (the vendored contract), `mathlib/` (the algorithm code it owns), and
-`modules/` (its reactive pipeline). The shared Lie-group primitives those algorithms
-call live once in the top-level [`skymath/`](#the-skymath-kernel) package. The data
+`modules/` (its reactive pipeline). The shared algorithm code those processes
+call lives once in the top-level [`sky/`](#the-sky-shared-library) library
+(`sky.math` primitives + `sky.depth` SGM stereo). The data
 flow between processes is fixed by the topic strings on the `comms` bus:
 
 ```
@@ -298,30 +299,41 @@ independently portable.
 `comms/` is the merge + rename of the pre-split runtime layer. **The word "flow"
 is gone**; the topic strings are unchanged (the frozen contract).
 
-## The `skymath/` kernel
+## The `sky/` shared library
 
-The small Lie-group / linear-algebra **primitives** (`so3_exp`, `so3_log`,
-`so3_right_jacobian`, `skew`, `se3_exp`, `se3_log`, `se3_inv`, `se3_adjoint`,
-`se3_from_Rp`) used to be copy-pasted across `imu_camera/`, `vio/` and
-`slam/`'s `mathlib/`. They now live once in the top-level **`skymath/`** package
-(`skymath/so3.py`, `skymath/se3.py`) and every project imports the single canonical
-copy. This is **Step 1 of extracting `libskymath`** (Step 2 = move to its own repo).
+`sky/` is the ONE shared in-tree algorithm library (importable as `import sky`).
+Duplicated algorithm code is being consolidated into it one domain at a time
+(see `docs/CONSOLIDATION_PLAN.md`), each step gated on the byte-parity oracle
+staying `gap = 0`. Unlike `comms/` (which is *vendored* per project because it is
+the wire contract), `sky/` is a single shared package and is the Python precursor
+to the C `libsky*` layering. Sub-packages so far:
 
-Unlike `comms/` (which is *vendored* per project because it is the wire contract),
-`skymath/` is a *shared* in-tree package: pure-`numpy`, no cv2 / numba / PyQt /
-project imports, so `import skymath` stays cheap and the package is portable as-is.
-The merge is **byte-identical** — the byte-parity oracle stays `gap = 0`. Where the
-old copies had *genuine* numerical drift in their near-singularity handling, the
-variants are kept under distinct names rather than silently unified:
+- **`sky.math`** (`sky/math/so3.py`, `sky/math/se3.py`) — the Lie-group /
+  linear-algebra **primitives** (`so3_exp`, `so3_log`, `so3_right_jacobian`,
+  `skew`, `se3_exp`, `se3_log`, `se3_inv`, `se3_adjoint`, `se3_from_Rp`) that used
+  to be copy-pasted across `imu_camera/`, `vio/` and `slam/`'s `mathlib/`. This
+  was the standalone `skymath/` package, re-homed under `sky` so there is ONE
+  common library. Pure-`numpy`. Where the old copies had *genuine* numerical
+  drift in their near-singularity handling, the variants are kept under distinct
+  names rather than silently unified:
+  - `so3_exp` (BA convention, `I + skew` at zero) vs `so3_exp_unit` (IMU
+    convention, exact `I` at zero) — identical for any `‖φ‖ ≥ 1e-12`.
+  - `so3_log` / `se3_log` (bundle/IMU) vs `so3_log_robust` / `se3_log_robust`
+    (pose-graph: sign-robust near a half-turn + closed-form `V⁻¹`).
+- **`sky.depth`** (`sky/depth/stereo.py`) — the from-scratch SGM dense-stereo
+  matcher + rectifiers. This is the ONE canonical copy (numpy + numba): it used to
+  be vendored byte-identically in both `imu_camera/mathlib/stereo` and
+  `depth/mathlib/stereo` under a `diff -r` lock-step gate; consolidating to a
+  single import here retired that gate.
 
-- `so3_exp` (BA convention, `I + skew` at zero) vs `so3_exp_unit` (IMU convention,
-  exact `I` at zero) — identical for any `‖φ‖ ≥ 1e-12`.
-- `so3_log` / `se3_log` (bundle/IMU) vs `so3_log_robust` / `se3_log_robust`
-  (pose-graph: sign-robust near a half-turn + closed-form `V⁻¹`).
+**Movability rule (enforced).** `sky.*` may import only `numpy` (+ `cv2` / `numba`
+where the moved algorithm already used them) and must NEVER import any oak-d
+process / `comms` / `io` module. `sky.assert_import_clean()` checks this after a
+bare `import sky.*` (run by the consolidation self-tests), keeping the library a
+leaf so it stays portable as-is.
 
-The algorithms that *call* these primitives (SGM, KLT, PnP, windowed BA, IMU
-preintegration, the SE(3) pose graph) stay where they live in each project's
-`mathlib/`; only the primitives moved.
+The algorithms not yet consolidated (KLT, PnP, windowed BA, IMU preintegration,
+the SE(3) pose graph) stay where they live in each project's `mathlib/` for now.
 
 | New name | Was | Role |
 |---|---|---|

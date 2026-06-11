@@ -1,8 +1,8 @@
 """depth process: subscribe to raw stereo, run SGM, publish metric depth.
 
 This is the STANDALONE depth-as-a-process harness. In the live topology depth
-runs INLINE on the capture process's ``imu_cam`` thread (capture vendors a
-byte-identical copy of :mod:`depth.mathlib.stereo`), so the launcher never spawns
+runs INLINE on the capture process's ``imu_cam`` thread (both share the one
+canonical SGM matcher in :mod:`sky.depth.stereo`), so the launcher never spawns
 this process. ``depth.main`` exists to prove the depth source tree runs as its
 OWN independent project -- it is the promotable "depth as its own process".
 
@@ -56,7 +56,7 @@ from depth.comms.messages import END                               # noqa: E402
 from depth.comms.ring_registry import default_capture_specs        # noqa: E402
 from depth.comms.wire import WireCalibBundle                       # noqa: E402
 from depth.io.reader import SessionReader                          # noqa: E402
-from depth.mathlib.stereo.stereo import SGMConfig, SGMStereoMatcher  # noqa: E402
+from sky.depth.stereo import SGMConfig, SGMStereoMatcher  # noqa: E402
 from depth.modules.compute_depth import ComputeDepthStep           # noqa: E402
 from depth.modules.publish_depth import PublishDepthStep           # noqa: E402
 

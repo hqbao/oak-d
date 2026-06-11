@@ -49,7 +49,7 @@ import cv2  # noqa: E402
 from verification.oracle_replay import load_basalt_positions, umeyama  # noqa: E402
 
 from imu_camera.io.reader import SessionReader  # noqa: E402
-from imu_camera.mathlib.stereo.stereo import SGMConfig, SGMStereoMatcher  # noqa: E402
+from sky.depth.stereo import SGMConfig, SGMStereoMatcher  # noqa: E402
 from imu_camera.modules.tof_downsample import _block_median_valid  # noqa: E402
 from imu_camera.modules.pipeline import TOF_W, TOF_H  # noqa: E402
 

@@ -1,4 +1,8 @@
-"""``skymath`` -- the in-tree pure-math kernel shared across the oak-d projects.
+"""``sky.math`` -- the in-tree pure-math kernel shared across the oak-d projects.
+
+This is the math sub-package of the shared :mod:`sky` library (it was the
+standalone ``skymath`` package, re-homed under ``sky`` so the project has ONE
+common library rather than several siblings).
 
 This package holds ONLY the small Lie-group / linear-algebra *primitives* that
 were previously copy-pasted across ``imu_camera/``, ``vio/`` and ``slam/``
@@ -6,10 +10,11 @@ were previously copy-pasted across ``imu_camera/``, ``vio/`` and ``slam/``
 the IMU preintegration body, the pose-graph solver, ...) stay where they live;
 only the primitives moved here, so every project now imports one canonical copy.
 
-Design rules (Step 1 of "extract libskymath"; Step 2 = move to its own repo):
+Design rules (the Lie-group kernel of the ``sky.*`` consolidation; maps onto the
+C ``libskymath`` layer in ``docs/C_PORT_PLAN.md``):
 
 * **Kernel only.** No project glue, no I/O, no comms, no cv2 / numba / heavy
-  deps -- a bare ``import skymath`` pulls in nothing but ``numpy``.
+  deps -- a bare ``import sky.math`` pulls in nothing but ``numpy``.
 * **Byte-identical numerics.** Every function reproduces, bit-for-bit, the
   behaviour of the local ``def`` it replaced; the byte-parity oracle stays
   ``gap = 0``. Where the old copies had *genuine* numerical drift (different

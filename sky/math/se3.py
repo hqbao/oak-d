@@ -5,16 +5,16 @@ first, rotation part second), with a left perturbation ``T <- Exp(xi) @ T`` for
 the bundle/IMU code and a right perturbation for the pose graph -- the exp/log
 maps below are convention-neutral (they are exact inverses of each other).
 
-As with :mod:`skymath.so3`, two variants are kept on purpose because the old
+As with :mod:`sky.math.so3`, two variants are kept on purpose because the old
 copies had genuine numerical drift at the singularities:
 
 * :func:`se3_exp` vs :func:`se3_exp_unit` -- differ only through their rotation
-  block (:func:`~skymath.so3.so3_exp` vs :func:`~skymath.so3.so3_exp_unit`),
+  block (:func:`~sky.math.so3.so3_exp` vs :func:`~sky.math.so3.so3_exp_unit`),
   i.e. only for an essentially-never-hit ``||phi|| < 1e-12`` twist.
 * :func:`se3_log` vs :func:`se3_log_robust` -- :func:`se3_log` recovers ``rho``
   with a linear ``solve`` against ``V`` (bundle convention); :func:`se3_log_robust`
   uses the closed-form ``V^{-1}`` series and the near-pi-robust
-  :func:`~skymath.so3.so3_log_robust` (pose-graph convention). These differ at
+  :func:`~sky.math.so3.so3_log_robust` (pose-graph convention). These differ at
   the ~1e-12 level even for typical twists, so they are NOT interchangeable.
 """
 from __future__ import annotations
@@ -125,7 +125,7 @@ def se3_log_robust(T: np.ndarray) -> np.ndarray:
 
     Returns ``xi = [rho(3); phi(3)]`` (translation part first). Uses the
     closed-form inverse left-Jacobian series and the near-pi-robust
-    :func:`~skymath.so3.so3_log_robust`, so it stays well-conditioned for
+    :func:`~sky.math.so3.so3_log_robust`, so it stays well-conditioned for
     pose-graph edge residuals that momentarily approach a half-turn.
     """
     R = T[:3, :3]

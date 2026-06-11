@@ -5,7 +5,7 @@ steps are BYTE-IDENTICAL (modulo the project import prefix) to
 ``imu_camera/modules/{compute_depth,publish_depth}.py``:
 
 * :class:`~depth.modules.compute_depth.ComputeDepthStep` -- run the SGM matcher
-  (``depth.mathlib.stereo``) on a raw stereo pair and emit a
+  (``sky.depth.stereo``) on a raw stereo pair and emit a
   :class:`~depth.comms.messages.DepthFrame` (rectified-left + metric depth).
 * :class:`~depth.modules.publish_depth.PublishDepthStep` -- publish that frame on
   ``frame.depth``.

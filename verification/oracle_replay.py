@@ -47,13 +47,13 @@ import numpy as np
 
 # --- NEW-project math (the split projects), NOT ours.lib --------------------- #
 from imu_camera.io.reader import SessionReader
-from imu_camera.mathlib.stereo.stereo import SGMConfig, SGMStereoMatcher
+from sky.depth.stereo import SGMConfig, SGMStereoMatcher
 from vio.mathlib.imu.imu import GyroPreintegrator
 from vio.mathlib.odometry.odometry import OdometryConfig, RGBDVisualOdometry
 from vio.mathlib.backend.windowed import WindowedConfig, WindowedRGBDOdometry
 from vio.mathlib.backend.vio_window import WindowedVIORGBDOdometry
 from slam.mathlib.loop.slam import SlamConfig, SlamMap
-from skymath import se3_inv
+from sky.math import se3_inv
 
 
 # --------------------------------------------------------------------------- #

@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from skymath import so3_exp_unit as so3_exp
+from sky.math import so3_exp_unit as so3_exp
 
 
 def _reproj_err(R: np.ndarray, t: np.ndarray, obj: np.ndarray,

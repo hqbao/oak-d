@@ -39,7 +39,7 @@ import numpy as np
 # near a half-turn) for the scalar fallback inside :func:`_so3_log_batch`. The
 # rest of the solver is fully vectorised (the ``*_batch`` helpers below). Numerics
 # are byte-identical to the former local ``so3_log``.
-from skymath import so3_log_robust as so3_log
+from sky.math import so3_log_robust as so3_log
 
 
 # --------------------------------------------------------------------------- #

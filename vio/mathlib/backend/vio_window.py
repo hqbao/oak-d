@@ -45,8 +45,8 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from skymath import so3_exp_unit as so3_exp
-from skymath import so3_log
+from sky.math import so3_exp_unit as so3_exp
+from sky.math import so3_log
 
 from ..frontend.frontend import FrontendConfig, KLTFrontend
 from ..imu.imu import ImuPreintegration, preintegrate_imu

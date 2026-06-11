@@ -12,7 +12,7 @@ from __future__ import annotations
 from dataclasses import replace
 
 from imu_camera.comms.lib.config.resolution import ResolutionProfile
-from imu_camera.mathlib.stereo.stereo import SGMConfig
+from sky.depth.stereo import SGMConfig
 
 
 def sgm_config(res: ResolutionProfile, *, fast: bool) -> SGMConfig:

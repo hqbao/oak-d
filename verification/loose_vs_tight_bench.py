@@ -67,7 +67,7 @@ from verification.oracle_replay import (  # noqa: E402
 
 # The same math classes the live projects build. Imported, never edited.
 from imu_camera.io.reader import SessionReader  # noqa: E402
-from imu_camera.mathlib.stereo.stereo import (  # noqa: E402
+from sky.depth.stereo import (  # noqa: E402
     SGMConfig,
     SGMStereoMatcher,
 )

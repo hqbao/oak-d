@@ -177,7 +177,7 @@ rebuild starts from them:
 1. **Fully portable depth (no VPU / no `StereoDepth`).** The acquisition front-end
    taps the two **RAW** mono cameras and does everything itself: our own
    `LeftRectifier`/`RightRectifier` (library-free, ~1e-7 vs `cv2.stereoRectify`) →
-   our own dense **SGM** matcher (`depth/mathlib/stereo/stereo.py`, census + N-path
+   our own dense **SGM** matcher (`sky/depth/stereo.py`, census + N-path
    Hirschmüller, numba) → metric depth. The chip stereo engine is never used, so the
    front-end ports to any 2-camera + CPU target. (In the split this is the
    `imu_cam` module's `compute_depth` step, INLINE on capture.) **Grid invariant:**

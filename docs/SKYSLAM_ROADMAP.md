@@ -192,9 +192,10 @@ typedef struct {
 ### Phase 0 — Foundation: `libskymath` (1–2 days | 3–5 days)
 
 > **Step 1 (Python consolidation) is DONE**: the SO3/SE3 primitives now live once
-> in the in-tree top-level `skymath/` package (`skymath/so3.py`, `skymath/se3.py`),
-> imported by all projects (byte-parity oracle `gap = 0`). This C phase is **Step 2** —
-> port that single kernel verbatim and grow it with `vec/mat/quat/chol/lm`.
+> in the shared `sky.math` sub-package (`sky/math/so3.py`, `sky/math/se3.py` — the
+> former `skymath/`, re-homed under the one `sky/` library), imported by all
+> projects (byte-parity oracle `gap = 0`). This C phase is **Step 2** — port that
+> single kernel verbatim and grow it with `vec/mat/quat/chol/lm`.
 
 **Goal**: self-contained C99 math kernel, NEON-optimised, passing tests vs Eigen+Sophus.
 

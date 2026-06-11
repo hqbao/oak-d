@@ -3,8 +3,8 @@
 
 WHAT THIS TEACHES
 -----------------
-Our dense stereo depth is Hirschmueller Semi-Global Matching (``depth.mathlib.
-stereo.stereo.sgm_disparity``). For every pixel it builds two cost-vs-disparity
+Our dense stereo depth is Hirschmueller Semi-Global Matching
+(``sky.depth.stereo.sgm_disparity``). For every pixel it builds two cost-vs-disparity
 curves and picks the disparity that minimises the second one:
 
     C(d)  -- the RAW per-pixel matching cost: the census-Hamming distance between
@@ -82,7 +82,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import cv2  # noqa: E402  (approved dep; only used as an array/PNG backend here)
 
 from depth.io.reader import SessionReader                              # noqa: E402
-from depth.mathlib.stereo.stereo import (                             # noqa: E402
+from sky.depth.stereo import (                             # noqa: E402
     SGMConfig, SGMStereoMatcher,
 )
 

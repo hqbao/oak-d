@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Validate our SGM stereo depth against the OAK-D chip depth (the oracle).
 
-This is the regression guard for :mod:`imu_camera.mathlib.stereo.stereo`: it
+This is the regression guard for :mod:`sky.depth.stereo`: it
 proves our from-scratch SGM matcher agrees with the trusted reference (the chip's
 SGBM depth stored as ``*_D.raw16``) before the VIO trusts it. We do NOT use the
 chip depth in the production path -- only here, to measure.
@@ -35,7 +35,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from imu_camera.io.reader import SessionReader                       # noqa: E402
-from imu_camera.mathlib.stereo.stereo import (                       # noqa: E402
+from sky.depth.stereo import (                       # noqa: E402
     HAVE_NUMBA, SGMConfig, SGMStereoMatcher, StereoConfig, StereoMatcher,
 )
 

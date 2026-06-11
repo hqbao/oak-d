@@ -33,15 +33,15 @@ from __future__ import annotations
 
 import numpy as np
 
-# SO(3) primitives live in the shared ``skymath`` kernel. The IMU module uses the
+# SO(3) primitives live in the shared ``sky.math`` kernel. The IMU module uses the
 # "unit" exponential (exact identity at zero) -- re-exported here under the names
 # the odometry / PnP / windowed-BA importers expect (``so3_exp`` / ``so3_log`` /
 # ``so3_right_jacobian``). Numerics are byte-identical to the former local copies.
-from skymath import se3_exp_unit as _se3_exp
-from skymath import se3_log as _se3_log
-from skymath import skew as _skew
-from skymath import so3_exp_unit as so3_exp
-from skymath import so3_log, so3_right_jacobian
+from sky.math import se3_exp_unit as _se3_exp
+from sky.math import se3_log as _se3_log
+from sky.math import skew as _skew
+from sky.math import so3_exp_unit as so3_exp
+from sky.math import so3_log, so3_right_jacobian
 
 
 class ImuNoise:

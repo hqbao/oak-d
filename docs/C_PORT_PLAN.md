@@ -42,10 +42,10 @@ decodes real msgs) — proves wire parity end-to-end, de-risks everything week 1
 ## Module/layer order (mapped to real files) + per-process migration
 ```
 libskycomms (FIRST)  imu_camera/comms/*           ← gates every C process
-libskymath           in-tree `skymath/` (SO3/SE3 kernel) consolidated — Step 1 DONE;
+libskymath           in-tree `sky/math/` (SO3/SE3 kernel) consolidated — Step 1 DONE;
                      C port = Step 2 (vec/mat/quat/Cholesky/LM grow here later)
 libskysensors        imu_camera/mathlib/device/live_calib.py + imu/*calib*
-libskydepth (SGM)    imu_camera/mathlib/stereo/stereo.py
+libskydepth (SGM)    in-tree `sky/depth/stereo.py` (shared; consolidated — Step 1 DONE)
 libskyfront          vio/mathlib/frontend/{klt,corners,frontend}.py + odometry/pnp.py
 libskyvio (LOOSE)    vio/mathlib/{imu/imu.py loose, odometry/odometry.py, backend/*}
 libskyslam           slam/mathlib/loop/{orb,loopclosure,posegraph,slam}.py

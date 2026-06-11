@@ -29,12 +29,12 @@ from dataclasses import dataclass
 
 import numpy as np
 
-# Lie-group helpers (SE3 / SO3) -- sourced from the shared ``skymath`` kernel.
+# Lie-group helpers (SE3 / SO3) -- sourced from the shared ``sky.math`` kernel.
 # Bundle adjustment uses the BA-convention exponential (first-order ``I + skew``
 # at zero) and the ``solve``-based ``se3_log``; ``se3_log`` / ``skew`` are also
 # re-exported for :mod:`~vio.mathlib.backend.marginalize`. Numerics are
 # byte-identical to the former local copies.
-from skymath import se3_exp, se3_log, skew
+from sky.math import se3_exp, se3_log, skew
 
 
 # --------------------------------------------------------------------------- #

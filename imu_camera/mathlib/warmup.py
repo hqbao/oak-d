@@ -29,7 +29,7 @@ def warmup_sgm(sgm_cfg=None) -> bool:
     one exactly as before).
     """
     try:
-        from imu_camera.mathlib.stereo.stereo import SGMConfig, sgm_disparity
+        from sky.depth.stereo import SGMConfig, sgm_disparity
         sgm = sgm_cfg or SGMConfig()
         # A small textured pair so the matcher actually runs its inner loops (a
         # flat image would short-circuit before the kernel).

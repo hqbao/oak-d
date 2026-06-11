@@ -98,9 +98,9 @@ import logging
 
 import numpy as np
 
-from skymath import se3_from_Rp as _se3
-from skymath import se3_inv as _se3_inv
-from skymath import so3_log
+from sky.math import se3_from_Rp as _se3
+from sky.math import se3_inv as _se3_inv
+from sky.math import so3_log
 
 from vio.comms import Step as StepBase
 from vio.mathlib.backend.vio_window import T_cw_to_body_world, body_world_to_T_cw

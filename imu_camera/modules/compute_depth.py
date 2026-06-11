@@ -6,7 +6,7 @@ import numpy as np
 from imu_camera.comms import Step
 from imu_camera.comms.messages import DepthFrame, ImuCamPacket
 from imu_camera.comms.runtime import NUMBA_PARALLEL_LOCK
-from imu_camera.mathlib.stereo.stereo import SGMStereoMatcher
+from sky.depth.stereo import SGMStereoMatcher
 
 
 class ComputeDepthStep(Step):

@@ -25,8 +25,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from skymath import so3_exp_unit as so3_exp
-from skymath import so3_log
+from sky.math import so3_exp_unit as so3_exp
+from sky.math import so3_log
 
 from ..frontend.frontend import FrontendConfig, KLTFrontend
 from .pnp import solve_pnp_ransac

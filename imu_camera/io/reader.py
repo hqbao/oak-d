@@ -19,7 +19,7 @@ so the whole pipeline can be developed and validated without an OAK-D attached.
 Note: the recorder saves ``stereo.syncedRight`` as ``*_R.png``, which is the
 right frame *synced* to the left but **not** rectified (only ``rectifiedLeft`` and
 ``depth`` are rectified by the chip). To block-match it against the rectified
-left you must rectify it first -- see :class:`imu_camera.mathlib.stereo.stereo.RightRectifier`.
+left you must rectify it first -- see :class:`sky.depth.stereo.RightRectifier`.
 
 Conventions
 -----------
