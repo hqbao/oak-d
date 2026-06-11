@@ -74,6 +74,8 @@ inside ``RunBA``.
 """
 from __future__ import annotations
 
+import logging
+
 import numpy as np
 
 from vio.comms import Module, LocalPubSub, topics
@@ -100,6 +102,8 @@ from .publish_vo import PublishVo
 from .emit_keyframe import EmitKeyframe
 from .run_ba import RunBA
 from .publish_refined import PublishRefined
+
+LOG = logging.getLogger("vio.pipeline")
 
 
 class OdometryModule(Module):
@@ -223,16 +227,26 @@ class BackendModule(Module):
     def __init__(self, bus: LocalPubSub, K: np.ndarray,
                  window: int = 6, iters: int = 5,
                  latest_only: bool = False, worker: bool = False,
-                 tight: bool = False) -> None:
+                 tight: bool = False, stabilize_velocity: bool = False) -> None:
         super().__init__("backend", bus, latest_only=latest_only)
         if tight:
             # Tight backend: enable the covariance-correct IMU weight (Phase 1's
             # opt-in flag) on a copy of WindowedVIOConfig's validated defaults.
-            # ``imu_info_weight`` is the only override -- everything else (window,
-            # lock_tilt, tight vel/pos sigmas, kf_every) keeps the values the
-            # vio_ba_selftest / vio oracle entries were tuned against.
+            # ``imu_info_weight`` is the only baseline override -- everything else
+            # (window, lock_tilt, tight vel/pos sigmas, kf_every) keeps the values
+            # the vio_ba_selftest / vio oracle entries were tuned against.
             vio_cfg = WindowedVIOConfig()
             vio_cfg.vio.imu_info_weight = True
+            # Phase-4 velocity regularisation (opt-in, LIVE --tight only): the
+            # single ``stabilize_velocity`` knob makes ``run_ba`` flip on BOTH
+            # the CV smoothness prior and the excitation-gated ZUPT for every
+            # solve, curbing the 54x42 / shake window-velocity divergence. Left
+            # OFF by default so the tight-without-flag path -- and the oracle --
+            # stay byte-identical; only the operator's --stabilize-velocity sets it.
+            if stabilize_velocity:
+                vio_cfg.stabilize_velocity = True
+                LOG.info("vio: tight velocity-stabilize ON "
+                         "(CV prior + gated ZUPT)")
             self.engine = make_vi_engine(K, vio_cfg, worker=worker)
         else:
             cfg = WindowedConfig(window=window, ba=BAConfig(max_iters=iters))

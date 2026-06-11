@@ -205,6 +205,42 @@ def build_capture_args(args, cap_ep: str) -> list[str]:
     return capture_args
 
 
+def build_vio_args(args, cap_ep: str, vio_ep: str, slam_ep: str,
+                   use_worker: bool) -> list[str]:
+    """Build the ``vio.main`` argv from the parsed launcher ``args``.
+
+    Pure (no I/O, no spawning) so the flag-forwarding contract is unit-testable
+    without launching subprocesses -- the same discipline as ``build_capture_args``.
+
+    ``--tight`` selects the tight-coupled backend; only on that path do we wire the
+    ``--slam-endpoint`` (closed-loop SLAM->VIO feedback) and forward
+    ``--stabilize-velocity`` (Phase-4 velocity regularisation -- CV prior + gated
+    ZUPT). Both are OPT-IN and tight-only: ``--stabilize-velocity`` is appended ONLY
+    when ``args.tight AND args.stabilize_velocity``, so the loose path and the
+    tight-without-flag path are unchanged (the offline oracle stays byte-identical).
+    A ``--stabilize-velocity`` without ``--tight`` is dropped here (the caller warns).
+    """
+    vio_args: list[str] = ["--capture-endpoint", cap_ep, "--endpoint", vio_ep,
+                           "--kf-every", str(args.kf_every)]
+    if args.no_gyro:
+        vio_args += ["--no-gyro"]
+    if use_worker:
+        vio_args += ["--worker"]
+    if args.tight:
+        vio_args += ["--tight"]
+        # CLOSED-LOOP feedback (slam -> vio): give VIO the slam endpoint so its
+        # --tight live pose subscribes loop.correction and the SLAM pose-graph
+        # correction is fed back into the live pose (drift bounded on revisits).
+        # Only on the --tight path; the loose pipeline never wires it.
+        vio_args += ["--slam-endpoint", slam_ep]
+        # Phase-4 velocity regularisation: tight-only, opt-in. Forwarded ONLY when
+        # BOTH --tight AND --stabilize-velocity are set, so the default end-to-end
+        # path (and the oracle) never see it.
+        if args.stabilize_velocity:
+            vio_args += ["--stabilize-velocity"]
+    return vio_args
+
+
 # --------------------------------------------------------------------------- #
 def _spawn(py: str, mod: str, args: list[str], *, env: dict[str, str],
            name: str) -> subprocess.Popen:
@@ -282,6 +318,11 @@ def main() -> int:
                          "(joint visual + IMU window optimiser) instead of the "
                          "default loose windowed-BA backend. Forwarded to "
                          "vio.main --tight; loose stays the default.")
+    ap.add_argument("--stabilize-velocity", action="store_true",
+                    help="tight only: enable Phase-4 velocity regularisation "
+                         "(CV prior + gated ZUPT) to curb 54x42/shake velocity "
+                         "divergence. Forwarded to vio.main --stabilize-velocity "
+                         "only with --tight; ignored (warned) on the loose path.")
     args = ap.parse_args()
 
     # SLAM keeps its live map current via a LATEST-ONLY in-process inbox (set in
@@ -322,19 +363,16 @@ def main() -> int:
     # the contract is unit-testable without spawning subprocesses.
     capture_args = build_capture_args(args, cap_ep)
 
-    vio_args = ["--capture-endpoint", cap_ep, "--endpoint", vio_ep,
-                "--kf-every", str(args.kf_every)]
-    if args.no_gyro:
-        vio_args += ["--no-gyro"]
-    if use_worker:
-        vio_args += ["--worker"]
-    if args.tight:
-        vio_args += ["--tight"]
-        # CLOSED-LOOP feedback (slam -> vio): give VIO the slam endpoint so its
-        # --tight live pose subscribes loop.correction and the SLAM pose-graph
-        # correction is fed back into the live pose (drift bounded on revisits).
-        # Only on the --tight path; the loose pipeline never wires it.
-        vio_args += ["--slam-endpoint", slam_ep]
+    # VIO argv (flag forwarding, incl. --tight / --slam-endpoint /
+    # --stabilize-velocity) lives in build_vio_args so the contract is
+    # unit-testable without spawning subprocesses.
+    if args.stabilize_velocity and not args.tight:
+        # --stabilize-velocity only affects the tight backend's velocity state;
+        # the loose path has no velocity to regularise, so warn + drop it (the
+        # builder already gates it behind --tight, this just tells the operator).
+        LOG.warning("launcher: --stabilize-velocity has no effect without "
+                    "--tight (loose path has no velocity state); ignoring it")
+    vio_args = build_vio_args(args, cap_ep, vio_ep, slam_ep, use_worker)
 
     # NB: the new `slam.main` is a PURE consumer of VIO's output and -- unlike the
     # pre-split `ours.proc.slam` -- intentionally DROPPED `--capture-endpoint`

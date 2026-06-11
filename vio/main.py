@@ -121,7 +121,8 @@ def run_vio(*,
             calib_timeout_s: float = 30.0,
             backend_window: int = 6,
             backend_iters: int = 5,
-            tight: bool = False) -> int:
+            tight: bool = False,
+            stabilize_velocity: bool = False) -> int:
     """Run the VIO process until END / SIGTERM / Ctrl-C.
 
     ``tight`` selects the TIGHT-coupled VIO backend (the joint visual + IMU
@@ -139,6 +140,14 @@ def run_vio(*,
     drifts unboundedly). This is LIVE + ``--tight`` ONLY: the offline / oracle /
     loose path never sets it, so those paths are byte-identical. Drift bounding is
     SMOOTH (the correction is bled over a few frames, never a hard snap).
+
+    ``stabilize_velocity`` enables the Phase-4 velocity regularisation on the
+    tight backend (the CV smoothness prior + excitation-gated ZUPT) to curb the
+    54x42 / shake window-velocity divergence. Opt-in and ``--tight`` ONLY: it is
+    forwarded straight to :class:`~vio.modules.pipeline.BackendModule`, which only
+    honours it inside its ``tight`` branch. When False the tight config is the
+    untouched (oracle-tuned) default and the loose path is unaffected -- so the
+    byte-parity oracle stays gap=0.
     """
     # Closed-loop feedback is --tight + LIVE only: a slam endpoint must be wired
     # AND the tight nav-state must exist (retain_imu, set by tight). The loose /
@@ -201,7 +210,8 @@ def run_vio(*,
                  "pose.odom) -- drift bounded on revisits", slam_endpoint)
     backend = BackendModule(local, bundle.K,
                             window=backend_window, iters=backend_iters,
-                            latest_only=False, worker=worker, tight=tight)
+                            latest_only=False, worker=worker, tight=tight,
+                            stabilize_velocity=stabilize_velocity)
 
     # 5. Open the OUTPUT IPCPubSub server + publisher bridge. KEYFRAME is the only
     #    VIO output that needs shared memory (image + depth payload), so it gets
@@ -369,6 +379,10 @@ def main() -> int:
                          "IMU window optimiser, imu_info_weight=True) instead of "
                          "the default LOOSE windowed-BA backend. Opt-in; the "
                          "default (loose) path is byte-identical to before.")
+    ap.add_argument("--stabilize-velocity", action="store_true",
+                    help="tight only: enable Phase-4 velocity regularisation "
+                         "(CV prior + gated ZUPT) to curb 54x42/shake velocity "
+                         "divergence. Opt-in; ignored without --tight.")
     args = ap.parse_args()
 
     return run_vio(
@@ -382,6 +396,7 @@ def main() -> int:
         backend_window=args.backend_window,
         backend_iters=args.backend_iters,
         tight=args.tight,
+        stabilize_velocity=args.stabilize_velocity,
     )
 
 

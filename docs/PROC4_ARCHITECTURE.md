@@ -775,6 +775,21 @@ On the **`--tight` branch** the launcher ALSO passes `--slam-endpoint <slam_ep>`
 §5.2 / §9 invariant 17): VIO subscribes to SLAM's loop correction and feeds it back
 into the live pose so drift is bounded on revisits. Loose (default) never wires it.
 
+The launcher's `build_vio_args` builder (pure, unit-tested by
+`launcher/tests/stabilize_velocity_forward_selftest.py`) ALSO forwards
+`--stabilize-velocity` to `vio.main` — but ONLY when `--tight` **and**
+`--stabilize-velocity` are both set. This is the LIVE knob for the **Phase-4
+velocity regularisation**: it flips `WindowedVIOConfig.stabilize_velocity = True`
+in the tight backend (`vio/modules/pipeline.py`), which makes `run_ba` enable both
+the constant-velocity smoothness prior (`vel_cv_prior`) and the excitation-gated
+ZUPT (`vel_zupt`) on every solve to curb the 54×42 / shake window-velocity
+divergence (the priors themselves live in `vio/mathlib/backend/vio_window.py`). It
+is **OPT-IN and tight-only**: the default path never sets it, so the loose path and
+the tight-without-flag path are unchanged and the byte-parity oracle stays `gap=0`.
+Passing `--stabilize-velocity` WITHOUT `--tight` logs a warning and is dropped (the
+loose path has no velocity state to regularise). When active, the tight backend logs
+`vio: tight velocity-stabilize ON (CV prior + gated ZUPT)` on startup.
+
 ## 8. Verification & testing
 
 The byte-parity oracle lives in `verification/` and is **in-process** (single
