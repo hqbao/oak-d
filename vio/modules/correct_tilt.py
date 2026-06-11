@@ -3,7 +3,7 @@
 Runs right after :class:`EstimateMotion`. When the camera is at rest (so the
 accelerometer reads gravity, not motion) it nudges the current attitude's
 roll/pitch toward the measured gravity direction
-(:meth:`~vio.mathlib.odometry.odometry.RGBDVisualOdometry.correct_tilt`, a slow EMA
+(:meth:`~sky.front.odometry.RGBDVisualOdometry.correct_tilt`, a slow EMA
 gated by ``g_tol``). This is what lets the live view self-level **without** a
 hold-still window at startup: the one-shot :class:`AlignGravity` seed can be rough
 (or absent) because any still moment during the run pulls roll/pitch back to level.
@@ -16,7 +16,7 @@ translation), so a small per-frame correction never retroactively bends the path
 from __future__ import annotations
 
 from vio.comms import Step as StepBase
-from vio.mathlib.odometry.odometry import RGBDVisualOdometry
+from sky.front.odometry import RGBDVisualOdometry
 from .step import Step
 
 

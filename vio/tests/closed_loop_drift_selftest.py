@@ -49,7 +49,7 @@ from vio.comms import LocalPubSub, topics                            # noqa: E40
 from vio.comms.messages import (                                     # noqa: E402
     DepthFrame, END, ImuCamPacket)
 from vio.modules import OdometryModule                               # noqa: E402
-from vio.mathlib.odometry.odometry import OdometryConfig            # noqa: E402
+from sky.front.odometry import OdometryConfig            # noqa: E402
 from slam.modules import SlamModule                                  # noqa: E402
 from slam.mathlib.loop.slam import SlamConfig                        # noqa: E402
 

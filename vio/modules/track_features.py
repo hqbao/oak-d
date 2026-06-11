@@ -13,7 +13,7 @@ from __future__ import annotations
 from vio.comms.messages import DepthFrame
 from vio.comms.runtime import NUMBA_PARALLEL_LOCK
 from vio.comms import Step
-from vio.mathlib.odometry.odometry import RGBDVisualOdometry
+from sky.front.odometry import RGBDVisualOdometry
 from .tracked import Tracked
 
 

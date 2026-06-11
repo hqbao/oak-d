@@ -55,7 +55,7 @@ from vio.comms.ring_registry import (                              # noqa: E402
     default_capture_specs, default_vio_specs,
 )
 from vio.modules import BackendModule, OdometryModule              # noqa: E402
-from vio.mathlib.odometry.odometry import OdometryConfig           # noqa: E402
+from sky.front.odometry import OdometryConfig           # noqa: E402
 from vio.comms.lib.config.resolution import ResolutionProfile     # noqa: E402
 from vio.mathlib.resolution_build import frontend_config          # noqa: E402
 

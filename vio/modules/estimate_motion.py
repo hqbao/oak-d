@@ -3,7 +3,7 @@
 Fifth task of the odometry frame-chain. Consumes the :class:`Primed` carrier
 (frame + KLT tracks + the IMU prior already joined by :class:`PullPrior`) and runs
 the pure-NumPy motion estimate
-(:meth:`~vio.mathlib.odometry.odometry.RGBDVisualOdometry.estimate`) -- build
+(:meth:`~sky.front.odometry.RGBDVisualOdometry.estimate`) -- build
 correspondences -> RGB-D PnP -> optional gyro fusion (when the prior carries an
 ``R_prior``) -> pose compose -- then packages the result, plus the prior's
 ``accel_cam`` / ``at_rest``, into a :class:`Step` for the downstream tasks. The
@@ -14,7 +14,7 @@ parallel region runs here, so unlike ``TrackFeatures`` it takes no parallel lock
 from __future__ import annotations
 
 from vio.comms import Step as StepBase
-from vio.mathlib.odometry.odometry import RGBDVisualOdometry
+from sky.front.odometry import RGBDVisualOdometry
 from .primed import Primed
 from .step import Step
 

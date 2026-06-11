@@ -11,7 +11,7 @@ import numpy as np
 from vio.comms import topics
 from vio.comms.messages import Keyframe
 from vio.comms import Step as StepBase
-from vio.mathlib.odometry.odometry import RGBDVisualOdometry
+from sky.front.odometry import RGBDVisualOdometry
 from .step import Step
 
 

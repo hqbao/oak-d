@@ -54,7 +54,7 @@ from imu_camera.modules.tof_downsample import _block_median_valid  # noqa: E402
 from imu_camera.modules.pipeline import TOF_W, TOF_H  # noqa: E402
 
 from vio.mathlib.imu.imu import GyroPreintegrator  # noqa: E402
-from vio.mathlib.odometry.odometry import OdometryConfig  # noqa: E402
+from sky.front.odometry import OdometryConfig  # noqa: E402
 from vio.mathlib.backend.vio_window import (  # noqa: E402
     WindowedVIOConfig,
     WindowedVIORGBDOdometry,

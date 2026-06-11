@@ -38,7 +38,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from imu_camera.io.reader import SessionReader                       # noqa: E402
 from vio.mathlib.imu.imu import GyroPreintegrator                    # noqa: E402
-from vio.mathlib.odometry.odometry import (                          # noqa: E402
+from sky.front.odometry import (                          # noqa: E402
     OdometryConfig, RGBDVisualOdometry)
 from vio.mathlib.backend.windowed import (                           # noqa: E402
     WindowedConfig, WindowedRGBDOdometry)

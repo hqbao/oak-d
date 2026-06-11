@@ -2,7 +2,7 @@
 
 Mirrors :class:`~vio.modules.publish_pose.PublishPose`, but publishes the
 PURE-VISION (no-IMU, no-BA) accumulated pose
-(:attr:`~vio.mathlib.odometry.odometry.RGBDVisualOdometry.pose_vo`) instead of the
+(:attr:`~sky.front.odometry.RGBDVisualOdometry.pose_vo`) instead of the
 gyro-fused VIO pose. The UI draws this as its "VO" line to compare against the
 VIO ``pose.odom``.
 
@@ -14,14 +14,14 @@ parity is unaffected.
 ``pose_vo`` is updated upstream by :class:`EstimateMotion`, so this task must run
 AFTER it in the frame chain. The per-frame ``seq`` / ``ts_ns`` come from the same
 :class:`Step` carrier ``PublishPose`` uses; the pose is read live off the shared
-:class:`~vio.mathlib.odometry.odometry.RGBDVisualOdometry` instance in ``ctx.state``.
+:class:`~sky.front.odometry.RGBDVisualOdometry` instance in ``ctx.state``.
 """
 from __future__ import annotations
 
 from vio.comms import topics
 from vio.comms.messages import PoseMsg
 from vio.comms import Step as StepBase
-from vio.mathlib.odometry.odometry import RGBDVisualOdometry
+from sky.front.odometry import RGBDVisualOdometry
 from .step import Step
 
 

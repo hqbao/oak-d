@@ -9,7 +9,7 @@ byte-identical to the reference oracle -- proved by
 * :mod:`sky.front` -- the from-scratch KLT optical-flow tracker + Shi-Tomasi
   corner detector (numba-accelerated; the ONLY numba kernel VIO warms). Relocated
   into the shared :mod:`sky` leaf library (single-copy; VIO is the only consumer).
-* :mod:`~vio.mathlib.odometry` -- frame-to-frame RGB-D visual odometry (PnP +
+* :mod:`~sky.front.odometry` -- frame-to-frame RGB-D visual odometry (PnP +
   optional gyro fusion).
 * :mod:`~vio.mathlib.backend` -- the sliding-window bundle adjustment + the
   tight-coupled visual-inertial window optimiser.

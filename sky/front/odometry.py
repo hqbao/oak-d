@@ -346,7 +346,7 @@ class RGBDVisualOdometry:
         tilt -- the trajectory is otherwise unchanged (ATE is Umeyama-aligned, so
         a global rotation of the world frame does not affect it).
         """
-        from ..imu.imu import gravity_aligned_R0
+        from sky.imu.imu import gravity_aligned_R0
         self.pose = np.eye(4)
         self.pose[:3, :3] = gravity_aligned_R0(accel_cam)
         # Seed the pure-vision accumulator from the SAME gravity-aligned origin so

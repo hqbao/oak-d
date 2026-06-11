@@ -50,7 +50,7 @@ from sky.math import so3_log
 
 from sky.front.frontend import FrontendConfig, KLTFrontend
 from ..imu.imu import ImuPreintegration, preintegrate_imu
-from ..odometry.odometry import OdometryConfig, RGBDVisualOdometry
+from sky.front.odometry import OdometryConfig, RGBDVisualOdometry
 
 
 # --------------------------------------------------------------------------- #

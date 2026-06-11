@@ -22,7 +22,7 @@ from __future__ import annotations
 
 from vio.comms.lib.config.resolution import ResolutionProfile, _round_odd
 from sky.front.frontend import FrontendConfig
-from vio.mathlib.odometry.odometry import OdometryConfig
+from sky.front.odometry import OdometryConfig
 
 
 def frontend_config(res: ResolutionProfile, *, numba: bool) -> FrontendConfig:

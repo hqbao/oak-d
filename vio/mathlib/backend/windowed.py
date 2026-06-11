@@ -1,7 +1,7 @@
 """Windowed RGB-D visual odometry: frame-to-frame tracking + keyframe BA.
 
 This is the second odometry backend, kept deliberately separate from the plain
-:class:`vio.mathlib.odometry.odometry.RGBDVisualOdometry` so we can compare the two
+:class:`sky.front.odometry.RGBDVisualOdometry` so we can compare the two
 stage-by-stage on identical input.
 
 Pipeline
@@ -67,7 +67,7 @@ import numpy as np
 from sky.backend.bundle import BAConfig, optimize
 from .marginalize import MargPrior, marginalize_keyframe
 from sky.front.frontend import FrontendConfig, KLTFrontend
-from ..odometry.odometry import OdometryConfig, RGBDVisualOdometry
+from sky.front.odometry import OdometryConfig, RGBDVisualOdometry
 
 
 @dataclass

@@ -37,7 +37,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from vio.mathlib.imu.imu import so3_exp                                  # noqa: E402
-from vio.mathlib.odometry.odometry import (                             # noqa: E402
+from sky.front.odometry import (                             # noqa: E402
     OdometryConfig, RGBDVisualOdometry)
 
 
