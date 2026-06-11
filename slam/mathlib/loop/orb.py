@@ -23,7 +23,7 @@ Pipeline (pure NumPy):
 
 Matching is Hamming brute force (``hamming_knn``) and the epipolar pre-filter
 is a normalised 8-point fundamental-matrix RANSAC (``find_fundamental_ransac``).
-The final metric verification reuses our own :func:`slam.mathlib.odometry.pnp.solve_pnp_ransac`.
+The final metric verification reuses our own :func:`sky.front.pnp.solve_pnp_ransac`.
 
 The descriptors are NOT bit-compatible with OpenCV's learned ``bit_pattern_31``
 (we sample our own deterministic pattern), so ours descriptors only match ours

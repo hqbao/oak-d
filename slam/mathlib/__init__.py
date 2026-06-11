@@ -16,14 +16,14 @@ proved by :mod:`slam.tests.loop_closure_selftest`).
   the heavy keyframe optimiser (SLAM carries its OWN engine copy).
 
 FORCED-VENDOR dependencies (resolved from the loop import graph; vendored at the
-minimal surface, mirroring how VIO had to vendor ``imu`` for its odometry/PnP):
+minimal surface):
 
-* :mod:`~slam.mathlib.odometry` -- ``solve_pnp_ransac`` (PnP RANSAC), forced by
-  :mod:`~slam.mathlib.loop.loopclosure`'s metric geometric verification.
-* :mod:`~slam.mathlib.imu` -- the SO(3) ``so3_exp`` helper, forced (transitively)
-  by :mod:`~slam.mathlib.odometry.pnp`.
 * :mod:`~slam.mathlib.backend` -- the SE(3) ``se3_exp`` / ``skew`` Lie-group
   helpers, forced by :mod:`~slam.mathlib.loop.posegraph`.
+
+The PnP RANSAC that :mod:`~slam.mathlib.loop.loopclosure`'s metric geometric
+verification needs is the shared :func:`sky.front.pnp.solve_pnp_ransac` (one
+canonical copy, deduped out of the old per-project ``mathlib/odometry/pnp.py``).
 
 The ARCHITECTURE RULE lives here too: the math-coupled config builder
 (:mod:`~slam.mathlib.resolution_build`) lives in ``mathlib`` -- NOT in the

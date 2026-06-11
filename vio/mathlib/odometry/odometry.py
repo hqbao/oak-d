@@ -7,7 +7,7 @@ VO:
 1. Take tracks seen in *both* the previous and current frame.
 2. Back-project the previous-frame observations to 3D using the previous depth
    map (metric, from the recorded stereo depth).
-3. Solve our own ``pnp.solve_pnp_ransac`` (library-free RANSAC + LM) for the
+3. Solve our own ``sky.front.pnp.solve_pnp_ransac`` (library-free RANSAC + LM) for the
    rigid transform that reprojects those 3D points onto their current-frame
    pixels -> ``T_prev->cur``.
 4. Compose into the world pose: ``T_w_cur = T_w_prev @ inv(T_prev->cur)``.
@@ -28,8 +28,9 @@ import numpy as np
 from sky.math import so3_exp_unit as so3_exp
 from sky.math import so3_log
 
+from sky.front.pnp import solve_pnp_ransac
+
 from ..frontend.frontend import FrontendConfig, KLTFrontend
-from .pnp import solve_pnp_ransac
 
 
 def level_attitude(R: np.ndarray, accel_cam: np.ndarray,

@@ -12,7 +12,7 @@ The ORB features here are *our own* real features detected on the real recorded
 image -- this is genuinely our loop-closure frontend, not a fake overlay of some
 black box's internals. Detection, description, matching, the epipolar pre-filter
 and the metric PnP are ALL our own library-free NumPy (:mod:`slam.mathlib.loop.orb` +
-:mod:`slam.mathlib.odometry.pnp`); there is no cv2 anywhere on this path. The relative pose
+:mod:`sky.front.pnp`); there is no cv2 anywhere on this path. The relative pose
 comes from a real RANSAC PnP on real depth-backprojected 3D points, so a
 confirmed loop is a real geometric fact.
 
@@ -30,8 +30,9 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from sky.front.pnp import solve_pnp_ransac
+
 from .orb import (ORB, OrbConfig, find_fundamental_ransac, match_ratio_mutual)
-from ..odometry.pnp import solve_pnp_ransac
 
 
 @dataclass
