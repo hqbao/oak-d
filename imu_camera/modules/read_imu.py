@@ -2,7 +2,7 @@
 plus the IMU-only device stream used by the calibration wizards.
 
 The imu_cam module owns a
-:class:`~imu_camera.mathlib.imu.timed_buffer.TimedImuBuffer` but not the *origin*
+:class:`~sky.imu.timed_buffer.TimedImuBuffer` but not the *origin*
 of the samples -- that is injected as an ``ImuSource`` so the exact same module
 runs offline (deterministic replay of a recorded session) and on the bench (the
 OAK-D IMU). A source is a tiny lifecycle object:

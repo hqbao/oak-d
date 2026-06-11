@@ -26,7 +26,7 @@ from sky.sensors.imu_calib import ImuCalibration
 
 from imu_camera.comms import LocalPubSub, Module, topics
 from imu_camera.io.reader import SessionReader
-from imu_camera.mathlib.imu.timed_buffer import TimedImuBuffer
+from sky.imu.timed_buffer import TimedImuBuffer
 from sky.depth.stereo import (
     SGMConfig, SGMStereoMatcher)
 

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from imu_camera.comms import Step
 from imu_camera.comms.messages import CamSync, ImuCamPacket
-from imu_camera.mathlib.imu.timed_buffer import TimedImuBuffer
+from sky.imu.timed_buffer import TimedImuBuffer
 
 
 class PackSyncedStep(Step):
