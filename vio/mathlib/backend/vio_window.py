@@ -41,7 +41,7 @@ measurements is perturbed and recovered to sub-mm / sub-mdeg.
 from __future__ import annotations
 
 from collections import Counter
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import numpy as np
 
@@ -107,6 +107,34 @@ class VioConfig:
     # (degenerate / empty interval) the code falls back to the fixed sigmas for
     # that edge.
     imu_info_weight: bool = False
+    # --- Phase-4 velocity stabilisation (ALL default OFF -> oracle byte-safe) --
+    # The lone IMU factor is rank-6-deficient in velocity: it only ties the
+    # DIFFERENCES (v_j - v_i, dp - v_i*dt); it carries ZERO absolute-velocity
+    # information. At 54x42 the feature-starved vision cannot pin p_j, so the
+    # position residual r_p cannot transfer weight onto v_i, leaving only the
+    # difference-tie r_v -- which faithfully copies a drifting velocity seed
+    # forward and compounds it (the 0.175 -> 4.96 m/s shake runaway). The two
+    # opt-in terms below inject the missing constraint:
+    #
+    # (A) vel_cv_prior -- a constant-velocity SMOOTHNESS prior per IMU edge i->j:
+    #     r_cv = (v_j - v_i) / sigma_vel_cv  (world frame, isotropic). It penalises
+    #     velocity CHANGE between keyframes, which is what stops the ramp; sigma is
+    #     loose so it only bites the divergent ramp, not real acceleration.
+    # (B) vel_zupt -- an excitation-gated zero-velocity prior r_zupt = v_i /
+    #     sigma_vel_zupt applied only on KFs whose inbound IMU edge is
+    #     LOW-EXCITATION (near rest). This is the ABSOLUTE anchor the CV prior
+    #     lacks; gated on excitation (not translation) so shake (high excitation)
+    #     turns it OFF and the CV prior carries the window instead.
+    #
+    # Both paths are guarded by their flag so the OFF path is byte-identical to
+    # the frozen oracle. sigma_vel_zupt >> sigma_vel_cv on purpose: ZUPT is a weak
+    # absolute pin, the CV prior is the primary ramp-killer.
+    vel_cv_prior: bool = False
+    sigma_vel_cv: float = 0.15      # m/s, loose -> only bites the divergent ramp
+    vel_zupt: bool = False
+    sigma_vel_zupt: float = 0.5     # m/s, weak absolute anchor (>> sigma_vel_cv)
+    zupt_accel_thresh: float = 0.30  # m/s^2, |dv|/dt below this == low excitation
+    zupt_gyro_thresh: float = 0.20  # rad/s, |log(dR)|/dt below this == low excite
     huber_px: float = 2.0           # robust threshold on pixel residual
     use_depth: bool = True
     min_view_z: float = 1e-3
@@ -259,6 +287,37 @@ def optimize_vio(
     obs_depth = (np.asarray(obs_depth, np.float64) if use_depth
                  else np.zeros(obs_cam.shape[0]))
 
+    # --- Phase-4 excitation-gated ZUPT pre-pass (opt-in) -------------------- #
+    # ZUPT anchors v_i ~= 0 ONLY on a keyframe whose INBOUND IMU edge is
+    # low-excitation (near rest). The gate is a property of the edge (raw
+    # preintegrated increment), so compute it ONCE here from imu_factors rather
+    # than per LM iteration. ``zupt_on[ci]`` is True iff KF ci should be pinned.
+    # KF0 (no inbound edge) is never gated on. Gate on EXCITATION, not on the
+    # translation seed.
+    #
+    # Accelerometer excitation must be measured GRAVITY-AWARE: ``pre.dv`` is the
+    # preintegrated SPECIFIC FORCE (it still contains gravity), so at true rest
+    # ``||pre.dv||/dt`` equals the gravity magnitude |g| (~9.8), NOT zero -- the
+    # accelerometer reads +g upward even when motionless. The real linear-
+    # acceleration excitation is therefore the DEVIATION of that specific-force
+    # magnitude from |g|: ``a_exc = | ||pre.dv||/dt - |g| |``. This is frame-
+    # independent (pure magnitudes), so it needs no body->world rotation: at rest
+    # a_exc ~= 0, under a real push or shake the specific-force magnitude departs
+    # from |g| and a_exc grows. The gyro rate ``w_exc = ||log(pre.dR)||/dt`` is
+    # already gravity-free. Both small == rest -> ZUPT on (absolute anchor); shake
+    # -> high excitation -> ZUPT off so the CV prior carries the window instead.
+    zupt_on = np.zeros(nC, dtype=bool)
+    if cfg.vel_zupt:
+        g_mag = float(np.linalg.norm(g_world))
+        for (_i, j, pre) in imu_factors:
+            dt_edge = float(pre.dt)
+            if dt_edge <= 1e-9:
+                continue
+            a_exc = abs(float(np.linalg.norm(pre.dv)) / dt_edge - g_mag)
+            w_exc = float(np.linalg.norm(so3_log(pre.dR))) / dt_edge
+            if a_exc < cfg.zupt_accel_thresh and w_exc < cfg.zupt_gyro_thresh:
+                zupt_on[j] = True
+
     # --- column layout -----------------------------------------------------
     # tilt-lock: pose has 4 free DoF (3 translation + 1 yaw) instead of 6, with
     # the yaw perturbation about the world-vertical (gravity) axis.
@@ -366,6 +425,16 @@ def optimize_vio(
                                stt.R[j], stt.p[j], stt.v[j], pre, g_world, cfg)
             rb = _bias_rw_residual(stt.bg[i], stt.ba[i], stt.bg[j], stt.ba[j], cfg)
             cost += 0.5 * float(ri @ ri + rb @ rb)
+            if cfg.vel_cv_prior:
+                # constant-velocity smoothness prior on this edge (see VioConfig)
+                r_cv = (stt.v[j] - stt.v[i]) / cfg.sigma_vel_cv
+                cost += 0.5 * float(r_cv @ r_cv)
+        if cfg.vel_zupt:
+            # excitation-gated zero-velocity prior (absolute anchor on rest KFs)
+            for ci in range(nC):
+                if zupt_on[ci]:
+                    r_z = stt.v[ci] / cfg.sigma_vel_zupt
+                    cost += 0.5 * float(r_z @ r_z)
         return cost, mean_e
 
     # --- one Gauss-Newton/LM linear system ---------------------------------
@@ -472,6 +541,16 @@ def optimize_vio(
             ri = _imu_residual(Ri, pi, vi, bgi, bai, Rj, pj, vj,
                                pre, g_world, cfg)
             rb = _bias_rw_residual(bgi, bai, bgj, baj, cfg)
+            if cfg.vel_cv_prior:
+                # CRITICAL: the constant-velocity prior is appended to the STACKED
+                # residual here, NOT folded into _imu_residual -- folding it in
+                # would desync the 9x9 pre.sqrt_info whitening (covariance path).
+                # As 3 extra rows on the end, the existing per-edge FD-Jacobian
+                # loop (which already perturbs the vi/vj velocity blocks) fills the
+                # r_cv columns automatically; no new Jacobian code, same H/b
+                # assembly. r_cv = (v_j - v_i) / sigma_vel_cv, isotropic.
+                r_cv = (vj - vi) / cfg.sigma_vel_cv
+                return np.concatenate([ri, rb, r_cv])
             return np.concatenate([ri, rb])
 
         for (i, j, pre) in imu_factors:
@@ -519,6 +598,21 @@ def optimize_vio(
 
             H[np.ix_(idx, idx)] += Ji.T @ Ji
             b[idx] += Ji.T @ r0i
+
+        # Phase-4 excitation-gated ZUPT (opt-in): a velocity-only absolute prior
+        # r_zupt = v_i / sigma_vel_zupt on each gated KF. The block is ANALYTIC
+        # (J = d r_zupt / d v_i = I / sigma_vel_zupt): the Gauss-Newton normal
+        # equations contribute J^T J = I / sigma^2 to H[vel_i, vel_i] and
+        # J^T r = v_i / sigma^2 to b[vel_i]. Gate is precomputed in zupt_on.
+        if cfg.vel_zupt:
+            inv_var_z = 1.0 / (cfg.sigma_vel_zupt * cfg.sigma_vel_zupt)
+            for ci in range(nC):
+                if not zupt_on[ci]:
+                    continue
+                vc = vel_col[ci]
+                vrange = slice(vc, vc + 3)
+                H[vrange, vrange] += np.eye(3) * inv_var_z
+                b[vc:vc + 3] += stt.v[ci] * inv_var_z
 
         return H, b
 
@@ -723,6 +817,11 @@ class WindowedVIOConfig:
     # at rest the accelerometer reads +g upward, so g_world points +y.
     g_world: tuple = (0.0, 9.81, 0.0)
     use_imu: bool = True         # set False to A/B the IMU factors (diagnostic)
+    # Phase-4 single live --tight knob: when True, ``run_ba`` flips on BOTH
+    # velocity-stabilisation terms (vel_cv_prior + vel_zupt) in ``self.cfg.vio``
+    # via dataclasses.replace, so a caller need not reach into the nested VioConfig.
+    # Default False -> the nested VioConfig flags stay OFF -> oracle byte-safe.
+    stabilize_velocity: bool = False
     # The windowed VIO solves each pose with roll/pitch LOCKED (lock_tilt): the
     # accelerometer owns tilt absolutely (gravity is an absolute reference), so
     # the joint solve only refines what the IMU cannot observe -- yaw + position
@@ -935,11 +1034,19 @@ class WindowedVIOMap:
         if not self.cfg.use_imu:
             imu_factors = []
 
+        # Phase-4: the single ``stabilize_velocity`` knob flips on both velocity
+        # priors for this solve (CV smoothness + excitation-gated ZUPT) without
+        # the caller editing the nested VioConfig. Default False -> vio_cfg is
+        # ``self.cfg.vio`` unchanged -> oracle byte-identical.
+        vio_cfg = self.cfg.vio
+        if self.cfg.stabilize_velocity:
+            vio_cfg = replace(vio_cfg, vel_cv_prior=True, vel_zupt=True)
+
         res = optimize_vio(
             self.K, st,
             np.array(obs_cam), np.array(obs_lm), np.array(obs_uv),
             np.array(obs_depth), imu_factors, self.g_world,
-            cfg=self.cfg.vio, anchor=0,
+            cfg=vio_cfg, anchor=0,
         )
         out = res.state
         for ci, kf in enumerate(kfs):

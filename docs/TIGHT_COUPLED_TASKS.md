@@ -180,6 +180,41 @@ Builds         : `Ω_I` whitening + `_ImuEdge` per-edge cache in
 > oracle has `backend="vio"` entries that run this exact residual. The oracle uses
 > the default (fixed sigmas) and stays `gap = 0`; the tight path turns it on.
 
+### A7 — Velocity-divergence stabilisation @ 54×42   · DONE (2026-06-11)
+How it works   : two opt-in `VioConfig` terms cure the rank-6 velocity deficiency
+                 that lets the IMU difference-tie compound a drifting seed at
+                 feature-starved 54×42. (A) `vel_cv_prior` — constant-velocity
+                 smoothness `r_cv=(v_j−v_i)/σ_cv` APPENDED to the stacked
+                 `_imu_eval` residual (NOT into `_imu_residual`, which would
+                 desync the 9×9 `sqrt_info`); the existing FD loop fills its
+                 columns. (B) `vel_zupt` — analytic, excitation-gated absolute
+                 anchor `r_zupt=v_i/σ_z` (`H[v_i,v_i]+=I/σ_z²`). Gate is
+                 GRAVITY-AWARE: `a_exc=|‖pre.dv‖/dt−|g||` (specific force still
+                 carries gravity) + `w_exc=‖log(pre.dR)‖/dt`. `stabilize_velocity`
+                 on `WindowedVIOConfig` flips both via `replace` in `run_ba`.
+Input          : `imu_factors` (per-edge `pre`), the window nav states.
+Visual output  : `verification/phase4_velocity_bisect.py --vel-cv-prior [--vel-zupt]`
+                 per-KF `|v_opt|` ramp; `verification/phase4_bench_velprior.py`
+                 OFF/CV/CVZ ATE+scale A/B (harness unmodified, flags via `replace`).
+Pass gate      : MET — oracle `gap=0` flags OFF (incl. `backend="vio"`); FD/analytic
+                 unit checks pass (`vio/tests/phase4_velprior_selftest.py`). 54×42
+                 ATE: shake 1554→832 (−46 %), push-fast 249→104 (−58 %), straight
+                 38.9→33.0 (−15 %), lab-loop 73→63 cm (−14 %); full-res ±1 % (no
+                 regression). ZUPT anchors rest (still maxstep ↓, scale →1) without
+                 crushing dynamic forward speed. HONEST LIMIT: shake runaway HALVED
+                 not flattened (the IMU seed itself ramps); scale stays <1 at 54×42.
+Ý nghĩa        : tiêm "thông tin vận tốc tuyệt đối" mà factor IMU đơn lẻ thiếu —
+                 hãm đà phân kỳ vận tốc ở 54×42 mà KHÔNG đụng đường loose/oracle.
+Builds         : `vel_cv_prior`/`vel_zupt` + gravity-aware gate in
+                 `vio/mathlib/backend/vio_window.py`; `stabilize_velocity` knob;
+                 `vio/tests/phase4_velprior_selftest.py`;
+                 `verification/phase4_bench_velprior.py` (+ `--vel-*` flags on
+                 `verification/phase4_velocity_bisect.py`).
+
+> Byte-parity note: all five velocity-stabilisation fields default OFF and EVERY
+> new code path is guarded by `if cfg.vel_cv_prior:` / `if cfg.vel_zupt:`, so the
+> OFF path is byte-identical and the frozen `backend="vio"` oracle stays `gap=0`.
+
 ---
 
 ## Track B — IMU-only dead-reckoning demo (the "aha", 1 task)

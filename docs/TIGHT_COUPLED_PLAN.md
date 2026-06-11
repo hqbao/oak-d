@@ -552,8 +552,48 @@ propagation of the live output** — that was the user-visible "covered camera +
 - (a) Analytic IMU Jacobians + Schur on the 15-DoF blocks (replace FD) — **required
   before the C port**; (b) gravity promoted to `S²` (2-DoF) state; (c) proper Schur
   marginalization with FEJ (replace drop-and-reanchor), gated on a NEES test;
-  (d) low-res profile tuning (`min_ba_views`, window, landmark cap) for 54×42.
+  (d) low-res profile tuning (`min_ba_views`, window, landmark cap) for 54×42;
+  (e) **velocity-divergence stabilisation at 54×42 — DONE (2026-06-11).**
 - **Gate per item:** no ATE regression vs MVP on gold; NEES within χ² bounds for (c).
+
+#### Phase 4(e) — velocity-divergence stabilisation (DONE 2026-06-11)
+**Problem.** The lone IMU factor is rank-6-deficient in velocity: it ties only the
+*differences* (`v_j−v_i`, `Δp−v_i·dt`) and carries **zero absolute-velocity**
+information. At 54×42 the feature-starved vision cannot pin `p_j`, so the position
+residual `r_p` cannot transfer weight onto `v_i`; only the difference-tie `r_v`
+survives, faithfully copying a drifting velocity seed forward and compounding it
+(the documented 0.175 → 4.96 m/s `push_shake_20s` runaway).
+
+**Fix (two opt-in terms in `VioConfig`, ALL default OFF → oracle byte-safe).**
+- **(A) Constant-velocity smoothness prior** (`vel_cv_prior`, `sigma_vel_cv=0.15`):
+  per IMU edge `i→j`, residual `r_cv = (v_j−v_i)/σ_cv` (world frame, isotropic).
+  It is **appended as 3 extra rows to the stacked `_imu_eval` residual** — *not*
+  folded into `_imu_residual` (that would desync the 9×9 `sqrt_info` whitening).
+  The existing per-edge FD-Jacobian loop already perturbs the `vel_col[i]/[j]`
+  blocks, so it fills the `r_cv` columns automatically (no new Jacobian code).
+- **(B) Excitation-gated ZUPT** (`vel_zupt`, `sigma_vel_zupt=0.5`): per in-window
+  KF whose inbound edge is low-excitation, an analytic velocity-only prior
+  `r_zupt = v_i/σ_z` (`H[v_i,v_i] += I/σ_z²`, `b[v_i] += v_i/σ_z²`). The gate is
+  **gravity-aware**: `pre.dv` is preintegrated *specific force* (still contains
+  gravity), so at true rest `‖pre.dv‖/dt ≈ |g|`, not 0. Excitation is the
+  *deviation* `a_exc = |‖pre.dv‖/dt − |g||` (plus gyro rate `w_exc =
+  ‖log(pre.dR)‖/dt`); both below threshold ⇒ rest ⇒ ZUPT on. Shake → high
+  excitation → ZUPT off, the CV prior carries the window.
+- One `WindowedVIOConfig.stabilize_velocity` knob flips both flags on in `run_ba`
+  via `dataclasses.replace` (the clean single live `--tight` switch).
+
+**Verification.** Oracle `gap=0` with flags OFF (incl. the `backend="vio"` entry).
+FD/analytic unit checks in `vio/tests/phase4_velprior_selftest.py`. A/B over gold
+(`verification/phase4_bench_velprior.py`, flags flipped via `replace`, harness
+unmodified): **all 54×42 cases improve, full-res does NOT regress (±1 %)** —
+shake 1554→832 cm (−46 %), push-fast 249→104 cm (−58 %), straight 38.9→33.0 cm
+(−15 %), lab-loop 73→63 cm (−14 %). ZUPT adds drift-anchoring on rest sessions
+(still-tof54 3.66→3.36 cm, static-tof54 maxstep 9.2→3.8 cm) without crushing
+forward speed on the dynamic straights (gate keeps it off there). HONEST LIMIT:
+the shake runaway is *halved*, not fully flattened — the IMU dead-reckoning **seed**
+itself ramps (`R@dv ≈ 2 m/s` per shake edge), and the CV prior caps the optimiser's
+peak but cannot undo the inflated seed. Scale stays <1 at 54×42 (still
+feature/depth-starved), so this is a real partial win, not a full fix.
 
 **Critical path to a usable `--tight`: Phases 0 → 1 → 2 → 2.5 → 3** (~3.5–4.5 days).
 **Status:** Phases 0, 1, 2, 2.5 DONE (2026-06-10) — `--tight` is wired + runs
