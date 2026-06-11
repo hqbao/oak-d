@@ -111,7 +111,7 @@ class _DetectWorker(QThread):
     100-300 ms on a board-less frame (the normal case while aiming), x2 (L+R). Doing
     that on the GUI thread freezes the wizard, so -- exactly like :class:`_SolveWorker`
     runs the solve off-thread -- this worker runs ONE detection on a background thread
-    and emits the resulting :class:`~ui.mathlib.calib.collector.FrameStatus` plus the
+    and emits the resulting :class:`~sky.calib.collector.FrameStatus` plus the
     detected LEFT corners (for the overlay) back to a UI-thread slot via a queued
     signal. The UI thread keeps exactly one detection in flight (see
     :meth:`CameraCalibWizard._maybe_detect`), so detection is self-throttling and can
@@ -138,7 +138,7 @@ class _DetectWorker(QThread):
     def run(self) -> None:                                            # noqa: D102
         # Lazy import inside the worker thread: keeps cv2 off the dialog's import
         # path AND off the GUI thread (detection + solve are the only cv2 users).
-        from ui.mathlib.calib.detect import detect_corners
+        from sky.calib.detect import detect_corners
         try:
             status = self._coll.feed(self._left, self._right)
             # Re-detect the LEFT corners for the overlay ONLY when this frame found
@@ -162,7 +162,7 @@ class _SolveWorker(QThread):
 
     ``cv2.calibrateCamera`` / ``stereoCalibrate`` can block for ~1 s; running them
     on the GUI thread would freeze the wizard. This worker takes the collected
-    views + board geometry, runs :func:`ui.mathlib.calib.solve.solve_stereo`
+    views + board geometry, runs :func:`sky.calib.solve.solve_stereo`
     (which lazy-imports cv2), and emits exactly one of :attr:`done` /
     :attr:`failed`. The dialog connects both to UI-thread slots, so the result is
     marshalled back safely by Qt's queued-connection across the thread boundary.
@@ -189,7 +189,7 @@ class _SolveWorker(QThread):
     def run(self) -> None:                                            # noqa: D102
         # Lazy import inside the worker thread: keeps cv2 off the dialog's import
         # path AND off the GUI thread (the solve is the only cv2 user here).
-        from ui.mathlib.calib.solve import solve_stereo
+        from sky.calib.solve import solve_stereo
         try:
             result = solve_stereo(self._views, self._cols, self._rows,
                                   self._square_m, self._image_size,
@@ -256,12 +256,12 @@ class CameraCalibWizard(QDialog):
     * board inputs (``cols`` / ``rows`` inner corners + the REAL ``square_mm``)
       and a "Show checkerboard" button (Phase 1 generator + fullscreen ``--show``),
     * live capture off the injected RAW stereo stream -> a
-      :class:`~ui.mathlib.calib.collector.StereoCheckerboardCollector` with a live
+      :class:`~sky.calib.collector.StereoCheckerboardCollector` with a live
       left-frame preview + corner overlay + per-axis coverage + operator guidance,
     * an OFF-thread solve (:class:`_SolveWorker`) reporting per-camera + stereo
       reprojection RMS, the baseline (mm), a K summary, and the shipped
       ``calib_check`` PASS / WARN / FAIL verdict,
-    * a "Save calib.json…" button (:func:`ui.mathlib.calib.writer.write_calib_json`)
+    * a "Save calib.json…" button (:func:`sky.calib.writer.write_calib_json`)
       that WARNS the operator if ``calib_check`` did not PASS.
     """
 
@@ -510,7 +510,7 @@ class CameraCalibWizard(QDialog):
         """(Re)build the collector from the entered geometry and start capturing."""
         # Lazy import: collector pulls detect -> cv2 only when first FED, but we
         # import the class here (cheap, cv2-free) to build it.
-        from ui.mathlib.calib.collector import StereoCheckerboardCollector
+        from sky.calib.collector import StereoCheckerboardCollector
 
         cols = int(self._cols_spin.value())
         rows = int(self._rows_spin.value())
@@ -916,7 +916,7 @@ class CameraCalibWizard(QDialog):
         """
         from imu_camera.io.reader import StereoCalib
         from imu_camera.tools.calib_check import FAIL, WARN, run_checks
-        from ui.mathlib.calib.writer import calib_to_dict
+        from sky.calib.writer import calib_to_dict
 
         calib = StereoCalib.from_json(calib_to_dict(result, self._image_size))
         checks = run_checks(calib, reader=None)
@@ -967,7 +967,7 @@ class CameraCalibWizard(QDialog):
         # operator cancels the file picker below. Build the SAME calib dict the file
         # export writes (translation in cm, the loader's convention) and key it by the
         # wizard's device id -- device-agnostic, no OAK-D specifics in the UI.
-        from ui.mathlib.calib.writer import calib_to_dict, write_calib_json
+        from sky.calib.writer import calib_to_dict, write_calib_json
         from imu_camera.mathlib.device.camera_calib_store import save_camera_calib
 
         applied = ""

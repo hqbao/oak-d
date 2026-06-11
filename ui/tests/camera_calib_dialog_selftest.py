@@ -51,7 +51,7 @@ from PyQt6.QtWidgets import QApplication
 from imu_camera.io.reader import StereoCalib
 from imu_camera.tools.calib_check import FAIL, run_checks
 from ui.mathlib.calib.checkerboard import make_checkerboard
-from ui.mathlib.calib.collector import CoverageStatus, FrameStatus
+from sky.calib.collector import CoverageStatus, FrameStatus
 from ui.qt import theme
 from ui.qt.camera_calib_dialog import CameraCalibWizard
 
@@ -461,7 +461,7 @@ def test_tilted_completes_solves_and_saves() -> None:
         out = Path(tmp) / "calib.json"
         # Drive the writer directly (the file-dialog path is operator-only); this is
         # the SAME call _on_save makes after the path is chosen.
-        from ui.mathlib.calib.writer import write_calib_json
+        from sky.calib.writer import write_calib_json
         write_calib_json(result, wiz._image_size, out)
         assert out.exists()
 
@@ -570,7 +570,7 @@ def test_mono_guard_surfaces_error() -> None:
 # --------------------------------------------------------------------------- #
 def test_non_converged_solve_blocks_save() -> None:
     _app()
-    from ui.mathlib.calib.solve import StereoCalibResult
+    from sky.calib.solve import StereoCalibResult
 
     stream = _FakeStereoStream()
     wiz = CameraCalibWizard(None, device_id="selftest-cam",

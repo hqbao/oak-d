@@ -1,34 +1,34 @@
-"""``ui.mathlib.calib`` -- camera-calibration math the Calibration menu needs.
+"""``ui.mathlib.calib`` -- the ``ui``-COUPLED half of camera calibration.
 
-Parallel to :mod:`sky.sensors` (the shared IMU-calibration collectors + store):
-this subpackage owns the **camera** side of calibration -- the printable/displayable
-target, the corner detector, the diversity-gated collector, the stereo solve, and
-the calib.json writer. The wizard that drives them is a four-phase operator flow;
-this package holds Phases 1 + 3 (the device-free math), with the data path and UI
-living outside it (cross-referenced below).
+The device-free calibration MATH (corner detect, diversity-gated collector, stereo
+solve, calib.json writer, and the pure checkerboard generator) was RELOCATED into
+the shared :mod:`sky.calib` leaf library (R5) -- ``ui`` was its only consumer.
+What stays here is only the part that genuinely needs the ``ui`` process and so
+CANNOT be a leaf (it would import ``ui.comms`` / PyQt6):
 
-Phase 1 -- the target the operator points the OAK-D at:
+* :mod:`ui.mathlib.calib.checkerboard` -- the thin I/O WRAPPER around the shared
+  generator. It re-exports the pure :func:`sky.calib.checkerboard.make_checkerboard`
+  / :func:`~sky.calib.checkerboard.square_px_from_mm`, and adds ``save_checkerboard``
+  (writes the board via the project's pure-Python PNG codec
+  :mod:`ui.comms.lib.misc.pngio`), an optional lazy-Qt ``--show`` fullscreen
+  preview, and the operator CLI. The ``ui.comms`` / PyQt6 edges are exactly why
+  this half stays per-project (see ``docs/CONSOLIDATION_PLAN.md``).
 
-* :mod:`ui.mathlib.calib.checkerboard` -- a pure (no OpenCV / no Qt) generator that
-  renders a standard, ``cv2.findChessboardCorners``-detectable checkerboard to a
-  ``uint8`` grayscale image and saves it via the project's own pure-Python PNG codec
-  (:mod:`ui.comms.lib.misc.pngio`); a lazy-Qt ``--show`` opens it fullscreen for the
-  shine-on-screen workflow. ``(cols, rows)`` are INNER corners, not squares.
-  Multi-chip-generic: just an image, with no OAK-D / depthai specifics.
+The shared math now lives in :mod:`sky.calib` (cross-referenced below so the flow
+still reads end-to-end):
 
-Phase 3 -- the calibration math core (OFFLINE-testable, no device):
-
-* :mod:`ui.mathlib.calib.detect` -- ``detect_corners`` finds + subpixel-refines the
+* :mod:`sky.calib.checkerboard` -- the PURE (numpy-only) board generator.
+* :mod:`sky.calib.detect` -- ``detect_corners`` finds + subpixel-refines the
   inner checkerboard corners in one grayscale frame (lazy cv2); ``reconcile_lr``
   resolves the 180-degree L<->R corner-ORDER ambiguity so a stereo pair's left and
   right corners name the SAME board points before the solve (the PRIMARY real-device
   garbage fix -- a reversed right order diverges the baseline to ~1 m).
-* :mod:`ui.mathlib.calib.collector` -- ``StereoCheckerboardCollector``, a pure,
+* :mod:`sky.calib.collector` -- ``StereoCheckerboardCollector``, a pure,
   hardware-agnostic capture state machine that accepts only DIVERSE stereo views,
   ``reconcile_lr``-corrects each accepted pair's L<->R corner order, and refuses to
   ``complete`` on an all-fronto-parallel set (it guards focal-length observability by
   requiring genuine tilt coverage).
-* :mod:`ui.mathlib.calib.solve` -- ``solve_stereo`` recovers both intrinsics +
+* :mod:`sky.calib.solve` -- ``solve_stereo`` recovers both intrinsics +
   distortion and the LEFT->RIGHT extrinsic (the project ``T_left_right`` convention),
   via ``cv2.calibrateCameraExtended`` x2 + ``cv2.stereoCalibrate``
   (``CALIB_FIX_INTRINSIC``); lazy cv2. Fits the WIDE-FOV ``CALIB_RATIONAL_MODEL``
@@ -37,7 +37,7 @@ Phase 3 -- the calibration math core (OFFLINE-testable, no device):
   per-view reprojection outliers with a MAD gate (preserving high-tilt views), and
   flags an implausible solve ``ok=False`` (focal/baseline/inter-camera-rotation/stereo-
   RMS out of physical bounds) instead of saving garbage.
-* :mod:`ui.mathlib.calib.writer` -- ``write_calib_json`` emits a calib.json that
+* :mod:`sky.calib.writer` -- ``write_calib_json`` emits a calib.json that
   :meth:`imu_camera.io.reader.StereoCalib.from_json` consumes; pure-Python (no cv2).
   The translation is written in CENTIMETRES so the loader's ``*0.01`` round-trips it
   back to metres.

@@ -41,10 +41,10 @@ import numpy as np
 from imu_camera.io.reader import StereoCalib
 from imu_camera.tools.calib_check import FAIL, run_checks
 from ui.mathlib.calib.checkerboard import make_checkerboard
-from ui.mathlib.calib.collector import CollectorConfig, StereoCheckerboardCollector
-from ui.mathlib.calib.detect import reconcile_lr
-from ui.mathlib.calib.solve import solve_stereo
-from ui.mathlib.calib.writer import calib_to_dict, write_calib_json
+from sky.calib.collector import CollectorConfig, StereoCheckerboardCollector
+from sky.calib.detect import reconcile_lr
+from sky.calib.solve import solve_stereo
+from sky.calib.writer import calib_to_dict, write_calib_json
 
 # --------------------------------------------------------------------------- #
 # Ground truth: OAK-D-like 640x400, fx~=fy~=285, mild distortion, 7.5 cm baseline.
@@ -436,7 +436,7 @@ def test_collector_reconciles_flipped_right() -> None:
     boards until complete, then solve ``collector.views`` directly: a correct collector
     yields a sane ~75 mm baseline; an un-reconciled one would diverge.
     """
-    import ui.mathlib.calib.collector as collector_mod
+    import sky.calib.collector as collector_mod
 
     coll = StereoCheckerboardCollector(
         PATTERN_COLS, PATTERN_ROWS, IMAGE_SIZE,
@@ -579,7 +579,7 @@ def test_min_clean_views_recapture_path() -> None:
     This exercises the gating branch directly (distinct from the sanity-floor branch in
     ``test_too_few_clean_views_fails_honestly``).
     """
-    from ui.mathlib.calib.solve import _MIN_CLEAN_VIEWS
+    from sky.calib.solve import _MIN_CLEAN_VIEWS
     views = _project_wide_views()[: _MIN_CLEAN_VIEWS + 1]   # 9 views
     rng = np.random.default_rng(5)
     n_corners = PATTERN_COLS * PATTERN_ROWS
@@ -608,7 +608,7 @@ def test_dump_roundtrip() -> None:
     Proves the debug dump (so the operator can send us REAL data) is wired and that the
     .npz round-trips the object/image points, board geometry, image size, and result.
     """
-    from ui.mathlib.calib.solve import dump_views
+    from sky.calib.solve import dump_views
 
     views = _project_wide_views()
     with tempfile.TemporaryDirectory() as tmp:
@@ -984,10 +984,10 @@ def test_package_import_is_cv2_free() -> None:
     code = (
         "import sys; "
         "import ui.mathlib.calib; "
-        "import ui.mathlib.calib.detect; "
-        "import ui.mathlib.calib.collector; "
-        "import ui.mathlib.calib.solve; "
-        "import ui.mathlib.calib.writer; "
+        "import sky.calib.detect; "
+        "import sky.calib.collector; "
+        "import sky.calib.solve; "
+        "import sky.calib.writer; "
         "assert 'cv2' not in sys.modules, "
         "'cv2 leaked into the calib import path'; "
         "print('clean')"

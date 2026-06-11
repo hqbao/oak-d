@@ -32,7 +32,7 @@ device id so several cameras never clobber each other::
 
 The stored ``calib`` dict is EXACTLY the schema
 :meth:`imu_camera.io.reader.StereoCalib.from_json` consumes (translation in
-centimetres, the depthai convention -- see :mod:`ui.mathlib.calib.writer`), so a
+centimetres, the depthai convention -- see :mod:`sky.calib.writer`), so a
 saved wizard solve loads byte-compatibly into the live pipeline.
 """
 from __future__ import annotations
@@ -85,7 +85,7 @@ def save_camera_calib(device_id: str, calib_dict: dict,
     """Persist the wizard's calib.json ``dict`` for ``device_id`` (merges into the file).
 
     ``calib_dict`` is the schema :meth:`StereoCalib.from_json` consumes (built by
-    :func:`ui.mathlib.calib.writer.calib_to_dict`) -- stored verbatim so the live
+    :func:`sky.calib.writer.calib_to_dict`) -- stored verbatim so the live
     pipeline reloads it byte-identically.
     """
     p = path or _DEFAULT_PATH

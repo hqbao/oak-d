@@ -1,13 +1,13 @@
 """Checkerboard corner detection (Phase 3 -- the calibration math core).
 
-The operator points the OAK-D at the printed/displayed board from Phase 1
-(:mod:`ui.mathlib.calib.checkerboard`); this module turns one grayscale frame into
-the subpixel inner-corner coordinates the stereo solve consumes.
+The operator points the camera at the printed/displayed board from Phase 1
+(:mod:`sky.calib.checkerboard`); this module turns one grayscale frame into the
+subpixel inner-corner coordinates the stereo solve consumes.
 
 cv2 POLICY -- the flight runtime (VIO / SLAM / depth) is cv2-free and STAYS so
 -----------------------------------------------------------------------------
 The calibration wizard is an operator/dev tool, NOT a flight path, so OpenCV is
-acceptable here. To keep importing :mod:`ui.mathlib.calib` from EVER pulling cv2
+acceptable here. To keep importing :mod:`sky.calib` from EVER pulling cv2
 into the flight processes, ``cv2`` is **lazy-imported inside the functions** that
 need it -- never at module top. Merely importing this module (or the package) must
 not load OpenCV; the self-test asserts ``cv2`` stays out of ``sys.modules`` on a
@@ -61,7 +61,7 @@ def detect_corners(
         ``N == pattern_cols * pattern_rows``, or ``None`` if the board was not found
         (partially occluded, too oblique, out of frame, ...).
     """
-    # Lazy import: keeps `import ui.mathlib.calib` cv2-free for the flight path.
+    # Lazy import: keeps `import sky.calib` cv2-free for the flight path.
     import cv2
 
     if gray.ndim != 2:

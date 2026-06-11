@@ -1,7 +1,7 @@
 """Stereo camera-calibration solve (Phase 3 -- the calibration math core).
 
 Takes the per-view left/right checkerboard corners collected by
-:class:`ui.mathlib.calib.collector.StereoCheckerboardCollector` and recovers the
+:class:`sky.calib.collector.StereoCheckerboardCollector` and recovers the
 two intrinsics, their distortion, and the rigid left->right extrinsic.
 
 WIDE-FOV (fisheye) MODEL -- why the default 5-coeff model is NOT enough
@@ -242,7 +242,7 @@ def solve_stereo(
         List of ``(corners_left, corners_right)`` pairs, each an ``(N,2)`` float
         array with ``N == pattern_cols * pattern_rows`` corners in the detector's
         raster order (as produced by
-        :class:`~ui.mathlib.calib.collector.StereoCheckerboardCollector`).
+        :class:`~sky.calib.collector.StereoCheckerboardCollector`).
     pattern_cols, pattern_rows:
         INNER-corner counts (OpenCV ``patternSize``).
     square_size_m:
@@ -272,7 +272,7 @@ def solve_stereo(
     The per-view ``(corners_left, corners_right)`` pairs MUST already correspond
     index-for-index (``object[k]``/``left[k]``/``right[k]`` = the same board point). The
     180-degree corner-order ambiguity that :func:`cv2.findChessboardCorners` exposes is
-    reconciled UPSTREAM by :func:`ui.mathlib.calib.detect.reconcile_lr` (called by the
+    reconciled UPSTREAM by :func:`sky.calib.detect.reconcile_lr` (called by the
     collector when it accepts a view) -- a mismatched (reversed) right order would
     otherwise make this solve diverge to a ~1 m baseline / ~168-degree rotation.
 
@@ -301,7 +301,7 @@ def solve_stereo(
     BACK to the standard 5-coeff model, which is well-conditioned on mild data. The
     sanity verdict thus self-selects the right model per lens with NO operator input.
     """
-    # Lazy import: keeps `import ui.mathlib.calib` cv2-free for the flight path.
+    # Lazy import: keeps `import sky.calib` cv2-free for the flight path.
     import cv2
 
     if len(views) < 2:

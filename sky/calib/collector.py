@@ -26,7 +26,7 @@ a per-axis "coverage" tally tells the operator which axis they still need to var
 cv2 POLICY
 ----------
 This module's dataclass logic holds NO cv2 state; the only OpenCV touch is the call
-into :func:`ui.mathlib.calib.detect.detect_corners`, which lazy-imports cv2 itself.
+into :func:`sky.calib.detect.detect_corners`, which lazy-imports cv2 itself.
 Importing this module (or the package) therefore does not load OpenCV.
 """
 from __future__ import annotations

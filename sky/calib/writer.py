@@ -1,6 +1,6 @@
 """calib.json writer (Phase 3 -- the calibration math core), round-trip safe.
 
-Serialises a :class:`ui.mathlib.calib.solve.StereoCalibResult` to the exact JSON
+Serialises a :class:`sky.calib.solve.StereoCalibResult` to the exact JSON
 schema that :meth:`imu_camera.io.reader.StereoCalib.from_json` consumes, so a calib
 produced by the wizard loads byte-compatibly into the live pipeline.
 
@@ -90,7 +90,7 @@ def write_calib_json(result: StereoCalibResult,
     Parameters
     ----------
     result:
-        The solved :class:`~ui.mathlib.calib.solve.StereoCalibResult`.
+        The solved :class:`~sky.calib.solve.StereoCalibResult`.
     image_size:
         ``(width, height)`` in pixels (cv2 convention).
     path:
