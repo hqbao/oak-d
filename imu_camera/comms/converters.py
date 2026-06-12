@@ -24,14 +24,14 @@ import numpy as np
 
 from . import topics
 from .messages import (
-    BaWindow, CamSync, DepthFrame, FrameGyroFuse, FrameInliers, FrameTracks,
-    ImuCamPacket, ImuRaw, Keyframe, LoopCorrection, LoopMatch, PoseMsg,
-    SlamOverlay, END,
+    BaWindow, CamSync, DepthFrame, FrameFrontend, FrameGyroFuse, FrameInliers,
+    FrameTracks, ImuCamPacket, ImuRaw, Keyframe, LoopCorrection, LoopMatch,
+    PoseMsg, SlamOverlay, END,
 )
 from .wire import (
-    WireBaWindow, WireCamSync, WireDepthFrame, WireEnd, WireFrameInliers,
-    WireFrameTracks, WireGyroFuse, WireImuCamPacket, WireImuRaw, WireKeyframe,
-    WireLoopCorrection, WireLoopMatch, WirePoseMsg, WireSlamMap,
+    WireBaWindow, WireCamSync, WireDepthFrame, WireEnd, WireFrameFrontend,
+    WireFrameInliers, WireFrameTracks, WireGyroFuse, WireImuCamPacket, WireImuRaw,
+    WireKeyframe, WireLoopCorrection, WireLoopMatch, WirePoseMsg, WireSlamMap,
 )
 from .ring_registry import RingRegistry
 
@@ -297,6 +297,52 @@ def _ba_window_to_local(wm: WireBaWindow, rings: RingRegistry) -> BaWindow:
         n_kf=int(wm.n_kf), n_lm=int(wm.n_lm))
 
 
+def _frontend_to_wire(msg: FrameFrontend, rings: RingRegistry, endpoint: str):
+    # Pure POD: the quantised heatmap (<= 240 px longest side, uint8) + the capped
+    # per-track flow arrays ride the message itself -- no shared-memory ring, no
+    # full-resolution image (mirrors _ba_window_to_wire). Force the canonical
+    # dtypes (the codec keys off dtype.name) so the bytes are stable across hosts.
+    del rings, endpoint                                # pure POD, no ring slot
+    return WireFrameFrontend(
+        seq=int(msg.seq), ts_ns=int(msg.ts_ns),
+        resp_q=np.asarray(msg.resp_q, dtype=np.uint8).reshape(
+            msg.resp_q.shape[0], -1),
+        resp_max=float(msg.resp_max),
+        resp_h=int(msg.resp_h), resp_w=int(msg.resp_w),
+        corner_xy=np.asarray(msg.corner_xy, dtype=np.float32).reshape(-1, 2),
+        min_distance=float(msg.min_distance),
+        quality_level=float(msg.quality_level),
+        bucketed=bool(msg.bucketed),
+        grid_rows=int(msg.grid_rows), grid_cols=int(msg.grid_cols),
+        flow_id=np.asarray(msg.flow_id, dtype=np.int64).reshape(-1),
+        flow_prev=np.asarray(msg.flow_prev, dtype=np.float32).reshape(-1, 2),
+        flow_next=np.asarray(msg.flow_next, dtype=np.float32).reshape(-1, 2),
+        flow_fb_err=np.asarray(msg.flow_fb_err, dtype=np.float32).reshape(-1),
+        flow_culled=np.asarray(msg.flow_culled, dtype=bool).reshape(-1),
+        fb_threshold=float(msg.fb_threshold))
+
+
+def _frontend_to_local(wm: WireFrameFrontend, rings: RingRegistry) -> FrameFrontend:
+    del rings                                          # pure POD, no ring slot
+    return FrameFrontend(
+        seq=int(wm.seq), ts_ns=int(wm.ts_ns),
+        resp_q=np.asarray(wm.resp_q, dtype=np.uint8).reshape(
+            wm.resp_q.shape[0], -1),
+        resp_max=float(wm.resp_max),
+        resp_h=int(wm.resp_h), resp_w=int(wm.resp_w),
+        corner_xy=np.asarray(wm.corner_xy, dtype=np.float32).reshape(-1, 2),
+        min_distance=float(wm.min_distance),
+        quality_level=float(wm.quality_level),
+        bucketed=bool(wm.bucketed),
+        grid_rows=int(wm.grid_rows), grid_cols=int(wm.grid_cols),
+        flow_id=np.asarray(wm.flow_id, dtype=np.int64).reshape(-1),
+        flow_prev=np.asarray(wm.flow_prev, dtype=np.float32).reshape(-1, 2),
+        flow_next=np.asarray(wm.flow_next, dtype=np.float32).reshape(-1, 2),
+        flow_fb_err=np.asarray(wm.flow_fb_err, dtype=np.float32).reshape(-1),
+        flow_culled=np.asarray(wm.flow_culled, dtype=bool).reshape(-1),
+        fb_threshold=float(wm.fb_threshold))
+
+
 # --------------------------------------------------------------------------- #
 # Registry: topic -> (to_wire, to_local). Bridges pick converters by topic.
 # Map-overlay + calib-bundle topics travel WITHOUT a local-side reconstruction
@@ -324,6 +370,7 @@ CONVERTERS: dict[str, tuple[ToWire, ToLocal]] = {
     topics.SLAM_MAP:        (_slam_overlay_to_wire, _slam_map_to_local),
     topics.SLAM_LOOP:       (_loop_match_to_wire, _loop_match_to_local),
     topics.BA_WINDOW:       (_ba_window_to_wire, _ba_window_to_local),
+    topics.FRAME_FRONTEND:  (_frontend_to_wire, _frontend_to_local),
 }
 
 

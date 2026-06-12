@@ -339,6 +339,42 @@ class WireBaWindow:
     n_lm: int
 
 
+@dataclass(frozen=True)
+class WireFrameFrontend:
+    """Wire form of :class:`comms.messages.FrameFrontend` (``frame.frontend``).
+
+    The per-frame frontend-internals snapshot for the UI's "Frontend Internals"
+    view, published by VIO ONLY under the opt-in ``--frontend-viz`` flag. Pure POD
+    -- the quantised heatmap (<= 240 px longest side, uint8) + the per-track flow
+    arrays (capped) are small enough to ride the message itself (no shared-memory
+    ring, no full-resolution image -- mirrors :class:`WireBaWindow`). The codec
+    ships every ndarray by ``dtype.name`` (so the uint8 / int64 / float32 / bool
+    columns round-trip exactly) and every float bitwise (``struct('>d')``).
+
+    Field ORDER is the FROZEN codec contract (see module docstring): it MUST match
+    :class:`comms.messages.FrameFrontend` field-for-field, name + order + dtype.
+    """
+
+    seq: int
+    ts_ns: int
+    resp_q: np.ndarray                            # (Hq, Wq) uint8 quantised map
+    resp_max: float                               # log1p peak (colourbar scale)
+    resp_h: int                                   # original response height
+    resp_w: int                                   # original response width
+    corner_xy: np.ndarray                         # (C, 2) float32 corners (x, y)
+    min_distance: float                           # corner spacing (circle radius)
+    quality_level: float                          # response acceptance fraction
+    bucketed: bool                                # per-cell grid detection on?
+    grid_rows: int                                # grid rows (0 when not bucketed)
+    grid_cols: int                                # grid cols (0 when not bucketed)
+    flow_id: np.ndarray                           # (T,) int64 track ids
+    flow_prev: np.ndarray                         # (T, 2) float32 prev pixel
+    flow_next: np.ndarray                         # (T, 2) float32 next pixel
+    flow_fb_err: np.ndarray                       # (T,) float32 fb-error px
+    flow_culled: np.ndarray                       # (T,) bool culled this frame
+    fb_threshold: float                           # cull gate (colour ceiling)
+
+
 # --------------------------------------------------------------------------- #
 # Control sentinel: END signal across the IPC boundary
 # --------------------------------------------------------------------------- #
@@ -384,6 +420,7 @@ TOPIC_WIRE: dict[str, type] = {
     topics.SLAM_MAP:        WireSlamMap,
     topics.SLAM_LOOP:       WireLoopMatch,
     topics.BA_WINDOW:       WireBaWindow,
+    topics.FRAME_FRONTEND:  WireFrameFrontend,
     # Retained / read-directly topics (no converter), but the registry MUST cover
     # them so consumers can decode the wire object. See blueprint risk #5.
     topics.CALIB_BUNDLE:    WireCalibBundle,

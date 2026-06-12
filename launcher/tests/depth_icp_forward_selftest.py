@@ -35,7 +35,7 @@ from launcher.main import build_vio_args                       # noqa: E402
 def _ns(**over) -> types.SimpleNamespace:
     base = dict(kf_every=5, no_gyro=False, worker=False,
                 tight=False, stabilize_velocity=False, depth_icp=False,
-                ba_window=False)
+                ba_window=False, frontend_viz=False)
     base.update(over)
     return types.SimpleNamespace(**base)
 

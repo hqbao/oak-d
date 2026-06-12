@@ -105,6 +105,18 @@ VIO_MAP = "vio.map"
 # (mirrors slam.loop). Consumed only by the UI.
 BA_WINDOW = "ba.window"
 
+# Per-frame frontend-internals snapshot for the UI's "Frontend Internals" view:
+# the Shi-Tomasi (lambda_min) response heatmap (quantised producer-side), the
+# accepted corners + detection geometry (min_distance / quality / grid), and the
+# KLT flow field (prev->next per-track pixels coloured by forward-backward error,
+# with the culled mask). Shows HOW the frontend finds + tracks features.
+# Published by the VIO process ONLY when the opt-in ``--frontend-viz`` flag is on
+# -- the default-OFF path builds the plain KLTFrontend (no capture), so the
+# returned tracks AND the byte-parity oracle are UNAFFECTED. The heatmap rides
+# inline as a quantised uint8 ndarray (no shared-memory ring, like ba.window).
+# Consumed only by the UI.
+FRAME_FRONTEND = "frame.frontend"
+
 # Topics that MUST stay FIFO end-to-end -- VIO + deterministic replay break if
 # any frame is coalesced away. A module built with ``latest_only=True`` whose
 # inbox or downstream chain feeds the odometry compute path (PreintegratePrior /

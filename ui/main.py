@@ -614,7 +614,8 @@ def run_ui(*, vio_endpoint: str = DEFAULT_VIO_ENDPOINT,
            capture_endpoint: str = DEFAULT_CAPTURE_ENDPOINT,
            calib_timeout_s: float = 60.0,
            default_view: str = "TOP",
-           ba_window: bool = False) -> int:
+           ba_window: bool = False,
+           frontend_viz: bool = False) -> int:
     """Open the single-view Qt UI (5 trajectories) and block on the Qt event loop."""
     # Import Qt lazily so a headless smoke / CI run that doesn't need the GUI
     # can import this module without pulling PyQt6.
@@ -633,6 +634,7 @@ def run_ui(*, vio_endpoint: str = DEFAULT_VIO_ENDPOINT,
     from ui.qt.gyrofuse_window import GyroFuseWindow
     from ui.qt.loop_window import LoopClosureWindow
     from ui.qt.ba_window import BaWindow
+    from ui.qt.frontend_window import FrontendWindow
     from ui.qt.posegraph_window import PoseGraphWindow
     from ui.qt.map_window import MapWindow
     from ui.qt.calib_dialogs import GyroCalibDialog, AccelCalibDialog
@@ -642,7 +644,8 @@ def run_ui(*, vio_endpoint: str = DEFAULT_VIO_ENDPOINT,
     from ui.modules import (
         IpcImuRawSource, IpcStereoRawSource, IpcGyroFuseSource,
         ipc_triplet_factory, ipc_keypoint_factory, ipc_slam_map_factory,
-        ipc_loop_factory, ipc_ba_window_factory, ipc_pose_graph_factory,
+        ipc_loop_factory, ipc_ba_window_factory, ipc_frontend_viz_factory,
+        ipc_pose_graph_factory,
     )
 
     # 1. Wait for VIO + SLAM to be ready (and learn the capture resolution).
@@ -923,6 +926,33 @@ def run_ui(*, vio_endpoint: str = DEFAULT_VIO_ENDPOINT,
                                  "(VIO publishes ba.window only then).")
     vis_menu.addAction(ba_window_act)
 
+    def _open_frontend_window() -> None:
+        if getattr(win, "_frontend_win", None) is None:
+            # Source binds VIO's endpoint (the frame.frontend snapshot publisher,
+            # present only when VIO ran with --frontend-viz). live=True -> the
+            # window defaults to "Follow latest" (rolling head); the user unchecks
+            # it to scrub the buffered timeline. Device-agnostic, like the others.
+            win._frontend_win = FrontendWindow(
+                ipc_frontend_viz_factory(vio_endpoint,
+                                         connect_timeout_s=calib_timeout_s),
+                live=True, parent=win)
+        win._frontend_win.show()
+        win._frontend_win.raise_()
+        win._frontend_win.activateWindow()
+        win._frontend_win.ensure_started()
+        win.statusBar().showMessage("Frontend Internals opened.", 2500)
+
+    frontend_act = QAction("Frontend Internals…", win)
+    frontend_act.triggered.connect(_open_frontend_window)
+    if not frontend_viz:
+        # The pipeline was not launched with --frontend-viz, so VIO never publishes
+        # frame.frontend -- disable the action (with a hint) rather than open a
+        # window that would sit forever on its "waiting" frame.
+        frontend_act.setEnabled(False)
+        frontend_act.setToolTip("Launch with --frontend-viz to enable Frontend "
+                                "Internals (VIO publishes frame.frontend only then).")
+    vis_menu.addAction(frontend_act)
+
     # SLAM Map (3D room): a ModalAI/VOXL-style VOXEL OCCUPANCY map of the room
     # (clean green voxel cubes -- floor grid + walls + furniture), in the same ENU
     # frame as the main Viewer3D. The IpcSlamMapSource consumes VIO's ``keyframe``
@@ -1113,8 +1143,8 @@ def run_ui(*, vio_endpoint: str = DEFAULT_VIO_ENDPOINT,
         # (closeEvent stops the worker). The calib dialogs are modal + scoped to
         # their handler's `finally`, so there's nothing to clean up for them here.
         for _attr in ("_triplet_win", "_keypoints_win", "_gyrofuse_win",
-                      "_loop_win", "_ba_window_win", "_pose_graph_win",
-                      "_slam_map_win"):
+                      "_loop_win", "_ba_window_win", "_frontend_win",
+                      "_pose_graph_win", "_slam_map_win"):
             _w = getattr(win, _attr, None)
             if _w is not None:
                 try:
@@ -1159,6 +1189,11 @@ def main() -> int:
                     help="enable the Visualize ▸ BA Window action (VIO must run "
                          "with --ba-window so it publishes ba.window). Off => the "
                          "menu item is shown but disabled.")
+    ap.add_argument("--frontend-viz", action="store_true",
+                    help="enable the Visualize ▸ Frontend Internals action (VIO "
+                         "must run with --frontend-viz so it publishes "
+                         "frame.frontend). Off => the menu item is shown but "
+                         "disabled.")
     args = ap.parse_args()
     return run_ui(
         vio_endpoint=args.vio_endpoint,
@@ -1167,6 +1202,7 @@ def main() -> int:
         calib_timeout_s=args.calib_timeout,
         default_view=args.default_view,
         ba_window=args.ba_window,
+        frontend_viz=args.frontend_viz,
     )
 
 

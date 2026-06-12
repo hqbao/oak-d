@@ -437,7 +437,7 @@ The menu bar renders **in-window on every platform** (`setNativeMenuBar(False)`)
 - **View** — camera presets and Follow Camera.
 - **Visualize** — *Camera + Depth + IMU (triplet)*, *Keypoint Depth Tracker*,
   *Gyro Fusion (strip chart)*, *Loop Closure*, *Pose Graph (before/after)*, *BA Window*,
-  and *SLAM Map (3D room)*.
+  *Frontend Internals*, and *SLAM Map (3D room)*.
   - *Pose Graph (before/after)* — the **SE(3) pose-graph optimization** made visible: a
     2D top-down (world X–Z) view of the keyframe poses as graph **nodes**, **odometry
     edges** chaining consecutive keyframes, and the confirmed **loop edge(s)** as a
@@ -462,6 +462,23 @@ The menu bar renders **in-window on every platform** (`setNativeMenuBar(False)`)
     segment solve-by-solve). It rides the pure-POD `ba.window` topic published by VIO
     only under `--ba-window`; the capture step runs the SAME frozen `run_ba`, so the
     byte-parity oracle stays gap=0 and `pose.refined` is unchanged.
+  - *Frontend Internals* (opt-in, launch with `--frontend-viz`) — **how the visual
+    frontend finds + tracks features**, two linked views in one window. **Top:** the
+    **Shi-Tomasi (λ_min) response heatmap** (INFERNO colormap, log-scaled) with the
+    **accepted corners** + their `min_distance` spacing circles + (at low res) the
+    **bucket grid** + a colourbar — "why THIS pixel is a corner, not that bright
+    edge". **Bottom:** the **KLT flow field** — one arrow per track from its previous
+    pixel to its KLT next pixel, coloured **green→red by forward-backward error /
+    threshold**, with **culled** points drawn as red X's — "how tracking follows +
+    culls bad/occluded points". A **timeline slider** scrubs the buffered frames
+    ("Follow latest" rolls the head LIVE; uncheck to inspect a replay frame-by-frame).
+    The heatmap is **quantised producer-side** (log1p → uint8 → block-MAX downsample
+    to ≤240 px) and rides the pure-POD `frame.frontend` topic published by VIO only
+    under `--frontend-viz`; VIO builds a `CaptureKLTFrontend` that returns
+    **byte-identical tracks** (it only adds the read-only response map + the
+    forward-backward error it already computed), so the byte-parity oracle stays gap=0
+    and the motion estimate is unchanged. Works on both the loose and tight paths
+    (the KLT frontend is identical).
   - *SLAM Map (3D room)* — a **ModalAI/VOXL-style VOXEL OCCUPANCY map**: the room as
     clean green voxel cubes (floor grid + walls + furniture as blocky voxels), in the
     same ENU frame as the main viewer. It is built as a **probabilistic LOG-ODDS

@@ -124,7 +124,8 @@ def run_vio(*,
             tight: bool = False,
             stabilize_velocity: bool = False,
             depth_icp: bool = False,
-            ba_window: bool = False) -> int:
+            ba_window: bool = False,
+            frontend_viz: bool = False) -> int:
     """Run the VIO process until END / SIGTERM / Ctrl-C.
 
     ``tight`` selects the TIGHT-coupled VIO backend (the joint visual + IMU
@@ -219,7 +220,8 @@ def run_vio(*,
                           latest_only=False, level_tilt=True,
                           publish_vo=True,   # live viewer's pure-vision "VO" line
                           retain_imu=tight,  # tight backend needs inter-KF IMU
-                          loop_correct=loop_correct)  # closed-loop SLAM feedback
+                          loop_correct=loop_correct,  # closed-loop SLAM feedback
+                          frontend_viz=frontend_viz)  # Frontend Internals capture
     if tight:
         LOG.info("vio: TIGHT-coupled VIO backend selected (--tight) "
                  "[imu_info_weight=True]")
@@ -235,6 +237,11 @@ def run_vio(*,
     # capture overlay). Publish ba.window only when the capture engine is actually
     # built, so a consumer never waits on a topic that will never emit.
     ba_window_on = bool(ba_window and not tight)
+    # Frontend-internals capture is NOT tight-only: the KLT frontend is identical
+    # on the loose and tight paths, so --frontend-viz works on both. The
+    # CaptureKLTFrontend returns byte-identical tracks, so the oracle is
+    # unaffected (and the oracle never sets this flag anyway).
+    frontend_viz_on = bool(frontend_viz)
 
     # 5. Open the OUTPUT IPCPubSub server + publisher bridge. KEYFRAME is the only
     #    VIO output that needs shared memory (image + depth payload), so it gets
@@ -260,6 +267,11 @@ def run_vio(*,
                     topics.FRAME_GYROFUSE]
     if ba_window_on:
         _pose_topics.append(topics.BA_WINDOW)
+    # frame.frontend (the opt-in frontend-internals snapshot) is also pure POD
+    # (quantised heatmap + capped flow arrays, no images), so it rides this same
+    # publisher; appended ONLY when the capture frontend is built.
+    if frontend_viz_on:
+        _pose_topics.append(topics.FRAME_FRONTEND)
     pub_pose = IPCPublisher(local, server, vio_rings, _pose_topics,
                             endpoint=endpoint,
                             ring_endpoint=endpoint)
@@ -422,6 +434,13 @@ def main() -> int:
                          "reprojection error) for the UI's BA Window visualiser. "
                          "Opt-in; OFF by default (oracle byte-identical); ignored "
                          "with --tight.")
+    ap.add_argument("--frontend-viz", action="store_true",
+                    help="publish frame.frontend snapshots (Shi-Tomasi response "
+                         "heatmap + accepted corners + KLT flow field coloured by "
+                         "forward-backward error) for the UI's Frontend Internals "
+                         "view. Opt-in; OFF by default. Builds a CaptureKLTFrontend "
+                         "that returns BYTE-IDENTICAL tracks, so the oracle stays "
+                         "byte-identical; works on both the loose and tight paths.")
     args = ap.parse_args()
 
     return run_vio(
@@ -438,6 +457,7 @@ def main() -> int:
         stabilize_velocity=args.stabilize_velocity,
         depth_icp=args.depth_icp,
         ba_window=args.ba_window,
+        frontend_viz=args.frontend_viz,
     )
 
 

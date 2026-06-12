@@ -80,7 +80,9 @@ import numpy as np
 
 from vio.comms import Module, LocalPubSub, topics
 from vio.comms.messages import END
-from sky.front.frontend import FrontendConfig, KLTFrontend
+from dataclasses import replace
+
+from sky.front.frontend import CaptureKLTFrontend, FrontendConfig, KLTFrontend
 from sky.front.odometry import OdometryConfig, RGBDVisualOdometry
 from sky.backend.bundle import BAConfig
 from sky.backend.windowed import WindowedConfig
@@ -95,6 +97,7 @@ from .estimate_motion import EstimateMotion
 from .correct_tilt import CorrectTilt
 from .publish_inliers import PublishInliers
 from .publish_gyrofuse import PublishGyroFuse
+from .publish_frontend_viz import PublishFrontendViz
 from .propagate_imu import PropagateImu
 from .loop_inbox import LoopCorrectionInbox
 from .publish_pose import PublishPose
@@ -116,13 +119,29 @@ class OdometryModule(Module):
                  kf_every: int = 5, use_gyro: bool = True,
                  latest_only: bool = False, level_tilt: bool = False,
                  publish_vo: bool = False, retain_imu: bool = False,
-                 loop_correct: bool = False) -> None:
+                 loop_correct: bool = False, frontend_viz: bool = False) -> None:
         super().__init__("odometry", bus, latest_only=latest_only)
         # ``frontend_cfg`` carries the resolution-scaled KLT + corner-detection
         # geometry (window/pyramid/corner budget, and at low res the block_size=3
         # + bucketed coverage levers). Defaulting to None keeps the historical
         # full-quality FrontendConfig() the offline byte-parity oracle relies on.
-        fe = KLTFrontend(frontend_cfg) if frontend_cfg is not None else None
+        #
+        # ``frontend_viz`` (opt-in, --frontend-viz) builds a CaptureKLTFrontend
+        # instead of the plain KLTFrontend so the frontend stashes a per-frame
+        # FrontendVizSnap (response heatmap + corners + flow field) for the UI's
+        # "Frontend Internals" view. The CaptureKLTFrontend returns BYTE-IDENTICAL
+        # tracks (it only adds a read-only heatmap + the fb-error it already
+        # computed), so the motion estimate -- and the oracle -- are UNAFFECTED.
+        # It is LIVE-only (the offline oracle never sets it); the publish step
+        # (PublishFrontendViz) is wired into the frame-chain only when on.
+        self.ctx.state["frontend_viz"] = bool(frontend_viz)
+        if frontend_viz:
+            # Force capture on; keep all the resolution-scaled geometry. (When no
+            # frontend_cfg was supplied, capture the historical default config.)
+            cap_cfg = replace(frontend_cfg or FrontendConfig(), capture=True)
+            fe = CaptureKLTFrontend(cap_cfg)
+        else:
+            fe = KLTFrontend(frontend_cfg) if frontend_cfg is not None else None
         self.ctx.state["vo"] = RGBDVisualOdometry(
             K, odom_cfg or OdometryConfig(), frontend=fe)
         self.ctx.state["kf_every"] = int(kf_every)
@@ -188,10 +207,17 @@ class OdometryModule(Module):
         # pose.odom). It sits after CorrectTilt (so it re-anchors to the final
         # vision pose on keyframes) and before PublishPose / PublishVo (PublishVo
         # reads vo.pose_vo, not step.pose, so the pure-vision line is unaffected).
-        frame_chain = [TrackFeatures(), PublishTracks(), AlignGravity(),
-                       PullPrior(), EstimateMotion(), CorrectTilt(),
-                       PublishInliers(), PublishGyroFuse(),
-                       PropagateImu(), PublishPose()]
+        # PublishFrontendViz (opt-in, --frontend-viz) runs RIGHT AFTER
+        # PublishTracks: the capture frontend already ran for this frame (in
+        # TrackFeatures), so its FrontendVizSnap is fresh. It passes the carrier
+        # through UNCHANGED (it only reads the snap + publishes frame.frontend), so
+        # it never touches the motion solve. Wired only when frontend_viz is on.
+        frame_chain = [TrackFeatures(), PublishTracks()]
+        if frontend_viz:
+            frame_chain.append(PublishFrontendViz())
+        frame_chain += [AlignGravity(), PullPrior(), EstimateMotion(),
+                        CorrectTilt(), PublishInliers(), PublishGyroFuse(),
+                        PropagateImu(), PublishPose()]
         if publish_vo:
             frame_chain.append(PublishVo())
         frame_chain.append(EmitKeyframe())
@@ -200,6 +226,8 @@ class OdometryModule(Module):
                topics.FRAME_INLIERS, topics.FRAME_GYROFUSE]
         if publish_vo:
             fwd.append(topics.POSE_VO)
+        if frontend_viz:
+            fwd.append(topics.FRAME_FRONTEND)
         self.forwards_to(*fwd)
 
 

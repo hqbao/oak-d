@@ -548,6 +548,150 @@ def test_ba_window_buffer() -> None:
     print("    [ok] BA-window buffer: evicts past K, callback sees all, scrub OK")
 
 
+def _mk_frame_frontend(seq: int, n_corner: int = 60, n_flow: int = 80):
+    """A synthetic :class:`~ui.comms.messages.FrameFrontend` for the offscreen test.
+
+    Deterministic per ``seq`` so a slider scrub to a prior index is verifiable.
+    Carries a bright corner blob in the quantised heatmap (so the INFERNO colormap
+    draws a clear hot spot), a spread of corners, and a flow field with a mix of
+    small + large fb-error AND culled tracks (so the renderer draws green->red
+    arrows AND red X's).
+    """
+    from ui.comms.messages import FrameFrontend
+    rng = np.random.default_rng(2000 + seq)
+    resp_q = np.zeros((134, 214), np.uint8)
+    # A couple of bright corner blobs that shift with seq (so frames differ).
+    resp_q[20 + seq:28 + seq, 50:58] = 250
+    resp_q[80:88, 150 - seq:158 - seq] = 200
+    corner_xy = (rng.random((n_corner, 2)).astype(np.float32) * [640, 400])
+    flow_prev = (rng.random((n_flow, 2)).astype(np.float32) * [640, 400])
+    flow_next = flow_prev + rng.normal(0, 3, (n_flow, 2)).astype(np.float32)
+    fb = rng.uniform(0.0, 1.4, n_flow).astype(np.float32)
+    culled = fb >= 1.0
+    return FrameFrontend(
+        seq=seq, ts_ns=seq * 50_000_000,
+        resp_q=resp_q, resp_max=15.9, resp_h=400, resp_w=640,
+        corner_xy=corner_xy, min_distance=12.0, quality_level=0.01,
+        bucketed=True, grid_rows=5, grid_cols=6,
+        flow_id=np.arange(seq, seq + n_flow, dtype=np.int64),
+        flow_prev=flow_prev, flow_next=flow_next, flow_fb_err=fb,
+        flow_culled=culled, fb_threshold=1.0)
+
+
+class _StubFrontendVizSource:
+    """Duck-typed frontend-viz source for the offscreen test (no IPC).
+
+    Mirrors :class:`~ui.modules.ipc_sources.IpcFrontendVizSource`'s surface used
+    by the window: ``start(cb)`` / ``stop()`` / ``.error`` plus ``snapshot_count``
+    / ``snapshot_at``. ``start`` pushes the synthetic snapshots synchronously and
+    buffers them so the slider can scrub.
+    """
+
+    error = None
+
+    def __init__(self, snaps):
+        self._snaps = list(snaps)
+        self._cb = None
+
+    def start(self, cb):
+        self._cb = cb
+        for s in self._snaps:
+            cb(s)                                     # push all synchronously
+
+    def stop(self):
+        pass
+
+    def snapshot_count(self):
+        return len(self._snaps)
+
+    def snapshot_at(self, i):
+        n = len(self._snaps)
+        if n == 0:
+            return None
+        if i < 0:
+            i += n
+        return self._snaps[i] if 0 <= i < n else None
+
+
+def test_frontend_window_offscreen(app) -> None:
+    """Construct the Frontend Internals window with a stub source; render + scrub.
+
+    Proves the Qt window <-> renderer wiring (construct -> start -> tick -> render
+    -> slider scrub -> close) under offscreen Qt, WITHOUT a real frame.frontend
+    over IPC. Pushes THREE synthetic snapshots and checks: non-blank canvas (both
+    heatmap + flow drawn), slider range tracks the buffer, and dragging the slider
+    re-renders a PRIOR snapshot (different pixels).
+    """
+    print("\n  [menus] Frontend Internals (Qt + renderer wiring, slider)")
+    from ui.qt.frontend_window import FrontendWindow
+
+    snaps = [_mk_frame_frontend(s) for s in (0, 6, 12)]
+    win = FrontendWindow(lambda: _StubFrontendVizSource(snaps), live=True)
+    try:
+        win.start()                                   # renders the waiting frame
+        app.processEvents()
+        win._on_tick()                                # consume the buffered snaps
+        app.processEvents()
+        img_head = win._buf
+        # _buf holds the RENDERER output (its default 1100x860), not the QLabel
+        # size -- the label scales the pixmap to fit on blit.
+        _check(img_head is not None and img_head.shape == (860, 1100, 3)
+               and img_head.dtype == np.uint8,
+               f"frontend window rendered (860,1100,3) uint8 (got "
+               f"{None if img_head is None else (img_head.shape, img_head.dtype)})")
+        # non-blank: many non-background pixels (heatmap + flow actually drawn).
+        nonbg = int((img_head.reshape(-1, 3) != np.array([13, 17, 23]))
+                    .any(1).sum())
+        _check(nonbg > 5000, f"frontend canvas is non-blank ({nonbg} px drawn)")
+        # slider range grew to the buffer (3 snaps -> max index 2).
+        _check(win._slider.maximum() == 2,
+               f"slider range tracks the 3-snap buffer (max={win._slider.maximum()})")
+
+        # Drag to a PRIOR snapshot -> scrub re-renders snap 0 (different pixels).
+        win._follow_cb.setChecked(False)
+        win._slider.setValue(0)                       # scrub to the oldest
+        app.processEvents()
+        img_scrub = win._buf.copy()
+        diff = int((img_scrub != img_head).any(2).sum())
+        _check(diff > 500,
+               f"dragging the slider re-rendered a different (prior) snapshot "
+               f"({diff} px changed)")
+        _check(win._first_seen, "frontend window registered the synthetic snapshots")
+    finally:
+        win.close()
+        app.processEvents()
+    print(f"    [ok] Frontend Internals: rendered (heatmap+flow), slider scrubs a "
+          f"prior snapshot ({nonbg} px drawn)")
+
+
+def test_frontend_viz_buffer() -> None:
+    """Unit-test the frontend-viz source buffer/slider semantics (no Qt).
+
+    Proves :class:`~ui.modules.ipc_sources.IpcFrontendVizSource`'s deque: it
+    evicts the oldest past ``buffer``, the callback still sees EVERY snapshot,
+    indexed access returns the right snapshot, the newest is ``snapshot_at(-1)``,
+    and an out-of-range index returns ``None`` (never raises on a slider race).
+    """
+    print("\n  [menus] IpcFrontendVizSource buffer/slider semantics (no Qt)")
+    from ui.modules.ipc_sources import IpcFrontendVizSource
+
+    src = IpcFrontendVizSource("oak.vio.test", buffer=3)
+    seen = []
+    src._cb = seen.append                             # simulate the wired callback
+    for s in range(5):
+        src._on_msg(_mk_frame_frontend(s))
+    _check(src.snapshot_count() == 3,
+           f"deque evicts oldest past buffer=3 (count={src.snapshot_count()})")
+    _check([g.seq for g in seen] == [0, 1, 2, 3, 4],
+           "callback saw EVERY snapshot (eviction is buffer-only)")
+    _check(src.snapshot_at(0).seq == 2 and src.snapshot_at(-1).seq == 4,
+           "buffer holds the last 3 (oldest=2, newest=4); follow head = -1")
+    _check(src.snapshot_at(1).seq == 3, "replay scrub returns the indexed snap")
+    _check(src.snapshot_at(99) is None and src.snapshot_at(-99) is None,
+           "out-of-range index returns None (no raise on a slider race)")
+    print("    [ok] frontend-viz buffer: evicts past K, callback sees all, scrub OK")
+
+
 def _spawn_cap_vio(session: str, max_frames: int, kf_every: int):
     """Boot imu_camera(replay) + vio over IPC; return (procs, cap_ep, vio_ep).
 
@@ -684,6 +828,9 @@ def test_menus(args) -> None:
     # BA-window source buffer/slider semantics (no Qt, no IPC) -- the deque the
     # window's timeline slider scrubs.
     test_ba_window_buffer()
+    # Frontend-viz source buffer/slider semantics (no Qt, no IPC) -- same deque
+    # contract for the Frontend Internals window's timeline slider.
+    test_frontend_viz_buffer()
 
     from PyQt6.QtGui import QAction
     from PyQt6.QtWidgets import QApplication
@@ -832,6 +979,14 @@ def test_menus(args) -> None:
         # Qt window + renderer wiring + the slider/before-after state machine with
         # a STUB source pushing 3 synthetic snapshots (offscreen, deterministic).
         test_ba_window_offscreen(app)
+
+        # ---------- (h) Visualize -> Frontend Internals ----------
+        # The frontend window is fed by a duck-typed source (frame.frontend over
+        # IPC). HERE we prove the Qt window + renderer wiring + the slider state
+        # machine with a STUB source pushing 3 synthetic snapshots (offscreen,
+        # deterministic) -- the heatmap + flow panels both render, the slider
+        # scrubs a prior frame.
+        test_frontend_window_offscreen(app)
     finally:
         for w in (triplet_win, keypoint_win):
             if w is not None:

@@ -58,10 +58,12 @@ from .triplet import UiTripletModule
 # classes live in ui.qt). Accessing any of these names triggers the import.
 _IPC_ADAPTERS = frozenset({
     "IpcImuRawSource", "IpcStereoRawSource", "IpcGyroFuseSource",
-    "IpcLoopMatchSource", "IpcBaWindowSource", "IpcPoseGraphSource",
+    "IpcLoopMatchSource", "IpcBaWindowSource", "IpcFrontendVizSource",
+    "IpcPoseGraphSource",
     "IpcTripletWorker", "IpcKeypointWorker", "IpcSlamMapSource",
     "ipc_triplet_factory", "ipc_keypoint_factory", "ipc_slam_map_factory",
-    "ipc_loop_factory", "ipc_ba_window_factory", "ipc_pose_graph_factory",
+    "ipc_loop_factory", "ipc_ba_window_factory", "ipc_frontend_viz_factory",
+    "ipc_pose_graph_factory",
 })
 
 __all__ = [
@@ -77,6 +79,7 @@ __all__ = [
     "IpcGyroFuseSource",
     "IpcLoopMatchSource",
     "IpcBaWindowSource",
+    "IpcFrontendVizSource",
     "IpcPoseGraphSource",
     "IpcTripletWorker",
     "IpcKeypointWorker",
@@ -86,6 +89,7 @@ __all__ = [
     "ipc_slam_map_factory",
     "ipc_loop_factory",
     "ipc_ba_window_factory",
+    "ipc_frontend_viz_factory",
     "ipc_pose_graph_factory",
 ]
 

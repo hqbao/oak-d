@@ -36,7 +36,7 @@ def _ns(**over) -> types.SimpleNamespace:
     """A launcher-args namespace with sane defaults, overridable per test."""
     base = dict(kf_every=5, no_gyro=False, worker=False,
                 tight=False, stabilize_velocity=False, depth_icp=False,
-                ba_window=False)
+                ba_window=False, frontend_viz=False)
     base.update(over)
     return types.SimpleNamespace(**base)
 

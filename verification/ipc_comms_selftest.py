@@ -165,6 +165,22 @@ def _build_vectors(mod):
              kf_pos_pre=(np.arange(9, dtype=np.float64).reshape(3, 3) * 0.49),
              lm_xyz_pre=(np.arange(12, dtype=np.float64).reshape(4, 3) * 0.24),
              n_kf=3, n_lm=4)),
+        (w.topics.FRAME_FRONTEND,
+         w.WireFrameFrontend(
+             seq=23, ts_ns=66_000_000,
+             # Quantised heatmap (uint8) -- a tiny deterministic block so the
+             # codec exercises a 2-D uint8 ndarray + its (Hq, Wq) shape header.
+             resp_q=(np.arange(24, dtype=np.uint8).reshape(4, 6) * 10),
+             resp_max=12.5, resp_h=400, resp_w=640,
+             corner_xy=(np.arange(8, dtype=np.float32).reshape(4, 2) * 11.0),
+             min_distance=12.0, quality_level=0.01, bucketed=False,
+             grid_rows=0, grid_cols=0,
+             flow_id=np.array([100, 101, 102], dtype=np.int64),
+             flow_prev=(np.arange(6, dtype=np.float32).reshape(3, 2) * 2.0),
+             flow_next=(np.arange(6, dtype=np.float32).reshape(3, 2) * 2.0 + 1.0),
+             flow_fb_err=np.array([0.1, 0.6, 1.4], dtype=np.float32),
+             flow_culled=np.array([False, False, True]),
+             fb_threshold=1.0)),
         (w.topics.CALIB_BUNDLE,
          w.WireCalibBundle(K=K, width=640, height=400, fps=20,
                            T_imu_left=T, R_imu_cam=K, accel_align=accel[0],

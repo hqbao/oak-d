@@ -340,6 +340,76 @@ class BaWindow:
 
 
 @dataclass(frozen=True)
+class FrameFrontend:
+    """One frame's frontend-internals snapshot for the "Frontend Internals" view.
+
+    Published on ``topics.FRAME_FRONTEND`` by the VIO process ONLY when the opt-in
+    ``--frontend-viz`` flag is on (the odometry module builds a
+    ``CaptureKLTFrontend`` instead of the plain ``KLTFrontend``; the default-OFF
+    path builds the plain frontend so its RETURNED TRACKS -- and the byte-parity
+    oracle -- are UNAFFECTED). It carries everything the UI's two linked views
+    render; nothing is re-derived UI-side (the FrontendConfig params are VIO-side
+    only, so a UI recompute would drift). Carries NO full-resolution image (the
+    heatmap is quantised producer-side, like ``ba.window`` carries no images).
+
+    Heatmap (quantised producer-side -- "Option B")
+    -----------------------------------------------
+    The raw Shi-Tomasi lambda_min response is log-scaled, 8-bit quantised, and
+    block-MAX downsampled (block-MAX, not mean, so 1-px corner peaks survive) to a
+    longest side <= 240 px BEFORE it goes on the wire:
+
+    * ``resp_q`` -- ``(Hq, Wq)`` uint8 quantised heatmap (rides inline like
+      ``WireBaWindow``'s arrays -- the codec ships uint8 ndarrays).
+    * ``resp_max`` -- the pre-quantisation ``log1p`` peak (the colourbar scale).
+    * ``resp_h`` / ``resp_w`` -- the ORIGINAL (full-res) response dimensions, so
+      the UI can place ``corner_xy`` (full-res pixels) onto the downsampled map.
+
+    Accepted corners + detection geometry
+    -------------------------------------
+    * ``corner_xy`` -- ``(C, 2)`` float32 accepted corner pixels (full-res, x, y);
+      the SAME live tracks the motion estimate consumes (not a parallel detector).
+    * ``min_distance`` -- min spacing between corners (the circle radius drawn).
+    * ``quality_level`` -- response acceptance fraction (status line).
+    * ``bucketed`` / ``grid_rows`` / ``grid_cols`` -- whether per-cell grid
+      detection is on + the grid (drawn only when ``bucketed``; rows/cols are 0
+      otherwise).
+
+    KLT flow field
+    --------------
+    Per tracked point (ALL prev-frame points -- kept AND culled), in prev-point
+    order; capped to a viz budget in the capture (the wire stays bounded):
+
+    * ``flow_id`` -- ``(T,)`` int64 persistent track ids.
+    * ``flow_prev`` / ``flow_next`` -- ``(T, 2)`` float32 prev-frame + KLT
+      next-frame pixel (the arrow tail -> head).
+    * ``flow_fb_err`` -- ``(T,)`` float32 forward-backward error (px); the arrow
+      colour ramps green (small) -> red (>= ``fb_threshold``).
+    * ``flow_culled`` -- ``(T,)`` bool, True where the track was dropped this
+      frame (drawn as a red X).
+    * ``fb_threshold`` -- the cull gate (the colour-ramp ceiling).
+    """
+
+    seq: int
+    ts_ns: int
+    resp_q: np.ndarray            # (Hq, Wq) uint8 quantised heatmap
+    resp_max: float               # pre-quantisation log1p peak (colourbar scale)
+    resp_h: int                   # original response height
+    resp_w: int                   # original response width
+    corner_xy: np.ndarray         # (C, 2) float32 accepted corners (x, y)
+    min_distance: float           # corner spacing (circle radius)
+    quality_level: float          # response acceptance fraction
+    bucketed: bool                # per-cell grid detection on?
+    grid_rows: int                # detection grid rows (0 when not bucketed)
+    grid_cols: int                # detection grid cols (0 when not bucketed)
+    flow_id: np.ndarray           # (T,) int64 tracked-point ids
+    flow_prev: np.ndarray         # (T, 2) float32 prev-frame pixel
+    flow_next: np.ndarray         # (T, 2) float32 next-frame pixel
+    flow_fb_err: np.ndarray       # (T,) float32 forward-backward error (px)
+    flow_culled: np.ndarray       # (T,) bool culled (dropped) this frame
+    fb_threshold: float           # cull gate (colour-ramp ceiling)
+
+
+@dataclass(frozen=True)
 class CamSync:
     """A stereo pair the ``cam`` module publishes as a sync trigger.
 

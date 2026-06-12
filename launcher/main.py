@@ -219,6 +219,22 @@ def resolve_ba_window(args) -> bool:
         args.ba_window or (not args.no_ui and not args.tight))
 
 
+def resolve_frontend_viz(args) -> bool:
+    """Effective Frontend-Internals capture state (pure -> unit-testable).
+
+    The Frontend Internals view is a UI diagnostic, so it is ON by default
+    whenever the UI runs ("just works", no flag needed) and OFF when headless
+    (lean flight path). Unlike the BA Window it is NOT tight-only: the KLT
+    frontend is identical on the loose and tight paths, so --frontend-viz works on
+    both. ``--frontend-viz`` forces it on (e.g. headless, for the smoke);
+    ``--no-frontend-viz`` forces it off. Oracle-safe either way: the
+    CaptureKLTFrontend returns BYTE-IDENTICAL tracks and the oracle never goes
+    through this launcher path.
+    """
+    return (not args.no_frontend_viz) and (
+        args.frontend_viz or not args.no_ui)
+
+
 def build_vio_args(args, cap_ep: str, vio_ep: str, slam_ep: str,
                    use_worker: bool) -> list[str]:
     """Build the ``vio.main`` argv from the parsed launcher ``args``.
@@ -264,6 +280,12 @@ def build_vio_args(args, cap_ep: str, vio_ep: str, slam_ep: str,
     # solve, so even a live --ba-window run keeps pose.refined byte-identical.
     if args.ba_window:
         vio_args += ["--ba-window"]
+    # Frontend-internals snapshot stream: opt-in, works on BOTH loose AND tight
+    # (the KLT frontend is identical), and on BOTH live AND replay (the view
+    # scrubs a replay segment too). Oracle-safe: the CaptureKLTFrontend returns
+    # byte-identical tracks and the oracle never goes through this launcher path.
+    if args.frontend_viz:
+        vio_args += ["--frontend-viz"]
     return vio_args
 
 
@@ -365,9 +387,22 @@ def main() -> int:
     ap.add_argument("--no-ba-window", action="store_true",
                     help="force the BA Window capture OFF even when the UI is shown "
                          "(skip its small per-keyframe snapshot/publish cost).")
+    ap.add_argument("--frontend-viz", action="store_true",
+                    help="force the Frontend Internals view ON (VIO publishes "
+                         "frame.frontend: Shi-Tomasi response heatmap + accepted "
+                         "corners + KLT flow field coloured by forward-backward "
+                         "error; UI exposes Visualize > Frontend Internals). It is "
+                         "a UI tool, so it is ALREADY ON by default whenever the UI "
+                         "runs -- this flag only forces it on headless (e.g. for "
+                         "the smoke). Works on loose AND tight; oracle byte-identical "
+                         "(CaptureKLTFrontend returns byte-identical tracks).")
+    ap.add_argument("--no-frontend-viz", action="store_true",
+                    help="force the Frontend Internals capture OFF even when the UI "
+                         "is shown (skip its small per-frame snapshot/publish cost).")
     args = ap.parse_args()
 
     args.ba_window = resolve_ba_window(args)
+    args.frontend_viz = resolve_frontend_viz(args)
 
     # SLAM keeps its live map current via a LATEST-ONLY in-process inbox (set in
     # slam.main) -- it drops a backlog instead of lagging, with NO worker
@@ -445,6 +480,11 @@ def main() -> int:
     # the menu honest about what the running pipeline actually emits.
     if args.ba_window and not args.tight:
         ui_args += ["--ba-window"]
+    # Frontend Internals: tell the UI to expose Visualize > Frontend Internals
+    # (live follow-latest) when the operator asked for it. Works on loose AND
+    # tight (the frontend is identical), so it is NOT gated on --tight.
+    if args.frontend_viz:
+        ui_args += ["--frontend-viz"]
 
     # ---- SIGTERM handler (registered ONCE) -------------------------------
     # `kill <launcher_pid>` from outside must clean up the whole tree, not just
