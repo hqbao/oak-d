@@ -61,12 +61,12 @@ do: the SLAM process runs a pose-graph that, on a revisit, rewrites the keyframe
 poses (``loop.correction``). This step feeds that correction back into the LIVE
 nav-state so the accumulated drift is BOUNDED on revisits ("closed loop"):
 
-4. **Smooth loop-correction blend (no hard snap).** PropagateImu remembers, per
-   keyframe seq, the PRE-correction body->world pose it published there
-   (``kf_pose_pre`` ring). When a ``LoopCorrection`` arrives (handed in over a
-   thread-safe inbox by ``vio.main``, LIVE-only), it picks the MOST RECENT
-   corrected keyframe it still has a pre-correction pose for, computes the
-   world-frame SE(3) delta ``T_delta = T_corrected @ inv(T_pre)``
+4. **Smooth loop-correction blend (no hard snap, no oscillation).** PropagateImu
+   remembers, per keyframe seq, the PRE-correction body->world pose it published
+   there (``kf_pose_pre`` ring). When a ``LoopCorrection`` arrives (handed in over
+   a thread-safe inbox by ``vio.main``, LIVE-only), it picks a CONVERGED corrected
+   keyframe it still has a pre-correction pose for, computes the world-frame SE(3)
+   delta ``T_delta = T_corrected @ inv(T_pre)``
    (:func:`vio.mathlib.imu.imu.loop_correction_delta`), and queues it as a PENDING
    correction. On each subsequent frame a BOUNDED FRACTION of the REMAINING delta
    is applied to the live pose (geodesic SE(3) interpolation,
@@ -74,6 +74,21 @@ nav-state so the accumulated drift is BOUNDED on revisits ("closed loop"):
    live trajectory is pulled smoothly back onto the loop-corrected one over a few
    frames -- NOT a one-shot teleport (we just removed a hard jump; do not
    reintroduce one). Between corrections the live pose dead-reckons as before.
+
+   The keyframe targeted is NOT the most-recent one: SLAM re-confirms a loop EVERY
+   keyframe while revisiting a seen area, emitting a STREAM of corrections, and the
+   just-inserted keyframe's pose-graph pose is still settling (it jumps cm-scale
+   solve-to-solve). Targeting the newest keyframe therefore chases a MOVING target
+   whose remainder flips sign at the keyframe cadence -- a sawtooth the bounded
+   gain cannot damp (the "loop-correction teleport/oscillation" symptom). The blend
+   instead (a) LOCKS onto a CONVERGED older keyframe (at least ``_LOOP_SETTLE_KF``
+   keyframes back from the freshest corrected one) and re-measures the SAME seq
+   across re-confirmations -- a STATIONARY target the remainder shrinks monotonically
+   onto -- and (b) FREEZES once converged: a re-confirmation whose NET remaining
+   delta (target minus what is already blended in, ``loop_applied``) is below
+   ``_LOOP_MIN_RECORRECT_M`` / ``_LOOP_MIN_RECORRECT_DEG`` is DROPPED, so the live
+   pose holds steady after the loop closes instead of dithering on solve noise. A
+   genuinely NEW loop (large net delta) still clears the floor and corrects.
 
 This path is GATED on ``loop_correct`` (set only by the live ``--tight`` builder):
 when off, no inbox is allocated, no pre-correction ring is kept, and the loop
@@ -173,6 +188,30 @@ _LOOP_DONE_ROT_RAD = 1e-3
 # solve + IPC latency between a keyframe's emission and its loop correction.
 _LOOP_KF_POSE_KEEP = 256
 
+# --- loop re-firing stability (the TELEPORT/OSCILLATION fix) ---------------- #
+# SLAM re-confirms a loop EVERY keyframe while revisiting a seen area, so it emits
+# a STREAM of loop.corrections (not one). Two effects make the naive blend
+# oscillate, and these two knobs kill each:
+#
+# (a) TARGET A CONVERGED KEYFRAME, not the newest. The pose-graph pose of the
+# just-inserted keyframe is still settling (it jumps cm-scale solve-to-solve),
+# so targeting ``max(seq)`` chases a MOVING target -> the remainder flips sign at
+# the keyframe cadence -> a sawtooth the bounded gain can't damp. An OLDER
+# keyframe has converged (sub-mm solve-to-solve), so we target the newest keyframe
+# that is at least this many keyframes BACK from the freshest corrected one -- a
+# stationary target the blend actually converges onto.
+_LOOP_SETTLE_KF = 4
+# (b) FREEZE ONCE CONVERGED. Each re-confirmation re-derives the target; once the
+# correction has been blended in, successive targets differ only by solve noise.
+# If the NET remaining delta (freshest target minus what is already in the live
+# pose, ``loop_applied``) is below these floors, DROP the correction -- do not
+# re-queue it. This freezes the live pose after the loop has converged (kills the
+# residual sawtooth) while a genuinely NEW loop (large net delta) still fires.
+# 1.5 cm / 1.0 deg: below any meaningful drift, above the cm-scale solve jitter the
+# diagnosis showed (target jitter ~0.2-0.5 cm once the older keyframe settled).
+_LOOP_MIN_RECORRECT_M = 0.015
+_LOOP_MIN_RECORRECT_DEG = 1.0
+
 
 class PropagateImu(StepBase):
     name = "propagate_imu"
@@ -265,6 +304,13 @@ class PropagateImu(StepBase):
                 "kf_pose_pre": {},
                 "loop_delta": None,
                 "loop_applied": None,
+                # loop_target_seq: the keyframe seq the blend is currently locked
+                # onto. SLAM re-confirms the loop every keyframe, so to keep the
+                # blend target STATIONARY (not chasing the advancing newest
+                # keyframe) we lock onto one converged keyframe and re-measure the
+                # SAME seq across re-confirmations -- only re-locking onto a newer
+                # keyframe when a genuinely NEW loop (large net delta) appears.
+                "loop_target_seq": None,
             }
             ctx.state["live_nav"] = nav
             # Seed the pre-correction pose for THIS keyframe too (so an early loop
@@ -428,7 +474,7 @@ class PropagateImu(StepBase):
         Each SLAM correction is a FULL pose-graph re-optimisation (``kf_poses`` =
         ``{seq: T_world_cam}`` for the WHOLE graph), so a newer correction
         SUPERSEDES an older one rather than stacking on it. The total world-frame
-        correction the live pose should have, measured at the most-recent corrected
+        correction the live pose should have, measured at a CONVERGED corrected
         keyframe we hold a STABLE pre-correction anchor for, is::
 
             D_target = T_corrected[seq] @ inv(T_pre[seq])
@@ -443,6 +489,26 @@ class PropagateImu(StepBase):
 
         (the freshest target, minus what is already in the live pose). The blend
         then bleeds this remainder in smoothly (``_apply_loop_blend``).
+
+        TELEPORT/OSCILLATION FIX (two parts, both here):
+
+        1. **Target a CONVERGED keyframe, not ``max(seq)``.** SLAM re-confirms the
+           loop every keyframe while revisiting, so it emits a STREAM of corrections;
+           the just-inserted keyframe's pose-graph pose is still settling (jumps
+           cm-scale solve-to-solve), so targeting the newest keyframe chases a
+           MOVING target -> the remainder flips sign at the keyframe cadence -> a
+           sawtooth the bounded gain can't damp. We instead target the newest
+           keyframe we hold an anchor for that is at least ``_LOOP_SETTLE_KF``
+           keyframes BACK from the freshest corrected one -- an OLDER, converged
+           (sub-mm solve-to-solve) target the blend actually settles onto.
+
+        2. **Re-blend only on a real NET change (freeze once converged).** Once the
+           correction is blended in, successive re-confirmations differ only by
+           solve noise. If the NET remaining delta (``T_rem``) is below
+           ``_LOOP_MIN_RECORRECT_M`` / ``_LOOP_MIN_RECORRECT_DEG``, DROP it -- do
+           not re-queue -- so the live pose FREEZES after the loop converges (kills
+           the residual sawtooth). A genuinely NEW loop (large net delta) still
+           clears the floor and fires.
         """
         inbox = ctx.state.get("loop_inbox")
         if inbox is None:
@@ -457,10 +523,31 @@ class PropagateImu(StepBase):
             kf_poses = getattr(corr, "kf_poses", None)
             if not kf_poses:
                 continue
-            cand = [s for s in kf_poses if int(s) in store]
+            # --- (1) pick a CONVERGED, STATIONARY target keyframe -----------
+            # ``newest_corr`` is the freshest keyframe in this re-optimisation (the
+            # just-inserted, still-settling one). The settled candidates are the
+            # anchored keyframes at least ``_LOOP_SETTLE_KF`` keyframes back from it
+            # (converged pose-graph poses). To keep the blend target STATIONARY
+            # across the stream of re-confirmations, LOCK onto one converged
+            # keyframe and re-measure the SAME seq every time it is still present +
+            # settled -- only re-lock onto the newest settled keyframe when the lock
+            # is gone (evicted / dropped from the graph). A stationary target makes
+            # the remainder shrink monotonically to zero instead of chasing the
+            # advancing newest keyframe (the sawtooth).
+            newest_corr = max(int(s) for s in kf_poses)
+            cand = [int(s) for s in kf_poses
+                    if int(s) in store and int(s) <= newest_corr - _LOOP_SETTLE_KF]
             if not cand:
+                # Early in a loop (or a tiny graph) no settled keyframe exists yet;
+                # don't blend toward an unconverged one -- wait for the next
+                # re-confirmation, by which point an older keyframe has settled.
                 continue
-            seq = max(int(s) for s in cand)
+            locked = nav.get("loop_target_seq")
+            if locked is not None and int(locked) in cand:
+                seq = int(locked)            # keep the stationary lock
+            else:
+                seq = max(cand)              # (re-)lock onto newest settled kf
+                nav["loop_target_seq"] = seq
             T_corr = np.asarray(kf_poses[seq], np.float64)
             R_corr, p_corr = T_cw_to_body_world(np.linalg.inv(T_corr))
             R_pre, p_pre = store[seq]
@@ -471,6 +558,16 @@ class PropagateImu(StepBase):
             T_applied = nav.get("loop_applied")
             T_rem = T_target if T_applied is None \
                 else T_target @ _se3_inv(T_applied)
+            # --- (2) freeze once converged: drop a negligible NET re-correction.
+            # The remainder is what is STILL to apply on top of ``loop_applied``;
+            # if it is below the floors the loop has already converged and this is
+            # just solve jitter -- ignore it so the live pose stops oscillating.
+            rem_trans = float(np.linalg.norm(T_rem[:3, 3]))
+            rem_rot_deg = float(np.degrees(
+                np.linalg.norm(so3_log(T_rem[:3, :3]))))
+            if (rem_trans < _LOOP_MIN_RECORRECT_M
+                    and rem_rot_deg < _LOOP_MIN_RECORRECT_DEG):
+                return        # converged: freeze (no re-queue), kill the sawtooth
             nav["loop_delta"] = (T_rem[:3, :3].copy(), T_rem[:3, 3].copy())
             # A loop closure is a RARE event; log the drift it removes so the
             # closed-loop feedback is observable in a live run (and provable).
@@ -478,8 +575,7 @@ class PropagateImu(StepBase):
                      "-- pulling %.1f cm / %.2f deg of accumulated drift back into "
                      "the live pose (smoothly)", seq,
                      int(getattr(corr, "n_loops", 0)),
-                     float(np.linalg.norm(T_rem[:3, 3])) * 100.0,
-                     float(np.degrees(np.linalg.norm(so3_log(T_rem[:3, :3])))))
+                     rem_trans * 100.0, rem_rot_deg)
             return            # freshest usable correction wins; ignore older ones
 
     @staticmethod
