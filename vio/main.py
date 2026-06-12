@@ -123,7 +123,8 @@ def run_vio(*,
             backend_iters: int = 5,
             tight: bool = False,
             stabilize_velocity: bool = False,
-            depth_icp: bool = False) -> int:
+            depth_icp: bool = False,
+            ba_window: bool = False) -> int:
     """Run the VIO process until END / SIGTERM / Ctrl-C.
 
     ``tight`` selects the TIGHT-coupled VIO backend (the joint visual + IMU
@@ -156,6 +157,15 @@ def run_vio(*,
     inter-keyframe Delta-p that the feature-starved 54x42 frontend cannot observe.
     Opt-in and ``--tight`` ONLY (same contract as ``stabilize_velocity``); OFF
     leaves the tight config + oracle byte-identical.
+
+    ``ba_window`` enables the BA-window visualiser snapshot stream (``--ba-window``):
+    the LOOSE backend builds the capture-aware engine and republishes one
+    ``ba.window`` :class:`~vio.comms.messages.BaWindow` per keyframe solve (the
+    window keyframe poses + shared 3D landmarks + observation rays + reprojection
+    error + the PRE-solve state) for the UI's "BA Window" view. Opt-in and
+    LOOSE-only (ignored on ``--tight``); OFF by default and never set by the
+    oracle, so the byte-parity oracle stays gap=0 (the capture step runs the SAME
+    frozen solve; the snapshot only rides the existing overlay channel).
     """
     # Closed-loop feedback is --tight + LIVE only: a slam endpoint must be wired
     # AND the tight nav-state must exist (retain_imu, set by tight). The loose /
@@ -220,7 +230,11 @@ def run_vio(*,
                             window=backend_window, iters=backend_iters,
                             latest_only=False, worker=worker, tight=tight,
                             stabilize_velocity=stabilize_velocity,
-                            depth_icp=depth_icp)
+                            depth_icp=depth_icp, capture_window=ba_window)
+    # BA-window capture is LOOSE-only; --tight overrides it (the tight map has no
+    # capture overlay). Publish ba.window only when the capture engine is actually
+    # built, so a consumer never waits on a topic that will never emit.
+    ba_window_on = bool(ba_window and not tight)
 
     # 5. Open the OUTPUT IPCPubSub server + publisher bridge. KEYFRAME is the only
     #    VIO output that needs shared memory (image + depth payload), so it gets
@@ -237,11 +251,16 @@ def run_vio(*,
     server = IPCPubSub(endpoint, role="server", retain_topics={"calib.bundle"})
     pub_kf = IPCPublisher(local, server, vio_rings, [topics.KEYFRAME],
                           endpoint=endpoint, ring_endpoint=endpoint)
-    pub_pose = IPCPublisher(local, server, vio_rings,
-                            [topics.POSE_ODOM, topics.POSE_VO,
-                             topics.POSE_REFINED,
-                             topics.FRAME_TRACKS, topics.FRAME_INLIERS,
-                             topics.FRAME_GYROFUSE],
+    # Pure-POD republished topics (poses + per-frame ids / pixels -- no ring
+    # slots). ``ba.window`` (the opt-in BA-window solve snapshot) is also pure POD
+    # (window poses + landmarks + observation rays, no images), so it rides this
+    # same publisher; appended ONLY when the capture engine is built.
+    _pose_topics = [topics.POSE_ODOM, topics.POSE_VO, topics.POSE_REFINED,
+                    topics.FRAME_TRACKS, topics.FRAME_INLIERS,
+                    topics.FRAME_GYROFUSE]
+    if ba_window_on:
+        _pose_topics.append(topics.BA_WINDOW)
+    pub_pose = IPCPublisher(local, server, vio_rings, _pose_topics,
                             endpoint=endpoint,
                             ring_endpoint=endpoint)
     pub_kf.start()
@@ -397,6 +416,12 @@ def main() -> int:
                          "factor (IMU-seeded point-to-plane ICP between keyframe "
                          "depth clouds) to anchor inter-keyframe translation at "
                          "54x42. Opt-in; ignored without --tight.")
+    ap.add_argument("--ba-window", action="store_true",
+                    help="loose only: publish ba.window solve snapshots (window "
+                         "keyframe poses + 3D landmarks + observation rays + "
+                         "reprojection error) for the UI's BA Window visualiser. "
+                         "Opt-in; OFF by default (oracle byte-identical); ignored "
+                         "with --tight.")
     args = ap.parse_args()
 
     return run_vio(
@@ -412,6 +437,7 @@ def main() -> int:
         tight=args.tight,
         stabilize_velocity=args.stabilize_velocity,
         depth_icp=args.depth_icp,
+        ba_window=args.ba_window,
     )
 
 

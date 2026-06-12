@@ -24,13 +24,14 @@ import numpy as np
 
 from . import topics
 from .messages import (
-    CamSync, DepthFrame, FrameGyroFuse, FrameInliers, FrameTracks, ImuCamPacket,
-    ImuRaw, Keyframe, LoopCorrection, LoopMatch, PoseMsg, SlamOverlay, END,
+    BaWindow, CamSync, DepthFrame, FrameGyroFuse, FrameInliers, FrameTracks,
+    ImuCamPacket, ImuRaw, Keyframe, LoopCorrection, LoopMatch, PoseMsg,
+    SlamOverlay, END,
 )
 from .wire import (
-    WireCamSync, WireDepthFrame, WireEnd, WireFrameInliers, WireFrameTracks,
-    WireGyroFuse, WireImuCamPacket, WireImuRaw, WireKeyframe, WireLoopCorrection,
-    WireLoopMatch, WirePoseMsg, WireSlamMap,
+    WireBaWindow, WireCamSync, WireDepthFrame, WireEnd, WireFrameInliers,
+    WireFrameTracks, WireGyroFuse, WireImuCamPacket, WireImuRaw, WireKeyframe,
+    WireLoopCorrection, WireLoopMatch, WirePoseMsg, WireSlamMap,
 )
 from .ring_registry import RingRegistry
 
@@ -252,6 +253,50 @@ def _loop_match_to_local(wm: WireLoopMatch, rings: RingRegistry) -> LoopMatch:
         rot_gate_deg=float(wm.rot_gate_deg), accepted=bool(wm.accepted))
 
 
+def _ba_window_to_wire(msg: BaWindow, rings: RingRegistry, endpoint: str):
+    # Pure POD: the windowed-BA snapshot (<= 8 keyframes, <= 100 landmarks, a few
+    # hundred observation rays) rides the message itself -- no shared-memory ring,
+    # no images (mirrors _loop_match_to_wire). Force the canonical dtypes (the
+    # codec keys off dtype.name) so the bytes are stable across hosts.
+    del rings, endpoint                                # pure POD, no ring slot
+    return WireBaWindow(
+        seq=int(msg.seq), ts_ns=int(msg.ts_ns),
+        kf_ids=np.asarray(msg.kf_ids, dtype=np.int64).reshape(-1),
+        kf_quat=np.asarray(msg.kf_quat, dtype=np.float64).reshape(-1, 4),
+        kf_pos=np.asarray(msg.kf_pos, dtype=np.float64).reshape(-1, 3),
+        lm_ids=np.asarray(msg.lm_ids, dtype=np.int64).reshape(-1),
+        lm_xyz=np.asarray(msg.lm_xyz, dtype=np.float64).reshape(-1, 3),
+        obs_kf=np.asarray(msg.obs_kf, dtype=np.int32).reshape(-1),
+        obs_lm=np.asarray(msg.obs_lm, dtype=np.int32).reshape(-1),
+        obs_uv=np.asarray(msg.obs_uv, dtype=np.float32).reshape(-1, 2),
+        obs_reproj_px=np.asarray(msg.obs_reproj_px, dtype=np.float32).reshape(-1),
+        ba_reproj_px=float(msg.ba_reproj_px),
+        kf_quat_pre=np.asarray(msg.kf_quat_pre, dtype=np.float64).reshape(-1, 4),
+        kf_pos_pre=np.asarray(msg.kf_pos_pre, dtype=np.float64).reshape(-1, 3),
+        lm_xyz_pre=np.asarray(msg.lm_xyz_pre, dtype=np.float64).reshape(-1, 3),
+        n_kf=int(msg.n_kf), n_lm=int(msg.n_lm))
+
+
+def _ba_window_to_local(wm: WireBaWindow, rings: RingRegistry) -> BaWindow:
+    del rings                                          # pure POD, no ring slot
+    return BaWindow(
+        seq=int(wm.seq), ts_ns=int(wm.ts_ns),
+        kf_ids=np.asarray(wm.kf_ids, dtype=np.int64).reshape(-1),
+        kf_quat=np.asarray(wm.kf_quat, dtype=np.float64).reshape(-1, 4),
+        kf_pos=np.asarray(wm.kf_pos, dtype=np.float64).reshape(-1, 3),
+        lm_ids=np.asarray(wm.lm_ids, dtype=np.int64).reshape(-1),
+        lm_xyz=np.asarray(wm.lm_xyz, dtype=np.float64).reshape(-1, 3),
+        obs_kf=np.asarray(wm.obs_kf, dtype=np.int32).reshape(-1),
+        obs_lm=np.asarray(wm.obs_lm, dtype=np.int32).reshape(-1),
+        obs_uv=np.asarray(wm.obs_uv, dtype=np.float32).reshape(-1, 2),
+        obs_reproj_px=np.asarray(wm.obs_reproj_px, dtype=np.float32).reshape(-1),
+        ba_reproj_px=float(wm.ba_reproj_px),
+        kf_quat_pre=np.asarray(wm.kf_quat_pre, dtype=np.float64).reshape(-1, 4),
+        kf_pos_pre=np.asarray(wm.kf_pos_pre, dtype=np.float64).reshape(-1, 3),
+        lm_xyz_pre=np.asarray(wm.lm_xyz_pre, dtype=np.float64).reshape(-1, 3),
+        n_kf=int(wm.n_kf), n_lm=int(wm.n_lm))
+
+
 # --------------------------------------------------------------------------- #
 # Registry: topic -> (to_wire, to_local). Bridges pick converters by topic.
 # Map-overlay + calib-bundle topics travel WITHOUT a local-side reconstruction
@@ -278,6 +323,7 @@ CONVERTERS: dict[str, tuple[ToWire, ToLocal]] = {
     topics.LOOP_CORRECTION: (_loop_corr_to_wire, _loop_corr_to_local),
     topics.SLAM_MAP:        (_slam_overlay_to_wire, _slam_map_to_local),
     topics.SLAM_LOOP:       (_loop_match_to_wire, _loop_match_to_local),
+    topics.BA_WINDOW:       (_ba_window_to_wire, _ba_window_to_local),
 }
 
 

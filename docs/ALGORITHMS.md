@@ -44,6 +44,7 @@ flowchart LR
     U2[Triplet<br/>rect-L | depth | IMU]
     U3[Keypoint tracker]
     U4[Loop Closure<br/>2 keyframes + match funnel]
+    U5[BA Window<br/>window poses + landmarks<br/>+ reprojection rays]
   end
 
   A5 -- imucam.sample --> B1
@@ -54,6 +55,7 @@ flowchart LR
   B4 -- pose.refined --> U1
   B4 -- keyframe(gray+depth+pose) --> C1
   B4 -- keyframe(gray, buffered by seq) --> U4
+  B4 -. "ba.window (solve snapshot, opt-in --ba-window)" .-> U5
   C3 -- slam.map / loop.correction --> U1
   C2 -- slam.loop (match funnel, LIVE) --> U4
 ```
@@ -826,18 +828,38 @@ translations; carried marg prior. Out: refined KF poses + landmarks; `last_info`
 bundle.py:206 (`optimize` — LM+Schur engine), `:113` (`BAConfig`). marginalize.py:78
 (`marginalize_keyframe`), `:44` (`MargPrior`).
 
-**How to see it.** *Mostly new.* Draw the **windowed scene in 3D** — the `window` keyframe
-camera frusta + shared landmark cloud, each landmark connected by thin observation rays to
-the keyframes that see it, animated **before vs after** a BA solve (poses snap, landmarks
-tighten, mean reproj px drops). The most illuminating addition is the **before/after
-toggle**: the relay-race drift being pulled into agreement. A secondary 2D inset of the
-reprojection-residual histogram collapsing toward 0 makes "least-squares minimization"
-concrete. The 3D viewer shows the BA *keyframe line* (violet-blue, viewer3d.py:175-191)
-and a separate `MapWindow` shows the *voxel occupancy* room map — neither shows per-window BA
-landmarks, frusta, observation rays, or the before/after solve. Needs odometry-side
-exposure of `map.landmarks` + window poses + `ba_reproj_px`, a new IPC topic, and a new
-"BA window" overlay (the viewer already has frustum/scatter primitives — `_DroneTriad`,
-`GLScatterPlotItem` — so it's additive).
+**How to see it — the BA Window (`Visualize ▸ BA Window`, opt-in `--ba-window`).**
+*Built.* A dedicated window draws the **real windowed-BA solve** on actual data as a
+2D top-down (world X–Z) scene: the `window` keyframe poses as heading triangles
+(newest highlighted, oldest marked as the **BA gauge anchor**), the shared 3D
+landmark cloud as scatter dots, and one **observation ray** per `{keyframe,landmark}`
+pixel observation coloured by its **post-solve reprojection error** (green sub-px →
+amber → red), so "minimise reprojection error" is literally visible — the rays BA
+could not satisfy stay long/red. A **before/after toggle** swaps the post-solve
+geometry for the pre-solve state (with the other ghosted behind), showing the
+relay-race drift being pulled into agreement. The status line reads
+`kf N · lm M · obs L · reproj X px · KF id range`. A **timeline slider** scrubs the
+buffered snapshots: "Follow latest" ON rolls the head (LIVE), OFF holds an index so
+a short replay segment can be inspected solve-by-solve.
+
+*Data path (all REAL, no parallel pipeline).* The capture-aware engine
+(`make_ba_engine(capture_window=True)`, opt-in) runs the **SAME frozen `run_ba`**
+and, on the existing overlay channel (`ov_q`), stashes a `BaWindowSnap` built from
+the live map's public state (`keyframes` / `landmarks` / `last_info.ba_reproj_px`)
+plus a pre-solve shallow copy for the toggle — the frozen solve is never edited, so
+the byte-parity oracle is gap=0 and `pose.refined` is byte-identical to the
+no-capture path. `vio.modules.publish_ba_window` republishes it as a `BaWindow` on
+the pure-POD `ba.window` topic (no images, mirrors `slam.loop`), bounded to `N ≤ 8`
+keyframes (the window) and `M ≤ 100` landmarks (the most-observed; the cap lives
+only in the capture function, never in the solve). The UI's `IpcBaWindowSource`
+buffers the last `K` (≈240) snapshots in a lock-guarded deque for the slider;
+`ui/viz/ba_render.py` renders the top-down image (cv2, PNG-verifiable offscreen).
+
+**Code.** `vio/mathlib/engine/steps.py` (`ba_step_capture`, `_build_ba_window`,
+`ba_window_overlay`, `BaWindowSnap`), `vio/modules/publish_ba_window.py`,
+`comms/{messages,wire,converters,topics}.py` (`BaWindow` / `WireBaWindow` /
+`ba.window`), `ui/modules/ipc_sources.py` (`IpcBaWindowSource`),
+`ui/qt/ba_window.py`, `ui/viz/ba_render.py`.
 
 ---
 

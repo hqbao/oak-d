@@ -242,6 +242,14 @@ def build_vio_args(args, cap_ep: str, vio_ep: str, slam_ep: str,
         # contract -- forwarded ONLY with BOTH --tight AND --depth-icp set.
         if args.depth_icp:
             vio_args += ["--depth-icp"]
+    # BA-window visualiser snapshot stream: opt-in, LOOSE-only. Unlike the
+    # tight-only flags above, this is forwarded on BOTH the live AND replay paths
+    # (the BA Window scrubs a replay segment too) -- it is oracle-safe because the
+    # offline byte-parity harness (oracle_replay_selftest) never passes --ba-window,
+    # and vio.main ignores it under --tight. The capture step runs the SAME frozen
+    # solve, so even a live --ba-window run keeps pose.refined byte-identical.
+    if args.ba_window:
+        vio_args += ["--ba-window"]
     return vio_args
 
 
@@ -332,6 +340,12 @@ def main() -> int:
                          "factor (anchors inter-keyframe translation at 54x42). "
                          "Forwarded to vio.main --depth-icp only with --tight; "
                          "ignored (warned) on the loose path.")
+    ap.add_argument("--ba-window", action="store_true",
+                    help="enable the BA Window visualiser: VIO publishes ba.window "
+                         "solve snapshots (window keyframe poses + 3D landmarks + "
+                         "observation rays + reprojection error) and the UI exposes "
+                         "Visualize > BA Window. Loose-only; OFF by default "
+                         "(oracle byte-identical); ignored under --tight.")
     args = ap.parse_args()
 
     # SLAM keeps its live map current via a LATEST-ONLY in-process inbox (set in
@@ -404,6 +418,12 @@ def main() -> int:
     # under an --auto-suffix run.
     ui_args = ["--capture-endpoint", cap_ep,
                "--vio-endpoint", vio_ep, "--slam-endpoint", slam_ep]
+    # BA Window: tell the UI to expose Visualize > BA Window (live follow-latest)
+    # only when the operator asked for it (and not under --tight, where VIO never
+    # publishes ba.window). The action is harmless if absent, but gating it keeps
+    # the menu honest about what the running pipeline actually emits.
+    if args.ba_window and not args.tight:
+        ui_args += ["--ba-window"]
 
     # ---- SIGTERM handler (registered ONCE) -------------------------------
     # `kill <launcher_pid>` from outside must clean up the whole tree, not just

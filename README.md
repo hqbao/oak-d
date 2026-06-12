@@ -436,7 +436,19 @@ The menu bar renders **in-window on every platform** (`setNativeMenuBar(False)`)
 
 - **View** — camera presets and Follow Camera.
 - **Visualize** — *Camera + Depth + IMU (triplet)*, *Keypoint Depth Tracker*,
-  *Gyro Fusion (strip chart)*, and *SLAM Map (3D room)*.
+  *Gyro Fusion (strip chart)*, *Loop Closure*, *BA Window*, and *SLAM Map (3D room)*.
+  - *BA Window* (opt-in, launch with `--ba-window`) — the **real windowed-BA solve**
+    on actual data, drawn 2D top-down (world X–Z): the `window` keyframe poses as
+    heading triangles (newest highlighted, oldest = the BA **gauge anchor**), the
+    shared 3D landmark cloud as scatter dots, and one **observation ray** per
+    `{keyframe,landmark}` pixel observation coloured by its **reprojection error**
+    (green sub-px → red), so "minimise reprojection error" is visible. A
+    **before/after toggle** swaps the post-solve geometry for the pre-solve state
+    (the relay-race drift pulled into agreement), and a **timeline slider** scrubs the
+    buffered solves ("Follow latest" rolls the head LIVE; uncheck to inspect a replay
+    segment solve-by-solve). It rides the pure-POD `ba.window` topic published by VIO
+    only under `--ba-window`; the capture step runs the SAME frozen `run_ba`, so the
+    byte-parity oracle stays gap=0 and `pose.refined` is unchanged.
   - *SLAM Map (3D room)* — a **ModalAI/VOXL-style VOXEL OCCUPANCY map**: the room as
     clean green voxel cubes (floor grid + walls + furniture as blocky voxels), in the
     same ENU frame as the main viewer. It is built as a **probabilistic LOG-ODDS

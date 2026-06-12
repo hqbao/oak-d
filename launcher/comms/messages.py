@@ -283,6 +283,63 @@ class LoopMatch:
 
 
 @dataclass(frozen=True)
+class BaWindow:
+    """One windowed-BA solve snapshot for the UI's "BA Window" visualiser.
+
+    Published on ``topics.BA_WINDOW`` by the VIO process ONLY when the opt-in
+    ``--ba-window`` flag is on (the engine builds a capture-aware overlay; the
+    default-OFF path never captures this, so the byte-parity oracle is
+    UNAFFECTED). It carries the REAL windowed-BA state for ONE keyframe solve --
+    the in-window keyframe poses, the shared 3D landmarks, the per-observation
+    rays + reprojection error, and the PRE-solve poses/landmarks for the
+    before/after toggle. All positions are CAMERA-OPTICAL world frame (the UI
+    applies its own display transform); quaternions are ``(qw, qx, qy, qz)`` of
+    the camera-in-world rotation (``inv(T_cw)``).
+
+    The window is bounded on the wire: ``N`` keyframes (already capped by
+    ``WindowedConfig.window`` <= 8) and ``M`` landmarks (capped to the 100 with
+    the most keyframe observations -- the cap lives ONLY in the capture/overlay
+    function, never in the frozen solve).
+
+    * ``kf_ids`` -- ``(N,)`` int64 monotonic keyframe ids (window order, oldest
+      first; the oldest is the BA gauge anchor, the newest is the live frame).
+    * ``kf_quat`` / ``kf_pos`` -- ``(N, 4)`` / ``(N, 3)`` POST-solve camera-in-
+      world rotation (qw,qx,qy,qz) + position, SAME order as ``kf_ids``.
+    * ``lm_ids`` -- ``(M,)`` int64 landmark (track) ids.
+    * ``lm_xyz`` -- ``(M, 3)`` POST-solve world landmark positions, SAME order.
+    * ``obs_kf`` / ``obs_lm`` -- ``(L,)`` int32 indices INTO ``kf_ids`` /
+      ``lm_ids`` for each observation ray (row i joins keyframe ``kf_ids[obs_kf[i]]``
+      to landmark ``lm_ids[obs_lm[i]]``).
+    * ``obs_uv`` -- ``(L, 2)`` float32 measured pixel of each observation.
+    * ``obs_reproj_px`` -- ``(L,)`` float32 per-observation reprojection error
+      (post-solve), the colour the UI draws each ray (green sub-px -> red).
+    * ``ba_reproj_px`` -- the window's mean reprojection error (``last_info``).
+    * ``kf_quat_pre`` / ``kf_pos_pre`` -- ``(N, 4)`` / ``(N, 3)`` PRE-solve
+      camera-in-world rotation + position (the faint "before" ghosts).
+    * ``lm_xyz_pre`` -- ``(M, 3)`` PRE-solve world landmark positions.
+    * ``n_kf`` / ``n_lm`` -- ``N`` / ``M`` (redundant counts for the status line).
+    """
+
+    seq: int
+    ts_ns: int
+    kf_ids: np.ndarray
+    kf_quat: np.ndarray
+    kf_pos: np.ndarray
+    lm_ids: np.ndarray
+    lm_xyz: np.ndarray
+    obs_kf: np.ndarray
+    obs_lm: np.ndarray
+    obs_uv: np.ndarray
+    obs_reproj_px: np.ndarray
+    ba_reproj_px: float
+    kf_quat_pre: np.ndarray
+    kf_pos_pre: np.ndarray
+    lm_xyz_pre: np.ndarray
+    n_kf: int
+    n_lm: int
+
+
+@dataclass(frozen=True)
 class CamSync:
     """A stereo pair the ``cam`` module publishes as a sync trigger.
 

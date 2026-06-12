@@ -102,6 +102,7 @@ from .publish_vo import PublishVo
 from .emit_keyframe import EmitKeyframe
 from .run_ba import RunBA
 from .publish_refined import PublishRefined
+from .publish_ba_window import PublishBaWindow
 
 LOG = logging.getLogger("vio.pipeline")
 
@@ -228,8 +229,13 @@ class BackendModule(Module):
                  window: int = 6, iters: int = 5,
                  latest_only: bool = False, worker: bool = False,
                  tight: bool = False, stabilize_velocity: bool = False,
-                 depth_icp: bool = False) -> None:
+                 depth_icp: bool = False, capture_window: bool = False) -> None:
         super().__init__("backend", bus, latest_only=latest_only)
+        # BA-window capture (opt-in, --ba-window) is a LOOSE-backend-only viz: the
+        # capture-aware ``WindowedBAMap`` engine snapshots each solve for the UI's
+        # "BA Window". It is ignored on the tight path (the tight map has no such
+        # capture overlay) and OFF by default so the oracle stays byte-identical.
+        capture_window = bool(capture_window) and not tight
         if tight:
             # Tight backend: enable the covariance-correct IMU weight (Phase 1's
             # opt-in flag) on a copy of WindowedVIOConfig's validated defaults.
@@ -261,11 +267,23 @@ class BackendModule(Module):
             self.engine = make_vi_engine(K, vio_cfg, worker=worker)
         else:
             cfg = WindowedConfig(window=window, ba=BAConfig(max_iters=iters))
-            self.engine = make_ba_engine(K, cfg, worker=worker)
+            self.engine = make_ba_engine(K, cfg, worker=worker,
+                                         capture_window=capture_window)
+            if capture_window:
+                LOG.info("vio: BA-window capture ON (--ba-window) -- publishing "
+                         "ba.window solve snapshots for the UI visualiser")
         self.ctx.state["engine"] = self.engine
         self.ctx.state["tight"] = bool(tight)    # RunBA picks the snapshot shape
-        self.on(topics.KEYFRAME, [RunBA(), PublishRefined()])
-        self.forwards_to(topics.POSE_REFINED)
+        # With capture on, PublishBaWindow runs between RunBA (which makes the
+        # overlay fresh) and PublishRefined (which it forwards the pose to
+        # unchanged), so pose.refined is byte-identical to the no-capture chain.
+        if capture_window:
+            self.on(topics.KEYFRAME,
+                    [RunBA(), PublishBaWindow(), PublishRefined()])
+            self.forwards_to(topics.POSE_REFINED, topics.BA_WINDOW)
+        else:
+            self.on(topics.KEYFRAME, [RunBA(), PublishRefined()])
+            self.forwards_to(topics.POSE_REFINED)
 
     def run(self) -> None:
         # Close the engine on THIS thread when the loop exits (stop sentinel or

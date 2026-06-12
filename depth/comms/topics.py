@@ -97,6 +97,14 @@ CALIB_BUNDLE = "calib.bundle"
 # directly by the UI (no flow message, like calib.bundle).
 VIO_MAP = "vio.map"
 
+# Per-keyframe windowed-BA solve snapshot for the UI's "BA Window" visualiser
+# (window keyframe poses + shared 3D landmarks + observation rays + reprojection
+# error + the PRE-solve state for a before/after toggle). Published by the VIO
+# process ONLY when the opt-in ``--ba-window`` flag is on -- the default-OFF path
+# never captures it, so the byte-parity oracle is UNAFFECTED. Carries NO images
+# (mirrors slam.loop). Consumed only by the UI.
+BA_WINDOW = "ba.window"
+
 # Topics that MUST stay FIFO end-to-end -- VIO + deterministic replay break if
 # any frame is coalesced away. A module built with ``latest_only=True`` whose
 # inbox or downstream chain feeds the odometry compute path (PreintegratePrior /

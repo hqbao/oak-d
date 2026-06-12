@@ -389,6 +389,165 @@ def test_loop_window_offscreen(app) -> None:
           f"({green} green px)")
 
 
+def _mk_ba_window(seq: int, n_kf: int = 5, n_lm: int = 24, n_obs: int = 80):
+    """A synthetic :class:`~ui.comms.messages.BaWindow` for the offscreen tests.
+
+    Deterministic per ``seq`` so a slider scrub to a prior index is verifiable
+    (the rendered image of snapshot i is reproducible). Carries a spread of
+    reprojection errors so the renderer draws green sub-px AND red large-error
+    rays, and a non-trivial PRE/POST shift so the before/after toggle changes
+    pixels.
+    """
+    from ui.comms.messages import BaWindow
+    rng = np.random.default_rng(1000 + seq)
+    kf_pos = np.cumsum(rng.normal(0, 0.12, (n_kf, 3)), axis=0)
+    kf_pos[:, 1] = 0.0
+    ang = np.linspace(0, 0.4 + 0.05 * seq, n_kf)
+    kf_quat = np.stack([np.cos(ang / 2), np.zeros(n_kf),
+                        np.sin(ang / 2), np.zeros(n_kf)], axis=1)
+    lm = rng.normal([0.1 * seq, 0, 1.5], [0.6, 0.2, 0.6], (n_lm, 3))
+    obs_kf = rng.integers(0, n_kf, n_obs).astype(np.int32)
+    obs_lm = rng.integers(0, n_lm, n_obs).astype(np.int32)
+    obs_re = rng.uniform(0.0, 5.0, n_obs).astype(np.float32)
+    return BaWindow(
+        seq=seq, ts_ns=0,
+        kf_ids=np.arange(seq, seq + n_kf, dtype=np.int64),
+        kf_quat=kf_quat, kf_pos=kf_pos,
+        lm_ids=np.arange(n_lm, dtype=np.int64), lm_xyz=lm,
+        obs_kf=obs_kf, obs_lm=obs_lm,
+        obs_uv=rng.random((n_obs, 2)).astype(np.float32),
+        obs_reproj_px=obs_re, ba_reproj_px=float(obs_re.mean()),
+        kf_quat_pre=kf_quat.copy(),
+        kf_pos_pre=kf_pos + rng.normal(0, 0.06, (n_kf, 3)),
+        lm_xyz_pre=lm + rng.normal(0, 0.06, (n_lm, 3)),
+        n_kf=n_kf, n_lm=n_lm)
+
+
+class _StubBaWindowSource:
+    """Duck-typed BA-window source for the offscreen test (no IPC).
+
+    Mirrors :class:`~ui.modules.ipc_sources.IpcBaWindowSource`'s surface used by
+    the window: ``start(cb)`` / ``stop()`` / ``.error`` plus ``snapshot_count`` /
+    ``snapshot_at``. ``start`` pushes the synthetic snapshots synchronously and
+    buffers them so the slider can scrub.
+    """
+
+    error = None
+
+    def __init__(self, snaps):
+        self._snaps = list(snaps)
+        self._cb = None
+
+    def start(self, cb):
+        self._cb = cb
+        for s in self._snaps:
+            cb(s)                                     # push all synchronously
+
+    def stop(self):
+        pass
+
+    def snapshot_count(self):
+        return len(self._snaps)
+
+    def snapshot_at(self, i):
+        n = len(self._snaps)
+        if n == 0:
+            return None
+        if i < 0:
+            i += n
+        return self._snaps[i] if 0 <= i < n else None
+
+
+def test_ba_window_offscreen(app) -> None:
+    """Construct the BA Window with a stub source + assert it renders + scrubs.
+
+    Proves the Qt window <-> renderer wiring (construct -> start -> tick -> render
+    -> slider scrub -> before/after toggle -> close) under offscreen Qt, WITHOUT
+    needing a real ba.window over IPC (covered on a real session by
+    ``ui.tests._ba_window_png``). Pushes THREE synthetic snapshots and checks:
+    non-blank canvas, slider range tracks the buffer, dragging the slider
+    re-renders a PRIOR snapshot (different pixels), and the before/after toggle
+    changes pixels.
+    """
+    print("\n  [menus] BA Window (Qt + renderer wiring, slider, before/after)")
+    from ui.qt.ba_window import BaWindow
+
+    snaps = [_mk_ba_window(s) for s in (0, 7, 14)]
+    win = BaWindow(lambda: _StubBaWindowSource(snaps), live=True)
+    try:
+        win.start()                                   # renders the waiting frame
+        app.processEvents()
+        win._on_tick()                                # consume the buffered snaps
+        app.processEvents()
+        img_head = win._buf
+        # _buf holds the RENDERER output (its default 1100x620), not the QLabel
+        # size -- the label scales the pixmap to fit on blit.
+        _check(img_head is not None and img_head.shape == (620, 1100, 3)
+               and img_head.dtype == np.uint8,
+               f"BA window rendered (620,1100,3) uint8 (got "
+               f"{None if img_head is None else (img_head.shape, img_head.dtype)})")
+        # non-blank: many non-background pixels (geometry actually drawn).
+        nonbg = int((img_head.reshape(-1, 3) != np.array([13, 17, 23]))
+                    .any(1).sum())
+        _check(nonbg > 1000, f"BA window canvas is non-blank ({nonbg} px drawn)")
+        # slider range grew to the buffer (3 snaps -> max index 2).
+        _check(win._slider.maximum() == 2,
+               f"slider range tracks the 3-snap buffer (max={win._slider.maximum()})")
+
+        # Drag to a PRIOR snapshot -> follow turns moot; scrub re-renders snap 0.
+        win._follow_cb.setChecked(False)
+        win._slider.setValue(0)                       # scrub to the oldest
+        app.processEvents()
+        img_scrub = win._buf.copy()
+        diff = int((img_scrub != img_head).any(2).sum())
+        _check(diff > 500,
+               f"dragging the slider re-rendered a different (prior) snapshot "
+               f"({diff} px changed)")
+
+        # Before/after toggle on the SAME scrubbed snapshot changes pixels.
+        win._before_cb.setChecked(True)
+        app.processEvents()
+        img_pre = win._buf.copy()
+        d2 = int((img_pre != img_scrub).any(2).sum())
+        _check(d2 > 300,
+               f"before/after toggle changed pixels ({d2} px changed)")
+        _check(win._first_seen, "BA window registered the synthetic snapshots")
+    finally:
+        win.close()
+        app.processEvents()
+    print(f"    [ok] BA window: rendered, slider scrubs a prior snapshot, "
+          f"before/after toggles ({nonbg} px drawn)")
+
+
+def test_ba_window_buffer() -> None:
+    """Unit-test the BA-window source buffer/slider semantics (no Qt).
+
+    Proves :class:`~ui.modules.ipc_sources.IpcBaWindowSource`'s deque: it evicts
+    the oldest past ``buffer``, the callback still sees EVERY snapshot, indexed
+    access returns the right snapshot, the newest is ``snapshot_at(-1)`` (follow's
+    head), and an out-of-range index returns ``None`` (never raises on a slider
+    race). No IPC -- the records are fed straight through ``_on_msg``.
+    """
+    print("\n  [menus] IpcBaWindowSource buffer/slider semantics (no Qt)")
+    from ui.modules.ipc_sources import IpcBaWindowSource
+
+    src = IpcBaWindowSource("oak.vio.test", buffer=3)
+    seen = []
+    src._cb = seen.append                             # simulate the wired callback
+    for s in range(5):
+        src._on_msg(_mk_ba_window(s))
+    _check(src.snapshot_count() == 3,
+           f"deque evicts oldest past buffer=3 (count={src.snapshot_count()})")
+    _check([g.seq for g in seen] == [0, 1, 2, 3, 4],
+           "callback saw EVERY snapshot (eviction is buffer-only)")
+    _check(src.snapshot_at(0).seq == 2 and src.snapshot_at(-1).seq == 4,
+           "buffer holds the last 3 (oldest=2, newest=4); follow head = -1")
+    _check(src.snapshot_at(1).seq == 3, "replay scrub returns the indexed snap")
+    _check(src.snapshot_at(99) is None and src.snapshot_at(-99) is None,
+           "out-of-range index returns None (no raise on a slider race)")
+    print("    [ok] BA-window buffer: evicts past K, callback sees all, scrub OK")
+
+
 def _spawn_cap_vio(session: str, max_frames: int, kf_every: int):
     """Boot imu_camera(replay) + vio over IPC; return (procs, cap_ep, vio_ep).
 
@@ -522,6 +681,9 @@ def test_menus(args) -> None:
     # (d) Calibration seam first -- it is self-contained (its own tiny server)
     # and proves the IMU adapter before we stand up the heavier capture+vio.
     test_imu_raw_source()
+    # BA-window source buffer/slider semantics (no Qt, no IPC) -- the deque the
+    # window's timeline slider scrubs.
+    test_ba_window_buffer()
 
     from PyQt6.QtGui import QAction
     from PyQt6.QtWidgets import QApplication
@@ -662,6 +824,14 @@ def test_menus(args) -> None:
         # pushes one synthetic LoopEvent, start it offscreen, and assert it renders
         # a non-trivial (560,1100,3) image with the colour-coded match lines.
         test_loop_window_offscreen(app)
+
+        # ---------- (g) Visualize -> BA Window ----------
+        # The BA window is fed by a duck-typed source (ba.window over IPC). A
+        # 20-frame replay DOES produce ba.window solves, but the full IPC firing
+        # is proven on a real session in ui.tests._ba_window_png; HERE we prove the
+        # Qt window + renderer wiring + the slider/before-after state machine with
+        # a STUB source pushing 3 synthetic snapshots (offscreen, deterministic).
+        test_ba_window_offscreen(app)
     finally:
         for w in (triplet_win, keypoint_win):
             if w is not None:

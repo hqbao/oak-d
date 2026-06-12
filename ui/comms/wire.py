@@ -304,6 +304,41 @@ class WireLoopMatch:
     accepted: bool
 
 
+@dataclass(frozen=True)
+class WireBaWindow:
+    """Wire form of :class:`comms.messages.BaWindow` (topic ``ba.window``).
+
+    The per-keyframe windowed-BA solve snapshot for the UI's "BA Window" view,
+    published by VIO ONLY under the opt-in ``--ba-window`` flag. Pure POD -- the
+    window is small (<= 8 keyframes, <= 100 landmarks, a few hundred observation
+    rays), so every array rides the message itself (no shared-memory ring); there
+    are NO images on the wire (mirrors :class:`WireLoopMatch`). The codec ships
+    every float bitwise (``struct('>d')``) and every ndarray by ``dtype.name``, so
+    the int32/float32/float64 columns round-trip exactly.
+
+    Field ORDER is the FROZEN codec contract (see module docstring): it MUST match
+    :class:`comms.messages.BaWindow` field-for-field, name + order + dtype.
+    """
+
+    seq: int
+    ts_ns: int
+    kf_ids: np.ndarray                            # (N,) int64
+    kf_quat: np.ndarray                           # (N, 4) float64 (qw,qx,qy,qz)
+    kf_pos: np.ndarray                            # (N, 3) float64 (post-solve)
+    lm_ids: np.ndarray                            # (M,) int64
+    lm_xyz: np.ndarray                            # (M, 3) float64 (post-solve)
+    obs_kf: np.ndarray                            # (L,) int32 -> kf_ids index
+    obs_lm: np.ndarray                            # (L,) int32 -> lm_ids index
+    obs_uv: np.ndarray                            # (L, 2) float32 measured pixel
+    obs_reproj_px: np.ndarray                     # (L,) float32 per-obs reproj
+    ba_reproj_px: float                           # window mean reproj px
+    kf_quat_pre: np.ndarray                       # (N, 4) float64 (pre-solve)
+    kf_pos_pre: np.ndarray                        # (N, 3) float64 (pre-solve)
+    lm_xyz_pre: np.ndarray                        # (M, 3) float64 (pre-solve)
+    n_kf: int
+    n_lm: int
+
+
 # --------------------------------------------------------------------------- #
 # Control sentinel: END signal across the IPC boundary
 # --------------------------------------------------------------------------- #
@@ -348,6 +383,7 @@ TOPIC_WIRE: dict[str, type] = {
     topics.LOOP_CORRECTION: WireLoopCorrection,
     topics.SLAM_MAP:        WireSlamMap,
     topics.SLAM_LOOP:       WireLoopMatch,
+    topics.BA_WINDOW:       WireBaWindow,
     # Retained / read-directly topics (no converter), but the registry MUST cover
     # them so consumers can decode the wire object. See blueprint risk #5.
     topics.CALIB_BUNDLE:    WireCalibBundle,

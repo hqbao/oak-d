@@ -18,19 +18,33 @@ import numpy as np
 
 from .base import Engine
 from .inprocess import InProcessEngine
-from .steps import ba_step, vio_step, ba_overlay, vio_overlay
-from .subprocess import SubprocessEngine, _ba_worker_main, _vio_worker_main
+from .steps import (ba_step, vio_step, ba_overlay, vio_overlay,
+                    ba_step_capture, ba_window_overlay)
+from .subprocess import (SubprocessEngine, _ba_worker_main,
+                         _ba_capture_worker_main, _vio_worker_main)
 
 __all__ = ["Engine", "InProcessEngine", "SubprocessEngine",
            "make_ba_engine", "make_vi_engine"]
 
 
-def make_ba_engine(K: np.ndarray, cfg, *, worker: bool = False) -> Engine:
-    """Build a windowed-BA engine (in-process unless ``worker``)."""
+def make_ba_engine(K: np.ndarray, cfg, *, worker: bool = False,
+                   capture_window: bool = False) -> Engine:
+    """Build a windowed-BA engine (in-process unless ``worker``).
+
+    ``capture_window`` (opt-in, ``--ba-window``) selects the RICHER capture step +
+    overlay (:func:`~vio.mathlib.engine.steps.ba_step_capture` /
+    :func:`~vio.mathlib.engine.steps.ba_window_overlay`): the SAME frozen
+    ``run_ba`` solve plus a read-only PRE/POST snapshot for the UI's "BA Window"
+    visualiser. Default OFF -> the historical ``ba_step`` / ``ba_overlay`` path,
+    byte-identical to before (the oracle relies on this).
+    """
+    step = ba_step_capture if capture_window else ba_step
+    overlay = ba_window_overlay if capture_window else ba_overlay
     if worker:
-        return SubprocessEngine(_ba_worker_main, K, cfg)
+        worker_main = _ba_capture_worker_main if capture_window else _ba_worker_main
+        return SubprocessEngine(worker_main, K, cfg)
     from sky.backend.windowed import WindowedBAMap
-    return InProcessEngine(lambda: WindowedBAMap(K, cfg), ba_step, ba_overlay)
+    return InProcessEngine(lambda: WindowedBAMap(K, cfg), step, overlay)
 
 
 def make_vi_engine(K: np.ndarray, cfg, *, worker: bool = False) -> Engine:

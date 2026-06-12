@@ -53,6 +53,7 @@ into ``self.error`` for the window to display.
 """
 from __future__ import annotations
 
+import collections
 import logging
 import threading
 import time
@@ -460,6 +461,111 @@ class IpcGyroFuseSource:
         cb = self._cb
         if cb is not None:
             cb(msg)
+
+    def stop(self) -> None:
+        client = self._client
+        self._client = None
+        if client is not None:
+            try:
+                client.stop()
+            except Exception:                                      # noqa: BLE001
+                pass
+
+
+# --------------------------------------------------------------------------- #
+# (1b') BA-window source for the "BA Window" visualiser
+# --------------------------------------------------------------------------- #
+class IpcBaWindowSource:
+    """Duck-typed windowed-BA snapshot stream over VIO's ``ba.window`` IPC topic.
+
+    The "BA Window" view (:mod:`ui.qt.ba_window`) drives a stream object with the
+    same three touch-points as the other sources -- ``start(callback)`` /
+    ``stop()`` / ``.error`` -- and feeds each :class:`~ui.comms.messages.BaWindow`
+    to its renderer. This adapter sources the records from VIO's ``ba.window``
+    topic (pure POD, no shared-memory ring) so the window needs no device handle,
+    EXACTLY like :class:`IpcGyroFuseSource`.
+
+    Unlike the per-frame gyro-fusion stream, the window ALSO buffers the last
+    ``buffer`` snapshots in a bounded :class:`collections.deque` under a lock, so
+    the window's timeline slider can scrub back to a previous solve in REPLAY mode
+    (and rolling last-N in LIVE). The deque is the single source of truth for both
+    modes; :meth:`snapshot_count` / :meth:`snapshot_at` expose it to the slider.
+
+    ``ba.window`` is published ONLY when VIO ran with ``--ba-window`` (the opt-in
+    capture engine); a healthy VIO without that flag simply never emits here, so
+    the window stays on its "waiting" frame (NOT an error). Mirrors
+    :class:`IpcGyroFuseSource`'s connect-error model: a connect timeout is
+    swallowed onto :attr:`error` (the window polls it) rather than raising.
+    """
+
+    #: Default bounded buffer of recent snapshots (the slider's range). Generous
+    #: enough to scrub a short replay segment; LIVE keeps the rolling last-N.
+    DEFAULT_BUFFER = 240
+
+    def __init__(self, vio_endpoint: str, *, buffer: int = DEFAULT_BUFFER,
+                 connect_timeout_s: float = 30.0) -> None:
+        self._endpoint = vio_endpoint
+        self._connect_timeout_s = float(connect_timeout_s)
+        self.error: str | None = None
+        self._client: IPCPubSub | None = None
+        # ba.window is pure POD (no ring), so a bare registry suffices for the
+        # converter -- the ``rings`` arg is unused for this topic.
+        self._rings = RingRegistry()
+        self._cb = None
+        self._lock = threading.Lock()
+        self._buf: "collections.deque" = collections.deque(maxlen=int(buffer))
+
+    def start(self, callback) -> None:
+        """Connect to VIO and stream each BaWindow record to ``callback``.
+
+        Each arrival is appended to the bounded buffer (oldest evicted) UNDER the
+        lock BEFORE the callback runs, so the window's ``snapshot_at`` always sees
+        a snapshot the callback already knows about.
+        """
+        self._cb = callback
+        client = IPCPubSub(self._endpoint, role="client",
+                           connect_timeout_s=self._connect_timeout_s)
+        client.subscribe(topics.BA_WINDOW, self._on_msg)
+        try:
+            client.start()
+        except Exception as e:                                     # noqa: BLE001
+            self.error = f"VIO BA-window stream connect failed: {e}"
+            return
+        self._client = client
+
+    def _on_msg(self, wm) -> None:
+        if wm is END:
+            return
+        msg = to_local(topics.BA_WINDOW, wm, self._rings)
+        if msg is END:                                # WireEnd -> local END
+            return
+        with self._lock:
+            self._buf.append(msg)
+        cb = self._cb
+        if cb is not None:
+            cb(msg)
+
+    # -- slider / buffer access (thread-safe) ----------------------------- #
+    def snapshot_count(self) -> int:
+        """Number of buffered snapshots currently available (the slider range)."""
+        with self._lock:
+            return len(self._buf)
+
+    def snapshot_at(self, i: int):
+        """The buffered snapshot at index ``i`` (0 = oldest, -1 = newest), or None.
+
+        Indices are into the rolling deque; an out-of-range index returns ``None``
+        so the window's slider can never raise on a race with an eviction.
+        """
+        with self._lock:
+            n = len(self._buf)
+            if n == 0:
+                return None
+            if i < 0:
+                i += n
+            if 0 <= i < n:
+                return self._buf[i]
+            return None
 
     def stop(self) -> None:
         client = self._client
@@ -1823,3 +1929,16 @@ def ipc_loop_factory(slam_endpoint: str, vio_endpoint: str,
     """
     return lambda: IpcLoopMatchSource(slam_endpoint, vio_endpoint,
                                       width=width, height=height)
+
+
+def ipc_ba_window_factory(vio_endpoint: str, *, buffer: int = 240,
+                          connect_timeout_s: float = 30.0):
+    """Return a zero-arg factory building an :class:`IpcBaWindowSource`.
+
+    Binds VIO's endpoint (the ``ba.window`` solve-snapshot publisher, present only
+    when VIO ran with ``--ba-window``), so the caller (``ui.main``) just opens the
+    BA Window with the returned source. Pure POD topic -- no rings, no width/height
+    needed (unlike the loop / keypoint sources that read kf grays).
+    """
+    return lambda: IpcBaWindowSource(vio_endpoint, buffer=buffer,
+                                     connect_timeout_s=connect_timeout_s)
