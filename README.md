@@ -436,7 +436,20 @@ The menu bar renders **in-window on every platform** (`setNativeMenuBar(False)`)
 
 - **View** — camera presets and Follow Camera.
 - **Visualize** — *Camera + Depth + IMU (triplet)*, *Keypoint Depth Tracker*,
-  *Gyro Fusion (strip chart)*, *Loop Closure*, *BA Window*, and *SLAM Map (3D room)*.
+  *Gyro Fusion (strip chart)*, *Loop Closure*, *Pose Graph (before/after)*, *BA Window*,
+  and *SLAM Map (3D room)*.
+  - *Pose Graph (before/after)* — the **SE(3) pose-graph optimization** made visible: a
+    2D top-down (world X–Z) view of the keyframe poses as graph **nodes**, **odometry
+    edges** chaining consecutive keyframes, and the confirmed **loop edge(s)** as a
+    magenta chord ("keyframe `cur` is back at keyframe `old`"). A **before/after toggle**
+    swaps the raw/drifted VIO node positions (the loop is **open** — chord long) for the
+    pose-graph-corrected ones (the loop **closes** — chord collapses), with the other
+    state ghosted behind; **per-node correction arrows** spread from ~0 at the anchor to
+    large near the loop, so "the drift correction is redistributed smoothly along the
+    whole path, not dumped at one spot" is literal. A **timeline slider** scrubs the
+    loop-closure events. It is a **pure UI consumer** of existing topics — VIO's raw
+    `pose.odom` (before) + SLAM's `slam.map` corrected poses (after) + SLAM's `slam.loop`
+    edges — so there is **no new IPC topic** and the byte-parity oracle stays gap=0.
   - *BA Window* (opt-in, launch with `--ba-window`) — the **real windowed-BA solve**
     on actual data, drawn 2D top-down (world X–Z): the `window` keyframe poses as
     heading triangles (newest highlighted, oldest = the BA **gauge anchor**), the

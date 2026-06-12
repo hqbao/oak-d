@@ -633,6 +633,7 @@ def run_ui(*, vio_endpoint: str = DEFAULT_VIO_ENDPOINT,
     from ui.qt.gyrofuse_window import GyroFuseWindow
     from ui.qt.loop_window import LoopClosureWindow
     from ui.qt.ba_window import BaWindow
+    from ui.qt.posegraph_window import PoseGraphWindow
     from ui.qt.map_window import MapWindow
     from ui.qt.calib_dialogs import GyroCalibDialog, AccelCalibDialog
     from ui.qt.camera_calib_dialog import CameraCalibWizard
@@ -641,7 +642,7 @@ def run_ui(*, vio_endpoint: str = DEFAULT_VIO_ENDPOINT,
     from ui.modules import (
         IpcImuRawSource, IpcStereoRawSource, IpcGyroFuseSource,
         ipc_triplet_factory, ipc_keypoint_factory, ipc_slam_map_factory,
-        ipc_loop_factory, ipc_ba_window_factory,
+        ipc_loop_factory, ipc_ba_window_factory, ipc_pose_graph_factory,
     )
 
     # 1. Wait for VIO + SLAM to be ready (and learn the capture resolution).
@@ -874,6 +875,27 @@ def run_ui(*, vio_endpoint: str = DEFAULT_VIO_ENDPOINT,
     loop_act.triggered.connect(_open_loop)
     vis_menu.addAction(loop_act)
 
+    def _open_pose_graph() -> None:
+        if getattr(win, "_pose_graph_win", None) is None:
+            # Source binds VIO's endpoint (raw pose.odom = BEFORE) + SLAM's
+            # endpoint (slam.map corrected nodes = AFTER + slam.loop edges); a
+            # pure consumer of existing topics (no new IPC field), device-agnostic
+            # like the other windows. live=True -> "Follow latest" (jump to the
+            # newest loop closure); uncheck it to scrub the closures timeline.
+            win._pose_graph_win = PoseGraphWindow(
+                ipc_pose_graph_factory(vio_endpoint, slam_endpoint,
+                                       connect_timeout_s=calib_timeout_s),
+                live=True, parent=win)
+        win._pose_graph_win.show()
+        win._pose_graph_win.raise_()
+        win._pose_graph_win.activateWindow()
+        win._pose_graph_win.ensure_started()
+        win.statusBar().showMessage("Pose Graph (before/after) opened.", 2500)
+
+    pose_graph_act = QAction("Pose Graph (before/after)…", win)
+    pose_graph_act.triggered.connect(_open_pose_graph)
+    vis_menu.addAction(pose_graph_act)
+
     def _open_ba_window() -> None:
         if getattr(win, "_ba_window_win", None) is None:
             # Source binds VIO's endpoint (the ba.window solve-snapshot publisher,
@@ -1091,7 +1113,8 @@ def run_ui(*, vio_endpoint: str = DEFAULT_VIO_ENDPOINT,
         # (closeEvent stops the worker). The calib dialogs are modal + scoped to
         # their handler's `finally`, so there's nothing to clean up for them here.
         for _attr in ("_triplet_win", "_keypoints_win", "_gyrofuse_win",
-                      "_loop_win", "_ba_window_win", "_slam_map_win"):
+                      "_loop_win", "_ba_window_win", "_pose_graph_win",
+                      "_slam_map_win"):
             _w = getattr(win, _attr, None)
             if _w is not None:
                 try:

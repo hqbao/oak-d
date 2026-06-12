@@ -732,6 +732,273 @@ class IpcLoopMatchSource:
 
 
 # --------------------------------------------------------------------------- #
+# (1d) Pose-graph before/after source for the "Pose Graph" visualiser
+# --------------------------------------------------------------------------- #
+class IpcPoseGraphSource:
+    """Duck-typed pose-graph before/after stream (ALGORITHMS.md §4.3).
+
+    The "Pose Graph" window (:mod:`ui.qt.posegraph_window`) drives a stream object
+    with the BA-window source's surface -- ``start(callback)`` / ``stop()`` /
+    ``.error`` + ``snapshot_count()`` / ``snapshot_at(i)`` (the timeline slider
+    scrubs the buffer) -- and feeds each :class:`~ui.viz.posegraph_render.PoseGraphSnapshot`
+    to its renderer.
+
+    This is a PURE CONSUMER of EXISTING topics -- there is NO new IPC field or
+    data-path change (gap=0 trivially). It subscribes THREE endpoints (mirrors
+    :class:`IpcSlamMapSource`'s two-endpoint pattern + the loop funnel):
+
+    * ``pose.odom`` (VIO) -> the RAW, drifted dense VIO trajectory. Buffered as a
+      bounded seq->position ring; this is the BEFORE state (pre-pose-graph) and the
+      per-keyframe pre-PGO node anchor (raw VIO position at the keyframe's seq).
+    * ``slam.map`` (SLAM) -> the CONTINUOUS pose-graph-CORRECTED keyframe positions
+      (``kf_positions`` + ``kf_ids`` source seqs) + ``n_loops``. This is the AFTER
+      state. A new ``n_loops`` value is the trigger to assemble + buffer a snapshot.
+    * ``slam.loop`` (SLAM) -> the per-candidate match funnel; the CONFIRMED
+      (``accepted``) ones give the loop EDGE ``(cur_seq, old_seq)`` chords.
+
+    A :class:`~ui.viz.posegraph_render.PoseGraphSnapshot` is assembled whenever the
+    correctedmap's ``n_loops`` increases (a loop just closed -> the graph was
+    re-optimised), capturing the matched raw/corrected node pairs + the dense
+    before/after trails + the loop edges KNOWN AT THAT MOMENT. The bounded deque
+    keeps the recent snapshots so the timeline slider can scrub to each closure.
+
+    All positions are world X-Z in the camera-optical frame (the frame ``slam.map``
+    / ``pose.odom`` both publish); the renderer is top-down so no NED conversion is
+    needed (unlike the main Viewer3D, which is intentionally a different lens).
+
+    Connect-error model mirrors :class:`IpcSlamMapSource`'s: a connect timeout is
+    swallowed onto :attr:`error` (the window polls it) rather than raising.
+    """
+
+    #: Cap on buffered raw VIO poses (the dense BEFORE trail + node anchors). A
+    #: loop session is ~30-45 s; this is generous enough to keep the whole path.
+    MAX_VIO = 6000
+    #: Cap on confirmed loop edges retained (loops are sporadic, so tiny).
+    MAX_LOOPS = 64
+    #: Default bounded buffer of assembled snapshots (the slider's timeline range).
+    DEFAULT_BUFFER = 64
+
+    def __init__(self, vio_endpoint: str, slam_endpoint: str, *,
+                 buffer: int = DEFAULT_BUFFER,
+                 connect_timeout_s: float = 30.0) -> None:
+        self._vio_ep = vio_endpoint
+        self._slam_ep = slam_endpoint
+        self._connect_timeout_s = float(connect_timeout_s)
+        self.error: str | None = None
+
+        self._vio_client: IPCPubSub | None = None
+        self._slam_client: IPCPubSub | None = None
+        # pose.odom / slam.map / slam.loop are all pure POD (no rings), so a bare
+        # registry suffices for the converters (the ``rings`` arg is unused).
+        self._rings = RingRegistry()
+        self._cb = None
+
+        self._lock = threading.Lock()
+        # Raw VIO dense trail: parallel seq + optical (x, z) arrays (bounded).
+        self._vio_seqs: np.ndarray = np.zeros(0, np.int64)
+        self._vio_xz: np.ndarray = np.zeros((0, 2), np.float64)
+        # Latest corrected keyframe map (the AFTER nodes), from slam.map.
+        self._kf_seqs: np.ndarray = np.zeros(0, np.int64)
+        self._kf_after_xz: np.ndarray = np.zeros((0, 2), np.float64)
+        self._n_loops = 0
+        # Confirmed loop edges seen so far: list of (cur_seq, old_seq).
+        self._loop_edges: list[tuple[int, int]] = []
+        # Assembled snapshots for the slider (one per loop closure event).
+        self._buf: "collections.deque" = collections.deque(maxlen=int(buffer))
+
+    # ------------------------------------------------------------------ #
+    def start(self, callback) -> None:
+        """Connect all three endpoints; assemble a snapshot per loop closure."""
+        self._cb = callback
+        vio_client = IPCPubSub(self._vio_ep, role="client",
+                               connect_timeout_s=self._connect_timeout_s)
+        vio_client.subscribe(topics.POSE_ODOM, self._on_pose)
+        slam_client = IPCPubSub(self._slam_ep, role="client",
+                                connect_timeout_s=self._connect_timeout_s)
+        slam_client.subscribe(topics.SLAM_MAP, self._on_slammap)
+        slam_client.subscribe(topics.SLAM_LOOP, self._on_loop)
+        try:
+            vio_client.start()
+            slam_client.start()
+        except Exception as e:                                     # noqa: BLE001
+            self.error = f"pose-graph stream connect failed: {e}"
+            for c in (vio_client, slam_client):
+                try:
+                    c.stop()
+                except Exception:                                  # noqa: BLE001
+                    pass
+            return
+        self._vio_client = vio_client
+        self._slam_client = slam_client
+
+    # ------------------------------------------------------------------ #
+    def _on_pose(self, wm) -> None:
+        """VIO recv thread: append one raw (drifted) VIO pose to the trail."""
+        if wm is END:
+            return
+        msg = to_local(topics.POSE_ODOM, wm, self._rings)
+        if msg is END:                                # WireEnd -> local END
+            return
+        # Optical-world translation -> top-down (x, z); the renderer is top-down.
+        t = np.asarray(msg.T_world_cam, np.float64)[:3, 3]
+        seq = int(msg.seq)
+        with self._lock:
+            self._vio_seqs = np.append(self._vio_seqs, seq)
+            self._vio_xz = np.vstack((self._vio_xz, t[[0, 2]][None, :]))
+            if len(self._vio_seqs) > self.MAX_VIO:
+                self._vio_seqs = self._vio_seqs[-self.MAX_VIO:]
+                self._vio_xz = self._vio_xz[-self.MAX_VIO:]
+
+    def _on_slammap(self, wm) -> None:
+        """SLAM recv thread: latch the corrected nodes; snapshot on a new loop."""
+        if wm is END:
+            return
+        msg = to_local(topics.SLAM_MAP, wm, self._rings)
+        if msg is END:
+            return
+        kf_pos = np.asarray(msg.kf_positions, np.float64).reshape(-1, 3)
+        kf_seqs = np.asarray(msg.kf_seqs, np.int64).reshape(-1)
+        n_loops = int(msg.n_loops)
+        # Drop a malformed map (seqs must align with positions to anchor nodes).
+        if len(kf_seqs) != len(kf_pos):
+            return
+        snap = None
+        with self._lock:
+            self._kf_seqs = kf_seqs
+            self._kf_after_xz = (kf_pos[:, [0, 2]] if len(kf_pos)
+                                 else np.zeros((0, 2), np.float64))
+            if n_loops > self._n_loops:
+                # A loop just closed -> the graph was re-optimised. Assemble a
+                # before/after snapshot from the state KNOWN AT THIS MOMENT and
+                # buffer it for the timeline slider.
+                self._n_loops = n_loops
+                snap = self._assemble_locked()
+                if snap is not None:
+                    self._buf.append(snap)
+        if snap is not None and self._cb is not None:
+            self._cb(snap)
+
+    def _on_loop(self, wm) -> None:
+        """SLAM recv thread: record a CONFIRMED loop edge (cur_seq, old_seq)."""
+        if wm is END:
+            return
+        msg = to_local(topics.SLAM_LOOP, wm, self._rings)
+        if msg is END:
+            return
+        if not bool(msg.accepted):                    # only confirmed -> an edge
+            return
+        edge = (int(msg.cur_seq), int(msg.old_seq))
+        with self._lock:
+            if edge not in self._loop_edges:
+                self._loop_edges.append(edge)
+                if len(self._loop_edges) > self.MAX_LOOPS:
+                    self._loop_edges = self._loop_edges[-self.MAX_LOOPS:]
+
+    # ------------------------------------------------------------------ #
+    def _assemble_locked(self):
+        """Build a :class:`PoseGraphSnapshot` from the latched state (lock held).
+
+        The BEFORE node anchor for keyframe ``s`` is the raw VIO position at seq
+        ``s`` (the pre-PGO estimate). Only keyframes whose seq still lives in the
+        bounded VIO ring get a node (others rolled off and have no anchor). The
+        AFTER trail is the BEFORE trail rubber-sheeted by the per-node correction
+        delta, piecewise-linearly interpolated by seq (the SAME deform ``ui.main``
+        applies to the corrected-VIO line) -- so the dense path also visibly
+        spreads the correction, not just the nodes.
+        """
+        from ui.viz.posegraph_render import PoseGraphSnapshot
+
+        vio_seqs = self._vio_seqs
+        vio_xz = self._vio_xz
+        kf_seqs = self._kf_seqs
+        kf_after = self._kf_after_xz
+        if len(vio_seqs) == 0 or len(kf_seqs) < 2:
+            return None
+
+        # seq -> raw VIO position (the pre-PGO node anchor). VIO seqs arrive
+        # monotonic but sort defensively for searchsorted robustness.
+        order = np.argsort(vio_seqs, kind="stable")
+        vs = vio_seqs[order]
+        vp = vio_xz[order]
+        pos = np.searchsorted(vs, kf_seqs)
+        in_range = pos < len(vs)
+        hit = np.zeros(len(kf_seqs), bool)
+        hit[in_range] = vs[pos[in_range]] == kf_seqs[in_range]
+        if hit.sum() < 2:                             # need >=2 anchored nodes
+            return None
+
+        kf_seq_hit = kf_seqs[hit]
+        kf_before = vp[pos[hit]]                       # (Kh, 2) raw node anchors
+        kf_after_hit = kf_after[hit]                   # (Kh, 2) corrected nodes
+        # Sort nodes by seq so odometry edges chain in graph order.
+        ks_order = np.argsort(kf_seq_hit, kind="stable")
+        kf_seq_hit = kf_seq_hit[ks_order]
+        kf_before = kf_before[ks_order]
+        kf_after_hit = kf_after_hit[ks_order]
+
+        # Rubber-sheet the dense raw trail by the per-node correction delta (the
+        # same np.interp-per-axis deform main.corrected_vio_snapshot uses).
+        delta = kf_after_hit - kf_before              # (Kh, 2)
+        ks = kf_seq_hit.astype(np.float64)
+        dense_seq = vio_seqs.astype(np.float64)
+        corr = np.empty_like(vio_xz)
+        for axis in range(2):
+            corr[:, axis] = np.interp(dense_seq, ks, delta[:, axis])
+        after_traj = vio_xz + corr
+
+        # Map confirmed loop edges (cur_seq, old_seq) to node indices.
+        seq_to_idx = {int(s): i for i, s in enumerate(kf_seq_hit)}
+        loop_edges = []
+        for cur_s, old_s in self._loop_edges:
+            ci, oi = seq_to_idx.get(cur_s), seq_to_idx.get(old_s)
+            if ci is not None and oi is not None:
+                loop_edges.append((ci, oi))
+
+        return PoseGraphSnapshot(
+            kf_seqs=kf_seq_hit.copy(),
+            kf_before_xz=kf_before.copy(),
+            kf_after_xz=kf_after_hit.copy(),
+            before_traj_xz=vio_xz.copy(),
+            after_traj_xz=after_traj,
+            loop_edges=tuple(loop_edges),
+            n_loops=self._n_loops)
+
+    # -- slider / buffer access (thread-safe) ----------------------------- #
+    def snapshot_count(self) -> int:
+        """Number of buffered snapshots (one per loop closure) for the slider."""
+        with self._lock:
+            return len(self._buf)
+
+    def snapshot_at(self, i: int):
+        """The buffered snapshot at index ``i`` (0 = oldest, -1 = newest), or None.
+
+        Out-of-range returns ``None`` so the slider can never raise on a race with
+        an eviction (mirrors :meth:`IpcBaWindowSource.snapshot_at`).
+        """
+        with self._lock:
+            n = len(self._buf)
+            if n == 0:
+                return None
+            if i < 0:
+                i += n
+            if 0 <= i < n:
+                return self._buf[i]
+            return None
+
+    # ------------------------------------------------------------------ #
+    def stop(self) -> None:
+        """Close both IPC clients (idempotent)."""
+        for attr in ("_vio_client", "_slam_client"):
+            client = getattr(self, attr)
+            setattr(self, attr, None)
+            if client is not None:
+                try:
+                    client.stop()
+                except Exception:                                  # noqa: BLE001
+                    pass
+
+
+# --------------------------------------------------------------------------- #
 # (2) Triplet worker (image | depth | IMU) for SyncedViewWindow
 # --------------------------------------------------------------------------- #
 class IpcTripletWorker(TripletWorker):
@@ -1942,3 +2209,17 @@ def ipc_ba_window_factory(vio_endpoint: str, *, buffer: int = 240,
     """
     return lambda: IpcBaWindowSource(vio_endpoint, buffer=buffer,
                                      connect_timeout_s=connect_timeout_s)
+
+
+def ipc_pose_graph_factory(vio_endpoint: str, slam_endpoint: str, *,
+                           connect_timeout_s: float = 30.0):
+    """Return a zero-arg factory building an :class:`IpcPoseGraphSource`.
+
+    Binds VIO's endpoint (the raw ``pose.odom`` drifted trail = BEFORE) and SLAM's
+    endpoint (``slam.map`` corrected nodes = AFTER + ``slam.loop`` edges), so the
+    caller (``ui.main``) just opens the Pose Graph window with the returned source.
+    All pure POD topics -- no rings, no width/height needed. A pure CONSUMER of
+    existing topics (no new IPC field), so the byte-parity oracle is unaffected.
+    """
+    return lambda: IpcPoseGraphSource(vio_endpoint, slam_endpoint,
+                                      connect_timeout_s=connect_timeout_s)

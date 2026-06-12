@@ -86,6 +86,7 @@ long-lived trajectory sources use:
 | Keypoint Depth Tracker        | `IpcKeypointWorker`          | capture · `frame.depth`  +  vio · `frame.tracks`, `frame.inliers` |
 | Gyro Fusion (strip chart)     | `IpcGyroFuseSource`          | vio · `frame.gyrofuse` |
 | Loop Closure                  | `IpcLoopMatchSource`         | slam · `slam.loop` (match funnel)  +  vio · `keyframe` (gray buffered by seq, joined to the funnel) |
+| Pose Graph (before/after)     | `IpcPoseGraphSource`         | vio · `pose.odom` (raw drifted trail = BEFORE) + slam · `slam.map` (corrected nodes = AFTER) + slam · `slam.loop` (loop edges) — **pure consumer, no new topic** |
 | BA Window (opt-in `--ba-window`) | `IpcBaWindowSource`       | vio · `ba.window` (windowed-BA solve snapshot: window poses + landmarks + observation rays + reprojection; buffered in a deque for the timeline slider) |
 | SLAM Map (3D room, voxel occupancy) | `IpcSlamMapSource`     | vio · `keyframe` (denoised depth via VIO's kf rings) + slam · `slam.map` (corrected poses) |
 
@@ -463,7 +464,12 @@ The menu is plain Qt (`QMenuBar` / `QAction`); `ui.main` calls
 - **Visualize** — **"Camera + Depth + IMU (triplet)…"** (`SyncedViewWindow`, driven
   by `IpcTripletWorker`), **"Keypoint Depth Tracker…"** (`KeypointTrackWindow`, driven
   by `IpcKeypointWorker`), **"Gyro Fusion (strip chart)…"** (`GyroFuseWindow`, driven
-  by `IpcGyroFuseSource`), and **"SLAM Map (3D room)…"** (`MapWindow`, driven by
+  by `IpcGyroFuseSource`), **"Pose Graph (before/after)…"** (`PoseGraphWindow`, driven by
+  `IpcPoseGraphSource` — the **SE(3) pose-graph optimization** made visible: keyframe
+  nodes + odometry/loop edges + a raw↔corrected before/after toggle + per-node correction
+  arrows that spread the loop's drift fix along the whole path; a pure consumer of vio
+  `pose.odom` + slam `slam.map`/`slam.loop`, no new topic), and **"SLAM Map (3D room)…"**
+  (`MapWindow`, driven by
   `IpcSlamMapSource` — a **ModalAI/VOXL-style VOXEL OCCUPANCY map**: the room as clean
   green voxel cubes (floor grid + walls + furniture as blocky voxels), in the same ENU
   frame as `Viewer3D`). It is built as a **probabilistic LOG-ODDS occupancy grid with

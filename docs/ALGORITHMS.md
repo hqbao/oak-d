@@ -45,6 +45,7 @@ flowchart LR
     U3[Keypoint tracker]
     U4[Loop Closure<br/>2 keyframes + match funnel]
     U5[BA Window<br/>window poses + landmarks<br/>+ reprojection rays]
+    U6[Pose Graph<br/>before/after nodes + edges<br/>+ correction arrows]
   end
 
   A5 -- imucam.sample --> B1
@@ -52,12 +53,15 @@ flowchart LR
   A6 -- frame.depth --> U2
   B1 -- frame.tracks --> U3
   B2 -- pose.odom / pose.vo / frame.inliers --> U1
+  B2 -- "pose.odom (raw = before)" --> U6
   B4 -- pose.refined --> U1
   B4 -- keyframe(gray+depth+pose) --> C1
   B4 -- keyframe(gray, buffered by seq) --> U4
   B4 -. "ba.window (solve snapshot, opt-in --ba-window)" .-> U5
   C3 -- slam.map / loop.correction --> U1
+  C3 -- "slam.map (corrected = after)" --> U6
   C2 -- slam.loop (match funnel, LIVE) --> U4
+  C2 -- "slam.loop (loop edges)" --> U6
 ```
 
 **The single most important thing the UI already shows:** `Viewer3D` draws *five*
@@ -1087,15 +1091,48 @@ globally-consistent `kf_pose`, plus `correction(idx)` and `slam.map`/`loop.corre
 `:89`/`:186` (adjoint), `:198` (batched exp); orchestration slam.py:239 + `:255`; driver
 steps.py:36.
 
-**How to see it.** *Partially exists — extend.* `viewer3d.py` already draws the right
-primitives — the corrected SLAM keyframe line (cyan) + amber keyframe dots + a **red flash
-on the revisited keyframe** when a loop closes, and the dense VIO trail rubber-sheeted by
-the correction with teleport vertices flashed red (viewer3d.py:9-12, 233-265, 504-520).
-What's missing is the **explicit before/after pair and the per-iteration cost-curve
-animation** — currently you only see the post-snap state. Add a faint "pre-optimize" ghost
-polyline + the cost trace (the `optimize` return dict carries `cost0`→`cost1`), with the
-loop edge rendered as a chord connecting `cur`↔`old` and each segment colored by how far
-that vertex moved. *The* view that makes "error distributed over the whole graph" visceral.
+**How to see it — the Pose Graph window (`Visualize ▸ Pose Graph (before/after)`).**
+*Built.* A dedicated 2D top-down (world X-Z) window (mirrors the BA-window / loop-window
+precedents — light, offscreen-PNG-testable, NOT the always-on Viewer3D) that makes
+"error distributed over the whole graph" visceral with an **explicit before/after pair**:
+
+* **nodes** = keyframe poses (dots), **odometry edges** chain consecutive keyframes (grey
+  lines), the confirmed **loop edge(s)** connect the two revisited keyframes (a magenta
+  chord — "keyframe `cur` is back at keyframe `old`");
+* a **BEFORE/AFTER toggle** swaps the node + trajectory positions: BEFORE = the raw/drifted
+  VIO estimate — the loop is **OPEN** (the two revisit keyframes sit apart, so the chord is
+  *long*); AFTER = the pose-graph-optimised estimate — the loop **CLOSES** (the chord
+  collapses) and the drift correction redistributes smoothly along the whole path. The
+  other state is ghosted behind so the shift reads;
+* **per-keyframe correction-delta arrows** (amber, AFTER view) from each node's before to
+  its after position — they taper from ~0 at the gauge/anchor to large near the loop, so
+  "spread along the whole trajectory instead of dumped at one spot" is *literal*;
+* a **timeline slider** scrubs the loop-closure events (one snapshot per close), with a
+  Follow-latest toggle (live head vs replay scrub), exactly like the BA window.
+
+**Pure UI consumer — NO new IPC topic / data-path change (gap=0 trivially).** The source
+(`IpcPoseGraphSource`) joins data that already exists: VIO's raw `pose.odom` (the BEFORE
+nodes + dense drifted trail), SLAM's `slam.map` corrected `kf_positions` (the AFTER nodes,
+the pose-graph rewrite — see "Producing the correction stream" above) and SLAM's
+`slam.loop` `(cur_seq, old_seq)` (the loop edges). The per-node delta is `after − before`;
+the dense AFTER trail is the BEFORE trail rubber-sheeted by that delta (the SAME piecewise-
+linear-by-seq deform `ui.main.corrected_vio_snapshot` applies to the corrected-VIO line),
+so the path also visibly spreads the correction. Both positions are camera-optical world
+X-Z (the frame `slam.map`/`pose.odom` publish), top-down, no NED conversion. **Honest:** on
+the gold loop replays the spread is clearly visible — `lab_loop_30s` shows ~0.47 m max node
+correction, `loop_closure_45s` ~2.24 m, with the arrows growing smoothly toward the loop. A
+limitation vs the §4.3 ideal: there is no per-iteration cost-curve animation (the optimize
+`cost0→cost1` is not on `slam.map`), so the view shows the converged before/after pair, not
+the iteration sweep — adding the cost trace would need an additive `slam.loop`-field, out of
+scope for the gap=0 UI-only build.
+
+**Code.** `ui/modules/ipc_sources.py` (`IpcPoseGraphSource`, `ipc_pose_graph_factory`),
+`ui/qt/posegraph_window.py` (`PoseGraphWindow`), `ui/viz/posegraph_render.py`
+(`render_pose_graph`, `PoseGraphSnapshot`); offscreen PNG proof
+`ui/tests/_posegraph_window_png.py` (boots the real imu_camera+vio+slam stack on
+`lab_loop_30s`/`loop_closure_45s`, drives the real source, asserts a real closure +
+before/after pixel diff + the loop chord + correction arrows). No `comms/`, `sky/`,
+live-path or oracle change — `verification/oracle_replay_selftest` stays gap=0.
 
 ---
 
@@ -1171,6 +1208,7 @@ frame cue is the origin triad + drone triad in `Viewer3D`.
 | **SyncedViewWindow (triplet)** `ui/qt/synced_window.py` + `viz/depth_render.py` + `imu_panels.py` | rect-left \| dense SGM depth (khaki ramp + scale bar, % valid) \| scrolling gyro chart + interactive 3D accel vector | SGM dense-stereo output quality + the IMU stream |
 | **KeypointTrackWindow** `ui/qt/keypoints_window.py` + `viz/keypoint_overlay.py` | rect-left with every KLT track: dot colour = depth, hollow grey = no stereo, amber = fresh, green ring = PnP inlier, 20-frame trail; stats | KLT frontend + RGB-D PnP together. The best existing frontend window. |
 | **MapWindow (SLAM Map 3D room — voxel occupancy)** `ui/qt/map_window.py`, fed by `IpcSlamMapSource` (`ui/modules/ipc_sources.py`) | Grid + ENU triad; a **ModalAI/VOXL-style VOXEL OCCUPANCY map** — the room as clean green voxel cubes (floor grid + walls + furniture as blocky voxels) + amber keyframe-camera dots, in the SAME ENU frame as `Viewer3D`. Built as a **probabilistic LOG-ODDS occupancy grid with free-space RAY CARVING** (OctoMap/Voxblox-style — how VOXL cleans a map from *noisy stereo*): a **persistent** per-voxel `{(ix,iy,iz)→log_odds}` grid that accumulates across keyframes (`_fuse_keyframe_locked`). Per keyframe its denoised depth is back-projected by its OWN VIO pose `[R \| t]` (strided + depth-gated + edge-rejected) to world **hit points** `P`, with the camera origin `C`=the keyframe translation. Every ray `C→P` does **two** updates: the **hit voxel** gets `+L_OCC` and every voxel the ray **passes through** gets `+L_FREE`, via a **vectorised amanatides-woo DDA** (`_carve_free_cells`; lockstep over all rays, active set compacted per step, carve range capped at `MAX_DEPTH_M`); the result is clamped to `[L_MIN, L_MAX]`. One update per `(keyframe, cell)` on a packed-int64 key (fast `np.unique`); never rebuilt — only not-yet-fused keyframes folded forward (`_fused_seqs`). A cell is **internally OCCUPIED** when `log_odds ≥ L_OCC_THRESH`. The carving is the **self-cleaning** mechanism: a stereo-noise voxel (e.g. a textureless-ceiling cone) in **reachable** free space that the camera later sees *through* accumulates free evidence and drops below threshold — so it is **removed** (the "remove already-added invalid points" requirement), unlike the old add-only `hit_count ≥ OCC_HITS` gate. For the noise carving **can't** reach — the spray *behind a wall* (rays stop at the wall surface, nothing crosses the space behind it) — a **separate, higher RENDER confidence gate** does the job: the UPDATE math is untouched (the grid keeps every cell's low evidence so carving keeps working), but the VIEW renders **only `log_odds ≥ L_DISPLAY`** (a new tunable set higher, default **+2.0** vs `L_OCC_THRESH`=+0.5). A wall is re-hit by many rays → log_odds saturates near `L_MAX` → it clears `L_DISPLAY` and renders crisply; the behind-wall spray is hit only once or twice → stays below `L_DISPLAY` → filtered out of the view. The gate was picked from a PNG sweep on `corridor_60s` (top-down + side views; voxel count 190k→77k→52k→46k at `L_DISPLAY` ∈ {+0.5,+1.5,+2.0,+2.5}): +2.0 drops the behind-wall tail while keeping the wall solid (`ui/tests/_map_display_sweep.py`). `L_FREE` was strengthened (−0.40→−0.50) and `L_MAX` raised (3.5→5.0) to widen the confidence gap the display gate separates on. **After the `L_DISPLAY` gate a SPATIAL OUTLIER REMOVAL (SOR) clears the remaining ISOLATED spray OUTSIDE the walls** (the standard point-cloud radius-outlier filter, `_spatial_outlier_filter`): a real wall is a **DENSE** surface (each occupied voxel has ~10–26 occupied neighbours in a 3×3×3 box), an isolated stereo speck has few — so a displayed voxel is KEPT only if it has `≥ MIN_NEIGHBORS` OTHER displayed voxels in the `(2·NEIGHBOR_RADIUS+1)³` box, dropping lone specks **without eroding the walls**. Vectorised with NO scipy/skimage (pack `(ix,iy,iz)`→int64, sort once, then per neighbour offset binary-search `cell+offset` via `np.searchsorted`) — ~92 ms over a 52k-voxel set, off the GUI thread inside the 4 Hz budget. Picked from a PNG sweep on `corridor_60s` (top-down + side; `MIN_NEIGHBORS` ∈ {0,3,6,10} at `r=1`; displayed count 52.1k→47.6k→43.0k→35.9k): **+6** removes the outside-wall spray while keeping the walls solid + connected (+3 leaves specks, +10 erodes the walls; `ui/tests/_map_sor_sweep.py`). On the gold `corridor_60s` (whole replay) carving removes **~40 %** of the occupied voxels vs no-carving (332k → 199k, cleaner); per-keyframe fuse **~38 ms mean / ~56 ms max** off the GUI thread. **Render is LIGHT** (every prior 3D GL map lagged): a single `GLScatterPlotItem` of large **square world-unit points** (`pxMode=False`, `size`=voxel edge) — far cheaper than an N-cube `GLMeshItem` — coloured **green-by-height**, **capped** at the high `MAX_VOXELS`=150k runaway guard (fair uniform-random subsample when over, never top-N), re-emitted only when the displayed set materially changed. Tunables `VOXEL_M`/`STRIDE`/depth gate/`L_OCC`/`L_FREE`/`L_MIN`/`L_MAX`/`L_OCC_THRESH`/`L_DISPLAY`/`NEIGHBOR_RADIUS`/`MIN_NEIGHBORS`/`MAX_VOXELS` exposed + commented. | **Occupancy room map** of the keyframe/SLAM stage — clean blocky voxels, NOT a noisy point cloud; SELF-CLEANS as the camera moves. Consumes vio `keyframe` (denoised depth via VIO's kf rings) + slam `slam.map` (corrected poses) — pure consumer, no data-path change. Unit-tested headless (`ui/tests/occupancy_selftest.py`); carving-vs-no-carving + per-keyframe fuse probed on the gold replays (`ui/tests/_map_persist_functional.py`). |
+| **PoseGraphWindow (Pose Graph — before/after)** `ui/qt/posegraph_window.py` + `viz/posegraph_render.py`, fed by `IpcPoseGraphSource` (`ui/modules/ipc_sources.py`) | 2D top-down X-Z: keyframe **nodes** + **odometry edges** (grey) + **loop edge(s)** (magenta chord); a **before/after toggle** swaps raw-drifted ↔ pose-graph-corrected node/trail positions (the other ghosted) so the loop visibly **opens→closes**; **per-node correction arrows** (amber) that spread from ~0 at the anchor to large near the loop; a **timeline slider** scrubbing the loop-closure events (Follow-latest = live head). | **SE(3) pose-graph optimization (§4.3)** made visible — the loop closing + the drift correction redistributed smoothly along the whole path. **Pure consumer** of vio `pose.odom` (before) + slam `slam.map` (after) + slam `slam.loop` (edges) — NO new IPC topic, no data-path change. Offscreen-PNG proven (`ui/tests/_posegraph_window_png.py` on `lab_loop_30s`/`loop_closure_45s`). |
 | **GyroCalibDialog / AccelCalibDialog** `ui/qt/calib_dialogs.py` | Stillness progress + bias readout; 6-face capture grid + residual | Gyro bias + 6-position accel calibration |
 
 **Legacy / not wired:** `imucam_window.py` / `viz/imucam_render.py` (legacy cv2 triplet)
@@ -1185,6 +1223,7 @@ gold frame and runs the SGM with the opt-in volume-capture hook (production path
 corner row-mismatch collapsing toward 0 (`--render` PNG; imports only the `RightRectifier`).
 
 **Algorithms with NO visualization at all:** ORB loop-closure matches + epipolar geometry;
-pose-graph residuals/edges; windowed-BA reprojection residuals + landmarks;
-the inertial filter; the camera↔IMU time-sync bucketing; the gravity
-sphere; the frame ladder.
+the inertial filter; the camera↔IMU time-sync bucketing; the frame ladder. (The
+pose-graph nodes/edges + correction spread are now the **Pose Graph** window §4.3; the
+windowed-BA reprojection residuals + landmarks are the **BA Window** §3.3; the gravity
+sphere + epipolar/SGM explorers are the offline tools above.)
