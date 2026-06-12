@@ -332,6 +332,10 @@ def run_session(session_dir: Path, *, backend: str, resolution: str,
         "n_ba_ok": n_ba_ok,
         "ba_ok_frac": (n_ba_ok / n_kf) if n_kf else 0.0,
         "ms_per_frame": (elapsed / max(n, 1)) * 1000.0,
+        # Sim3-aligned estimate + reference trajectories (for visual A/B plots;
+        # callers that only want the scalar metrics ignore these extra keys).
+        "est_aligned": aligned,
+        "gt": dst,
     }
 
 
