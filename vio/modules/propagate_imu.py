@@ -538,10 +538,17 @@ class PropagateImu(StepBase):
             cand = [int(s) for s in kf_poses
                     if int(s) in store and int(s) <= newest_corr - _LOOP_SETTLE_KF]
             if not cand:
-                # Early in a loop (or a tiny graph) no settled keyframe exists yet;
-                # don't blend toward an unconverged one -- wait for the next
-                # re-confirmation, by which point an older keyframe has settled.
-                continue
+                # No settled keyframe >= _LOOP_SETTLE_KF back yet (early loop /
+                # small graph): fall back to the best AVAILABLE anchored keyframe
+                # so a one-off / early correction still bounds drift. The lock
+                # (loop_target_seq) + the freeze-when-converged
+                # _LOOP_MIN_RECORRECT_M/_DEG drop below still prevent the sawtooth
+                # -- the oscillation came from CHASING the advancing newest kf
+                # across a STREAM of re-confirmations, which the lock pins; a
+                # fallback target that gets LOCKED is stationary too.
+                cand = [int(s) for s in kf_poses if int(s) in store]
+                if not cand:
+                    continue                 # genuinely no anchor -> can't apply
             locked = nav.get("loop_target_seq")
             if locked is not None and int(locked) in cand:
                 seq = int(locked)            # keep the stationary lock
