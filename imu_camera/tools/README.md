@@ -92,6 +92,19 @@ shows the production `solve_accel_calibration` recovering it (residual scatter
 visible). The figure title and stderr always state which source was used. The tool
 is offline: it only *imports* `sky.*` read-only — gap=0 is unaffected.
 
+**Shared render core — also LIVE in the accel wizard.** The figure-drawing is
+factored into `render_gravity_sphere(raw_vecs, calib_or_None, …) -> RGB image`, and
+the **live** six-face accelerometer wizard (`ui.qt.calib_dialogs.AccelCalibDialog`)
+reuses that *same* routine: as the operator tumbles the device the captured raw
+vectors land on the sphere in real time (RED), and after the 6th face + solve they
+**snap** onto the g-sphere (GREEN) — the exact offline payoff, live during capture.
+The wizard feeds the renderer the six raw face means + the solved
+`AccelCalibration` it already holds **locally** (no comms/IPC change), imports
+`render_gravity_sphere` **lazily** (only when the dialog opens), and shows the
+returned image as a Qt pixmap (matplotlib-Agg → numpy → `QPixmap`, no
+`FigureCanvasQTAgg` dependency). One figure, two callers (DRY); `render_sphere_png`
+is now a thin disk-writing wrapper over the core.
+
 ## Self-tests
 
 ```sh
@@ -110,3 +123,14 @@ calibrated faces sit **closer to `|g|`** than the raw faces (the snap is real), 
 synthetic solver recovers the injected model to a tight residual, the stored-calib
 reconstruction round-trips onto `g·dir` to numerical precision, and the headless
 render writes a **non-blank** PNG (size + pixel-variance checked).
+
+The **live** wizard reuse is covered by an offscreen-Qt selftest:
+
+```sh
+QT_QPA_PLATFORM=offscreen .venv/bin/python -m ui.tests.accel_calib_sphere_selftest
+```
+
+It feeds `AccelCalibDialog` synthetic six-face captures (a known distorted sensor)
+and asserts the sphere pixmap is blank before capture, fills (non-blank + changing
+content) as faces land, shows the post-solve **snap** after the 6th face, and is
+re-rendered **only** on a face-set/solve change (a no-capture tick does not redraw).

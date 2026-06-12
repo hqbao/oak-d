@@ -28,6 +28,7 @@ from collections import deque
 
 import numpy as np
 from PyQt6 import QtCore
+from PyQt6.QtGui import QImage, QPixmap
 from PyQt6.QtWidgets import (
     QGridLayout, QHBoxLayout, QLabel, QProgressBar,
     QPushButton, QDialog, QVBoxLayout, QWidget,
@@ -43,6 +44,16 @@ from sky.sensors.calib_collect import (
 from sky.sensors.calib_store import save_accel_calib, save_gyro_bias
 
 from . import theme
+
+# Per-face unit gravity directions (face k's expected specific-force direction),
+# matching sky.sensors.calib_collect's face indexing -- used only to label the
+# live sphere's captured dots with their direction; mirrors the collector's own
+# _FACE_DIRS without importing that private constant.
+_FACE_DIRS = np.array([
+    [+1.0, 0.0, 0.0], [-1.0, 0.0, 0.0],
+    [0.0, +1.0, 0.0], [0.0, -1.0, 0.0],
+    [0.0, 0.0, +1.0], [0.0, 0.0, -1.0],
+])
 
 
 class _CalibDialogBase(QDialog):
@@ -233,6 +244,10 @@ class AccelCalibDialog(_CalibDialogBase):
         self.setMinimumWidth(480)
         self._device_id = device_id
         self._coll = SixFaceCollector()
+        # Live-sphere render cadence: matplotlib is heavy, so we re-render ONLY when
+        # the captured-face SET changes (each new face) or completion flips -- never
+        # on every ~30 Hz drain tick. ``_sphere_key`` caches what was last drawn.
+        self._sphere_key: tuple | None = None
 
         root = QVBoxLayout(self)
         title = QLabel("ACCELEROMETER 6-POSITION CALIBRATION")
@@ -257,6 +272,18 @@ class AccelCalibDialog(_CalibDialogBase):
         wrap = QWidget()
         wrap.setLayout(grid)
         root.addWidget(wrap)
+
+        # Live gravity-sphere view: the captured raw vectors land on the sphere as
+        # the operator tumbles (RED), and SNAP onto the g-sphere (GREEN) after the
+        # 6th + solve. Rendered by the SAME shared core the offline tool uses
+        # (imu_camera.tools.gravity_sphere.render_gravity_sphere), shown as a pixmap.
+        self._sphere = QLabel("Press START — captured faces appear on the gravity "
+                              "sphere here.")
+        self._sphere.setObjectName("DialogHint")
+        self._sphere.setWordWrap(True)
+        self._sphere.setMinimumHeight(360)
+        self._sphere.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        root.addWidget(self._sphere)
 
         self._bar = QProgressBar()
         self._bar.setRange(0, 100)
@@ -289,6 +316,12 @@ class AccelCalibDialog(_CalibDialogBase):
         self._save_btn.setEnabled(False)
         self._result.setText("residual = —")
         self._last_status = None
+        # Reset the live sphere to its empty (sphere-only) state so a re-run does
+        # not carry over the previous run's dots.
+        self._sphere_key = None
+        self._sphere.setPixmap(QPixmap())
+        self._sphere.setText("Tumble through the six faces — captured vectors land "
+                             "on the gravity sphere as you go.")
         for i, lab in enumerate(self._face_lbls):
             lab.setText(f"○ {face_name(i)}")
             lab.setObjectName("FaceTodo")
@@ -328,6 +361,60 @@ class AccelCalibDialog(_CalibDialogBase):
             else:
                 self._save_btn.setEnabled(False)
                 self._status.setText("⚠ " + v.message)
+        # Update the live gravity sphere (throttled: only on a face-set / solve change).
+        self._refresh_sphere()
+
+    def _captured_raw(self) -> tuple[np.ndarray, np.ndarray]:
+        """The raw mean accel vectors captured so far + their face directions.
+
+        ``SixFaceCollector`` stores one mean per captured face in its ``_caps``
+        dict (face index -> raw vector) and discards them after solving; the dialog
+        owns that collector LOCALLY, so reading the captured means here needs no
+        IPC / comms change. Returns ``(k, 3)`` raw vectors and the matching ``(k, 3)``
+        unit gravity directions, ordered by face index for a stable render.
+        """
+        caps = self._coll._caps                      # local collector state (no IPC)
+        idx = sorted(caps)
+        if not idx:
+            return np.empty((0, 3)), np.empty((0, 3))
+        raw = np.array([caps[i] for i in idx], dtype=np.float64)
+        dirs = _FACE_DIRS[idx]
+        return raw, dirs
+
+    def _refresh_sphere(self) -> None:
+        """Re-render the live gravity sphere when (and only when) the picture changed.
+
+        The render is a full matplotlib-Agg figure (~tenths of a second), so we key
+        it on the captured-face set + whether a calibration exists and skip the work
+        on the steady ~30 Hz drain ticks where nothing new landed. Imports are LAZY
+        so opening this dialog is the only time matplotlib/this tool load.
+        """
+        raw, dirs = self._captured_raw()
+        cal = self._coll.calibration
+        # Cache key: which faces are captured + solved-or-not. A new face capture or
+        # the post-6th solve flips this; a plain "still holding" tick does not.
+        key = (tuple(sorted(self._coll.captured_faces)), cal is not None)
+        if key == self._sphere_key:
+            return
+        self._sphere_key = key
+        if raw.shape[0] == 0:
+            return                                   # nothing captured yet: keep the hint
+
+        # Lazy import: matplotlib + the shared renderer load only once the dialog is
+        # actually drawing a sphere (keeps the flight / import path clean).
+        from imu_camera.tools.gravity_sphere import render_gravity_sphere
+
+        img = render_gravity_sphere(raw, cal, directions=dirs)
+        h, w, _ = img.shape
+        # Agg gives a contiguous RGB888 buffer; wrap it as a QImage then copy into a
+        # pixmap (copy() detaches from the soon-freed numpy buffer).
+        qimg = QImage(img.data, w, h, 3 * w, QImage.Format.Format_RGB888)
+        pix = QPixmap.fromImage(qimg.copy())
+        self._sphere.setText("")
+        self._sphere.setPixmap(pix.scaled(
+            self._sphere.width(), self._sphere.height(),
+            QtCore.Qt.AspectRatioMode.KeepAspectRatio,
+            QtCore.Qt.TransformationMode.SmoothTransformation))
 
     def _on_save(self) -> None:
         cal = self._coll.calibration

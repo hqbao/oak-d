@@ -64,6 +64,19 @@ and reads the calib JSON. It touches NOTHING in the live path / comms / oracle, 
 gap=0 is trivially unaffected. matplotlib runs on the headless ``Agg`` backend
 (heavy deps are fine -- this is an offline learning tool, per the spec).
 
+SHARED RENDER CORE (reused LIVE in the calib wizard)
+----------------------------------------------------
+The figure-drawing is factored into :func:`render_gravity_sphere`
+``(raw_vecs, calib_or_None, ...) -> RGB uint8 image`` so the SAME routine draws
+both this offline payoff AND the LIVE accel six-face wizard
+(``ui.qt.calib_dialogs.AccelCalibDialog``): as the operator tumbles the device the
+captured raw vectors land on the sphere (RED), and after the 6th face + solve they
+snap onto the g-sphere (GREEN) -- exactly this figure, in real time. The wizard
+imports ONLY ``render_gravity_sphere`` (lazily, when the dialog opens) and feeds it
+the six raw face means + the solved ``AccelCalibration`` it already holds locally,
+so the live view needs NO comms / IPC change. :func:`render_sphere_png` is now a
+thin disk-writing wrapper over that core (DRY: one figure, two callers).
+
 USAGE
 -----
 Headless render of the REAL stored calib (auto-picks the only stored device)::
@@ -251,8 +264,46 @@ def _g_sphere(g: float, n: int = 24):
     return x, y, z
 
 
-def render_sphere_png(data: SphereData, out_path: str) -> str:
-    """Write the gravity-sphere 3D figure (RAW ellipsoid + calibrated snap)."""
+def render_gravity_sphere(
+    raw_vecs: np.ndarray,
+    calib: AccelCalibration | None,
+    *,
+    directions: np.ndarray | None = None,
+    g: float = G_STANDARD,
+    source: str = "",
+    synthetic: bool = False,
+    figsize: tuple[float, float] = (11, 9),
+    dpi: int = 120,
+) -> np.ndarray:
+    """Draw the gravity-sphere figure and return it as an RGB ``uint8`` image.
+
+    This is the SHARED render core used by BOTH the offline ``--render`` tool
+    (via :func:`render_sphere_png`, which just writes the returned image to disk)
+    AND the LIVE accel-calibration wizard (``ui.qt.calib_dialogs.AccelCalibDialog``,
+    which shows the returned array as a ``QPixmap``). Keeping ONE drawing routine
+    means the live "snap" the operator sees during capture is pixel-for-pixel the
+    same figure the offline payoff shows -- no second copy to drift.
+
+    It is deliberately TOLERANT of partial input so it can animate the wizard's
+    1->6 fill:
+
+    * ``raw_vecs``  -- ``(k, 3)`` raw mean accel vectors already captured
+      (``0 <= k <= 6``). They are ALWAYS plotted as the RED "before" dots, so the
+      off-centre/tilted ellipsoid grows as the operator tumbles the device.
+    * ``calib``     -- the solved :class:`AccelCalibration`, or ``None`` while the
+      six faces are still being collected. When present, the GREEN "after" dots
+      ``T(raw - b)``, the snap connectors, the bias marker, and the quantitative
+      annotation box are drawn -- the post-solve payoff. When ``None`` only the
+      sphere + accumulating raw dots are shown (with a "capturing..." note).
+    * ``directions``-- optional ``(k, 3)`` unit gravity directions per captured
+      face. Unused for drawing (the dots speak for themselves) but accepted so the
+      caller can pass the collector's per-face dirs without reshaping; kept for a
+      symmetric, self-documenting signature.
+
+    The render runs on the headless ``Agg`` backend (no display / Qt needed), so
+    it is safe to call from a worker or a Qt UI thread alike. matplotlib is
+    imported LAZILY here so merely importing this module stays light.
+    """
     import matplotlib
     matplotlib.use("Agg")                            # headless: no display / Qt
     import matplotlib.pyplot as plt
@@ -260,12 +311,12 @@ def render_sphere_png(data: SphereData, out_path: str) -> str:
     # add_subplot(projection="3d") is called (no explicit mpl_toolkits import
     # needed on matplotlib >= 3.x), so we don't import it here.
 
-    cal = data.calib
-    g = cal.g
-    raw = data.raw_faces
-    calf = data.cal_faces
+    raw = np.asarray(raw_vecs, dtype=np.float64).reshape(-1, 3)
+    # The calibration's own g (if solved) is authoritative; otherwise the caller's.
+    g = float(calib.g) if calib is not None else float(g)
+    del directions                                   # accepted but not drawn (see docstring)
 
-    fig = plt.figure(figsize=(11, 9))
+    fig = plt.figure(figsize=figsize)
     ax = fig.add_subplot(111, projection="3d")
 
     # 1) translucent g-sphere wireframe -- the target every resting vector must
@@ -273,28 +324,37 @@ def render_sphere_png(data: SphereData, out_path: str) -> str:
     sx, sy, sz = _g_sphere(g)
     ax.plot_wireframe(sx, sy, sz, color="#7aa6c2", linewidth=0.4, alpha=0.35)
 
-    # 2) RAW six faces (RED) -- the off-centre, tilted ellipsoid (bias/scale/tilt).
-    ax.scatter(raw[:, 0], raw[:, 1], raw[:, 2], c="#d62728", s=70,
-               depthshade=False, edgecolors="k", linewidths=0.5,
-               label="RAW face means (before)")
-    # 3) CALIBRATED six faces (GREEN) -- snapped onto the g-sphere.
-    ax.scatter(calf[:, 0], calf[:, 1], calf[:, 2], c="#2ca02c", s=70,
-               depthshade=False, edgecolors="k", linewidths=0.5,
-               label="T(a-b) calibrated (after)")
-    # Thin grey connector from each raw dot to its calibrated landing point: the
-    # "snap" made literal (how far/which way calibration moved each capture).
-    for k in range(raw.shape[0]):
-        ax.plot([raw[k, 0], calf[k, 0]],
-                [raw[k, 1], calf[k, 1]],
-                [raw[k, 2], calf[k, 2]],
-                color="0.55", linewidth=0.8, alpha=0.8)
+    # 2) RAW captured faces (RED) -- the off-centre, tilted ellipsoid that grows
+    #    1->6 as the operator tumbles (bias=centre offset, scale=half-axes, tilt).
+    if raw.shape[0] > 0:
+        ax.scatter(raw[:, 0], raw[:, 1], raw[:, 2], c="#d62728", s=70,
+                   depthshade=False, edgecolors="k", linewidths=0.5,
+                   label="RAW face means (before)")
 
-    # 4) bias marker: the RAW ellipsoid centre IS the bias offset from the origin.
-    b = cal.bias
-    ax.scatter([b[0]], [b[1]], [b[2]], c="#ff7f0e", marker="X", s=90,
-               depthshade=False, label="bias (raw ellipsoid centre)")
-    ax.plot([0.0, b[0]], [0.0, b[1]], [0.0, b[2]],
-            color="#ff7f0e", linewidth=1.2, linestyle="--", alpha=0.9)
+    if calib is not None:
+        # --- post-solve payoff: the SNAP onto the g-sphere. ------------------- #
+        calf = calib.apply(raw)
+        # 3) CALIBRATED faces (GREEN) -- snapped onto the g-sphere.
+        ax.scatter(calf[:, 0], calf[:, 1], calf[:, 2], c="#2ca02c", s=70,
+                   depthshade=False, edgecolors="k", linewidths=0.5,
+                   label="T(a-b) calibrated (after)")
+        # Thin grey connector from each raw dot to its calibrated landing point:
+        # the "snap" made literal (how far / which way calibration moved each).
+        for k in range(raw.shape[0]):
+            ax.plot([raw[k, 0], calf[k, 0]],
+                    [raw[k, 1], calf[k, 1]],
+                    [raw[k, 2], calf[k, 2]],
+                    color="0.55", linewidth=0.8, alpha=0.8)
+
+        # 4) bias marker: the RAW ellipsoid centre IS the bias offset from origin.
+        b = calib.bias
+        ax.scatter([b[0]], [b[1]], [b[2]], c="#ff7f0e", marker="X", s=90,
+                   depthshade=False, label="bias (raw ellipsoid centre)")
+        ax.plot([0.0, b[0]], [0.0, b[1]], [0.0, b[2]],
+                color="#ff7f0e", linewidth=1.2, linestyle="--", alpha=0.9)
+    else:
+        calf = None
+        b = None
 
     # World axes through the origin (so the off-centre of RAW is obvious).
     lim = g * 1.35
@@ -311,40 +371,79 @@ def render_sphere_png(data: SphereData, out_path: str) -> str:
     ax.set_zlabel("az  (m/s^2)")
     ax.view_init(elev=22, azim=-58)
 
-    # --- Quantitative annotations (bias / per-axis scale / residual_g). ------- #
-    scales = _axis_scales(cal.T)
-    raw_norms = np.linalg.norm(raw, axis=1)
-    cal_norms = np.linalg.norm(calf, axis=1)
-    raw_rms = float(np.sqrt(np.mean((raw_norms - g) ** 2)))
-    cal_rms = float(np.sqrt(np.mean((cal_norms - g) ** 2)))
-
-    tag = "SYNTHETIC DEMO (not real device data)" if data.synthetic \
-        else "REAL stored calibration"
+    # --- Title + quantitative annotation box. --------------------------------- #
+    if synthetic:
+        tag = "SYNTHETIC DEMO (not real device data)"
+    elif calib is None:
+        tag = f"CAPTURING ({raw.shape[0]}/6 faces)"
+    else:
+        tag = "calibrated"
     title = ("Gravity Sphere -- accelerometer bias / scale / misalignment "
              f"made visible\n[{tag}]  g = {g:.5f} m/s^2")
     ax.set_title(title, fontsize=11)
 
-    info = (
-        f"bias  b = [{b[0]:+.4f}, {b[1]:+.4f}, {b[2]:+.4f}]  m/s^2\n"
-        f"per-axis scale = [{scales[0]:.4f}, {scales[1]:.4f}, {scales[2]:.4f}]"
-        "  (1 g reads as ...)\n"
-        f"misalign (off-diag of T) max = {_max_offdiag(cal.T):.4f}\n"
-        f"residual_g (stored fit) = {cal.residual_g:.4f}  m/s^2\n"
-        f"|a|-g  RMS:  RAW = {raw_rms:.3f}  ->  CAL = {cal_rms:.4f}  m/s^2  "
-        "(the snap)"
-    )
+    if calib is not None:
+        # Full quantitative payoff once solved.
+        scales = _axis_scales(calib.T)
+        raw_norms = np.linalg.norm(raw, axis=1)
+        cal_norms = np.linalg.norm(calf, axis=1)
+        raw_rms = float(np.sqrt(np.mean((raw_norms - g) ** 2)))
+        cal_rms = float(np.sqrt(np.mean((cal_norms - g) ** 2)))
+        info = (
+            f"bias  b = [{b[0]:+.4f}, {b[1]:+.4f}, {b[2]:+.4f}]  m/s^2\n"
+            f"per-axis scale = [{scales[0]:.4f}, {scales[1]:.4f}, {scales[2]:.4f}]"
+            "  (1 g reads as ...)\n"
+            f"misalign (off-diag of T) max = {_max_offdiag(calib.T):.4f}\n"
+            f"residual_g (fit) = {calib.residual_g:.4f}  m/s^2\n"
+            f"|a|-g  RMS:  RAW = {raw_rms:.3f}  ->  CAL = {cal_rms:.4f}  m/s^2  "
+            "(the snap)"
+        )
+    else:
+        # Mid-capture: show how full the sphere is + which faces remain.
+        info = (
+            f"capturing the six faces: {raw.shape[0]}/6 landed (RED).\n"
+            "tumble the device through every face up & down --\n"
+            "after the 6th, T(a-b) snaps them onto the g-sphere (GREEN)."
+        )
     # Off-axes text box so it never overlaps the 3D cloud.
     fig.text(0.015, 0.015, info, fontsize=9, family="monospace",
              va="bottom", ha="left",
              bbox=dict(boxstyle="round", facecolor="#f4f4f4", edgecolor="0.7"))
-    fig.text(0.985, 0.015, data.source, fontsize=7.5, color="0.35",
-             va="bottom", ha="right", wrap=True)
+    if source:
+        fig.text(0.985, 0.015, source, fontsize=7.5, color="0.35",
+                 va="bottom", ha="right", wrap=True)
 
-    ax.legend(loc="upper left", fontsize=8, framealpha=0.85)
+    # Legend only once there is something labelled to show.
+    if raw.shape[0] > 0:
+        ax.legend(loc="upper left", fontsize=8, framealpha=0.85)
 
-    out_path = str(Path(out_path).resolve())
-    fig.savefig(out_path, dpi=120, bbox_inches="tight")
+    # Rasterize the figure to an RGB uint8 array via the Agg canvas (no temp file).
+    fig.set_dpi(dpi)
+    fig.canvas.draw()
+    # buffer_rgba() is the stable Agg accessor across matplotlib 3.x; drop alpha.
+    rgba = np.asarray(fig.canvas.buffer_rgba())
+    img = np.ascontiguousarray(rgba[:, :, :3])
     plt.close(fig)
+    return img
+
+
+def render_sphere_png(data: SphereData, out_path: str) -> str:
+    """Write the gravity-sphere 3D figure (RAW ellipsoid + calibrated snap).
+
+    Thin disk-writing wrapper over the shared :func:`render_gravity_sphere` core
+    (DRY: the offline tool and the live wizard draw the SAME figure). Encodes the
+    returned RGB array as a PNG with matplotlib's image writer.
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.image as mpimg
+
+    img = render_gravity_sphere(
+        data.raw_faces, data.calib,
+        directions=data.directions, g=data.calib.g,
+        source=data.source, synthetic=data.synthetic)
+    out_path = str(Path(out_path).resolve())
+    mpimg.imsave(out_path, img)
     return out_path
 
 
