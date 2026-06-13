@@ -37,7 +37,7 @@ Two independent things are proven:
 | `oracle_replay_selftest.py` | Byte-parity gate: for each baseline entry, asserts new-oracle == baseline within `TOL_MM=1e-6` mm AND bit-for-bit == the LIVE old oracle (`ours.tools.vio_run.score_session`). Fails loudly with the exact gap. |
 | `ipc_comms_selftest.py` | Cross-project `comms` parity: dir-diff of all 5 copies, 5-copy codec sha256 digest + cross-decode, `SharedArrayRing` round-trip, full bridge round-trip over a real Unix socket. |
 | `loose_vs_tight_bench.py` | LOOSE-vs-TIGHT ATE benchmark over the gold suite at full-res + 54x42 ToF (read-only; imports the frozen math + scoring). |
-| `direct_vo_bench.py` | **Research harness** (Stage-1 hypothesis test). Frame-to-keyframe DENSE DIRECT RGB-D VO (`sky.front.direct`) over the gold suite at 54x42 ToF, scored with the SAME columns as `loose_vs_tight_bench` and printed SIDE-BY-SIDE with the measured sparse baseline. Tests whether dense direct + accurate ToF depth fixes the sparse VIO's scale collapse @ 54x42. Read-only; touches no frozen path -> oracle stays gap=0. |
+| `direct_vo_bench.py` | **Research harness** (Stage-1 hypothesis test + Stage-2a IMU seed). Frame-to-keyframe DENSE DIRECT RGB-D VO (`sky.front.direct`) over the gold suite at 54x42 ToF, scored with the SAME columns as `loose_vs_tight_bench` and printed SIDE-BY-SIDE with the measured sparse baseline. Tests whether dense direct + accurate ToF depth fixes the sparse VIO's scale collapse @ 54x42. `--seed {none,gyro,imu}` picks the Gauss-Newton `init_T`: `gyro` (Stage-1, rotation prior only) or `imu` (Stage-2a, full 6-DoF IMU dead-reckoned seed via `sky.vio.imu.predict_state` + `complementary_correct`). Read-only; touches no frozen path -> oracle stays gap=0. |
 
 ## How to run
 

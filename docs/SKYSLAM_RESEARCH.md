@@ -84,6 +84,66 @@ forward DoF the photometry leaves weak; (3) a divergence guard (reject a frame
 whose post-solve residual/step is an outlier, fall back to the prior). The
 slow-motion win shows the core estimator + scale-from-depth is correct.
 
+### 2026-06-13 — Stage 2a: IMU TRANSLATION SEED for the direct warp
+
+**Lever.** Stage-1's fast-motion divergence is a SEEDING failure: the gyro-only
+seed gives GN a rotation prior but NO forward-translation, so on a fast push the
+keyframe->cur baseline starts outside the convergence basin and GN walks off
+(single-frame steps of 9-140 m). Stage-2a seeds `estimate_pose_direct`'s `init_T`
+with the **full 6-DoF IMU dead-reckoned relative pose** (rotation AND translation)
+so GN STARTS near the truth. `--seed imu` in `verification/direct_vo_bench.py`.
+
+**How (reuses the tight stack verbatim).** A `_ImuDeadReckoner` maintains a
+gravity-aware camera-optical world nav-state `(R, p, v)` propagated frame-to-frame
+by `sky.vio.imu.predict_state` (the SAME Basalt-style `predictState` the live
+tight path runs), gravity-levelled at frame 0 by `gravity_aligned_R0`. The seed
+is `init_T = inv(T_world_cur_dr) @ T_world_kf_dr`. **The velocity** (which
+`predict_state` needs for translation, and which the bench has no independent
+state for) is bootstrapped from rest (all four sessions start near-static) and
+KEPT SCALED by pulling the nav-state toward each frame's metric VO fix via
+`complementary_correct` with the live tight path's exact gains
+(`K_POS/K_VEL/K_ROT = 0.25/0.05/0.25`). So the velocity driving the next seed is
+anchored to depth-true vision, not pure accel double-integration (which drifts).
+Honest caveat: the seed is therefore a PREDICTOR fed by the PREVIOUS VO fix — on
+a frame where VO is mid-divergence the velocity feedback is poisoned (the residual
+failure below). gap=0 unchanged; pyflakes 0; sky stays leaf.
+
+**Result (54x42 ToF — Stage-1 gyro seed vs Stage-2a IMU seed vs SPARSE).**
+
+| session                 | S1 ATE / scale | **S2a ATE / scale** | SPARSE ATE / scale | S2a verdict |
+|---|---|---|---|---|
+| lab_straight_20s        | 18 cm / 0.95   | **18 cm / 0.95**    | 98 cm / 0.63 | no regression (slow win HELD) |
+| push_straight_fast_15s  | 1160 cm / 0.01 | **51 cm / 0.48**    | 53 cm / 0.38 | DIVERGENCE FIXED, beats sparse |
+| push_shake_20s          | 545 cm / 0.05  | **53 cm / 0.87**    | 91 cm / 0.38 | DIVERGENCE FIXED, beats sparse |
+| quick_motion_15s        | 5902 cm / 0.00 | **344 cm / 0.04**   | 75 cm / 0.23 | 17x better but STILL diverges |
+
+Max single-frame step (the divergence tell) collapsed on the rescued sessions:
+push_fast 3822->160 cm, shake 908->76 cm, quick_motion 13955->387 cm. conv% ~97%
+throughout (GN always settles — the seed changes WHICH minimum it settles into).
+
+**Verdict — the IMU translation seed LARGELY rescues fast-motion divergence.**
+- 3/4 sessions now beat sparse AND have scale closer to 1.0 (the scale-collapse
+  signal); mean direct Sim3 scale 0.25 -> 0.59 (sparse mean 0.41).
+- The two genuine fast-PUSH sessions (push_fast, shake) go from catastrophic
+  divergence to BELOW the sparse baseline — the seed lands GN in the basin and
+  the depth-observed scale then snaps back (0.01->0.48, 0.05->0.87).
+- lab_straight is UNTOUCHED (18.47->18.45 cm): on slow motion the seed ≈ the gyro
+  path, so the Stage-1 win is not traded away.
+- **Residual failure: `quick_motion` still diverges** (344 cm, scale 0.04). It is
+  the most aggressive session (rapid direction reversals): when VO momentarily
+  diverges, the velocity feedback that scales the seed is poisoned, so the seed
+  itself degrades and the recovery is incomplete. The bounded gains stop a single
+  bad frame from snapping the state but cannot self-correct a SUSTAINED bad patch.
+
+**Implication for Stage 2b.** The seed alone does NOT fully close it. Stage 2b is
+still needed — but its job is now narrower: (1) a **divergence guard** (reject a
+frame whose post-solve photometric residual / step is an outlier and fall back to
+the IMU-only prediction) to break the poisoned-velocity feedback loop on
+`quick_motion`; (2) the **point-to-plane geometric** term to firm up the forward
+DoF on the residual fast frames. The seed converted "diverges catastrophically"
+into "converges but loses on the hardest session" — a far better starting point
+for the guard than Stage-1's 100s-of-metres walk-offs.
+
 ---
 
 ## Part 1 — Research synthesis
