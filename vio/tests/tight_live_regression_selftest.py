@@ -45,7 +45,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from vio.comms import LocalPubSub                                  # noqa: E402
 from vio.comms.messages import LoopCorrection                      # noqa: E402
 from vio.comms.module import ModuleContext                         # noqa: E402
-from vio.modules.propagate_imu import PropagateImu                 # noqa: E402
+from vio.modules.propagate_imu import propagate_imu               # noqa: E402
 from vio.modules.loop_inbox import LoopCorrectionInbox             # noqa: E402
 from sky.vio.window import body_world_to_T_cw      # noqa: E402
 
@@ -150,7 +150,7 @@ def _run_profile(ts, accel, gyro, pos_truth, *, loop_correct: bool,
                  covered=None):
     """Drive the REAL PropagateImu over a 1-D profile; return per-frame live z."""
     ctx = _make_ctx(loop_correct=loop_correct)
-    step_obj = PropagateImu()
+    step_obj = propagate_imu
     frame_ts = ts[::N_PER_FRAME]
 
     def true_z_at(t_ns):
@@ -169,7 +169,7 @@ def _run_profile(ts, accel, gyro, pos_truth, *, loop_correct: bool,
         z_vis = true_z_at(int(fts))
         st = _Step(_Frame(seq, int(fts)),
                    _vision_pose(np.array([0.0, 0.0, z_vis])), info)
-        out = step_obj.run(ctx, st)
+        out = step_obj(ctx, st)
         live_z.append(float(out.pose[2, 3]))
         prev_ts = int(fts)
         seq += 1
@@ -220,7 +220,7 @@ def _check_covered(loop_correct: bool) -> None:
 
 def _check_zupt(loop_correct: bool) -> None:
     ctx = _make_ctx(loop_correct=loop_correct)
-    step_obj = PropagateImu()
+    step_obj = propagate_imu
     rest = np.array([0.0, -G, 0.0]) + np.array([0.05, 0.0, 0.05])   # + accel bias
     poses, seq = [], 0
     for fi in range(80):                               # ~2 s of rest at 40 Hz
@@ -229,7 +229,7 @@ def _check_zupt(loop_correct: bool) -> None:
         cg = np.zeros((N_PER_FRAME, 3))
         ca = np.tile(rest, (N_PER_FRAME, 1))
         ctx.state["imu_segs"][seq] = (cts, cg, ca)
-        out = step_obj.run(ctx, _Step(_Frame(seq, int(cts[-1])),
+        out = step_obj(ctx, _Step(_Frame(seq, int(cts[-1])),
                                       _vision_pose(np.zeros(3)), {}))
         poses.append(out.pose[:3, 3].copy())
         seq += 1
@@ -243,7 +243,7 @@ def _check_zupt(loop_correct: bool) -> None:
 def _check_shake(loop_correct: bool) -> None:
     ts, accel, gyro = _shake_profile()
     ctx = _make_ctx(loop_correct=loop_correct)
-    step_obj = PropagateImu()
+    step_obj = propagate_imu
     frame_ts = ts[::N_PER_FRAME]
     poses, prev_ts, seq = [], None, 0
     for fts in frame_ts:
@@ -252,7 +252,7 @@ def _check_shake(loop_correct: bool) -> None:
         # vision stays near origin (the shake has no net travel), valid solve.
         st = _Step(_Frame(seq, int(fts)), _vision_pose(np.zeros(3)),
                    {"ok": True, "n_inliers": 64})
-        out = step_obj.run(ctx, st)
+        out = step_obj(ctx, st)
         poses.append(out.pose[:3, 3].copy())
         prev_ts = int(fts)
         seq += 1
@@ -301,7 +301,7 @@ def _run_loop_drift(apply_correction: bool):
     drift, exactly where a loop closure matters most.
     """
     ctx = _make_ctx(loop_correct=apply_correction)
-    step_obj = PropagateImu()
+    step_obj = propagate_imu
 
     # Build a square-ish loop trajectory in the x-z plane: out +z, across +x,
     # back -z, return -x to the start. Constant accel bias adds the drift.
@@ -356,7 +356,7 @@ def _run_loop_drift(apply_correction: bool):
                     LoopCorrection(seq=rev_seq,
                                    kf_poses={rev_seq: T_corr}, n_loops=1))
 
-        out = step_obj.run(ctx, st)
+        out = step_obj(ctx, st)
         pub = out.pose[:3, 3].copy()
         if prev_pub is not None:
             max_step = max(max_step, float(np.linalg.norm(pub - prev_pub)))
@@ -377,7 +377,7 @@ def _run_loop_drift(apply_correction: bool):
         ctx.state["imu_segs"][seq] = (cts, cg, ca)
         st = _Step(_Frame(seq, int(cts[-1])),
                    _vision_pose(np.zeros(3)), {"ok": False, "n_inliers": 0})
-        out = step_obj.run(ctx, st)
+        out = step_obj(ctx, st)
         pub = out.pose[:3, 3].copy()
         step_mag = float(np.linalg.norm(pub - prev_pub))
         if step_mag > 0.01:

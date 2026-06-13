@@ -180,9 +180,9 @@ def test_diagnostic() -> bool:
 # 2. publisher empty-array contract
 # --------------------------------------------------------------------------- #
 def test_publisher_empty() -> bool:
-    print("== 2. PublishInliers empty-array contract (PnP failed) ==")
+    print("== 2. publish_inliers empty-array contract (PnP failed) ==")
     from vio.comms import LocalPubSub, topics
-    from vio.modules.publish_inliers import PublishInliers
+    from vio.modules.publish_inliers import publish_inliers
     from vio.modules.step import Step
 
     captured: list = []
@@ -199,7 +199,7 @@ def test_publisher_empty() -> bool:
     # PnP produced no diagnostic (info has none of the pnp_* keys).
     step = Step(frame=_Frame(), pose=np.eye(4), info={},
                 accel_cam=None, at_rest=False)
-    PublishInliers().run(_Ctx(bus), step)
+    publish_inliers(_Ctx(bus), step)
 
     if not captured:
         print("  no message published -> FAIL")

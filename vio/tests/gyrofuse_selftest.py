@@ -192,9 +192,9 @@ class _Frame:
 # 2. publisher emits on fused frames
 # --------------------------------------------------------------------------- #
 def test_publisher_emits() -> bool:
-    print("== 2. PublishGyroFuse emits on gyro-fused frames ==")
+    print("== 2. publish_gyrofuse emits on gyro-fused frames ==")
     from vio.comms import LocalPubSub, topics
-    from vio.modules.publish_gyrofuse import PublishGyroFuse
+    from vio.modules.publish_gyrofuse import publish_gyrofuse
     from vio.modules.step import Step
 
     K = np.eye(3, dtype=np.float64) * 600.0
@@ -209,7 +209,7 @@ def test_publisher_emits() -> bool:
             "gain": 0.8, "t_trust": 1.0}
     step = Step(frame=_Frame(), pose=np.eye(4), info=info,
                 accel_cam=None, at_rest=False)
-    PublishGyroFuse().run(_Ctx(bus, vo), step)
+    publish_gyrofuse(_Ctx(bus, vo), step)
 
     if not captured:
         print("  no message published -> FAIL")
@@ -233,9 +233,9 @@ def test_publisher_emits() -> bool:
 # 3. publisher silent when gyro off
 # --------------------------------------------------------------------------- #
 def test_publisher_silent() -> bool:
-    print("== 3. PublishGyroFuse stays silent when gyro off ==")
+    print("== 3. publish_gyrofuse stays silent when gyro off ==")
     from vio.comms import LocalPubSub, topics
-    from vio.modules.publish_gyrofuse import PublishGyroFuse
+    from vio.modules.publish_gyrofuse import publish_gyrofuse
     from vio.modules.step import Step
 
     K = np.eye(3, dtype=np.float64) * 600.0
@@ -250,7 +250,7 @@ def test_publisher_silent() -> bool:
     step = Step(frame=_Frame(), pose=np.eye(4),
                 info={"n_inliers": 30, "ok": True, "reason": ""},
                 accel_cam=None, at_rest=False)
-    out = PublishGyroFuse().run(_Ctx(bus, vo), step)
+    out = publish_gyrofuse(_Ctx(bus, vo), step)
 
     silent = len(captured) == 0
     passthrough = out is step

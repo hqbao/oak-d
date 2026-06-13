@@ -23,7 +23,7 @@ line-for-line).
 |---------|------|---------------------------|
 | `vio/comms/` | the **FROZEN** vendored comms contract | copied **bit-identically** from `imu_camera/comms` |
 | `vio/mathlib/` | the math VIO owns (frontend / odometry / backend / engine / imu) | `ours/lib/{frontend,odometry,backend,engine,imu}` |
-| `vio/modules/` | the odometry + backend reactive modules | `ours/flows/{odometry,backend}` |
+| `vio/modules/` | the odometry + backend pipeline (**procedural** step functions + two plain worker threads) | `ours/flows/{odometry,backend}` |
 | `vio/main.py` | the VIO process | `ours/proc/vio.py` |
 | `vio/tests/` | regression self-tests | `ours/tools/{klt,vio_ba}_selftest.py` |
 
@@ -36,8 +36,12 @@ internal imports are RELATIVE, so the copy works as `vio.comms` unchanged. **Nev
 hand-edit it** — change `imu_camera/comms` and re-vendor.
 
 Public API the VIO process uses: `LocalPubSub`, `IPCPubSub(role="server"|"client")`,
-`IPCPublisher`, `IPCSubscriber`, `Module`, `Step`, `RingRegistry`, `topics`,
-`encode`/`decode`, and `wire.WireCalibBundle`.
+`IPCPublisher`, `IPCSubscriber`, `RingRegistry`, `topics`, `encode`/`decode`, and
+`wire.WireCalibBundle`. (The reactive `Module` / pub-sub `Step` classes are still
+**defined** in the vendored comms — other processes use them — but `vio/modules/`
+no longer imports them: its pipeline is plain procedural Python, see below.
+`ModuleContext` is the one comms type still used, as a plain `(bus, name, state)`
+state holder for the odometry worker.)
 
 ### `vio/mathlib/` — the math VIO owns + the architecture rule
 
@@ -59,22 +63,39 @@ under its own `mathlib`.
   numba kernel. VIO consumes `frame.depth` from capture, so it does **not** run
   SGM (that is `imu_camera`, which warms its own SGM kernel).
 
-### `vio/modules/` — the reactive pipeline (Flow → Module, Task → Step)
+### `vio/modules/` — the procedural pipeline (no reactive `Module` / `Step`)
 
-`OdometryModule` joins `imucam.sample` (IMU prior) + `frame.depth` (KLT track →
-RGB-D PnP → gyro fusion → pose) and publishes `pose.odom`, `keyframe`,
-`frame.tracks`, `frame.inliers` (+ `pose.vo` when the live builder enables it).
-`BackendModule` consumes `keyframe`, runs windowed BA behind a swappable engine,
-and publishes `pose.refined`. The internal carriers (`step` / `primed` /
-`tracked`) thread one frame's state through the chain; they never go on the bus.
+The class-heavy Step/Module reactive framework was flattened to plain procedural
+Python: every step is a function with explicit args (no `ctx.state` lookups), and
+each reactive module became a plain `threading.Thread` worker that owns its inbox,
+coalescing, END handling, and downstream-END forward explicitly.
 
-> Naming note: the carrier dataclass is named `Step` (`vio/modules/step.py`) and
-> the pub/sub base class is **also** named `Step` (renamed from `Task`, exported
-> from `vio.comms`). In the six step files that need both, the base is imported as
-> `from vio.comms import Step as StepBase` so the carrier keeps the plain `Step`
-> name. This collision is unique to `vio` — `imu_camera` has no such carriers.
+`OdometryWorker` joins `imucam.sample` (IMU prior, `process_imucam`) +
+`frame.depth` (KLT track → RGB-D PnP → gyro fusion → pose, `process_frame`) and
+publishes `pose.odom`, `keyframe`, `frame.tracks`, `frame.inliers` (+ `pose.vo`
+when the live builder enables it). It owns the **2-input multi-END join**
+explicitly: one inbox carries `(topic, msg)` tuples, the loop routes each by topic
+to the right step chain, and END is forwarded downstream + `done` set only once
+**both** inputs have ENDed (`expected_ends == 2`) — the load-bearing concurrency
+the old `Module` gave for free. `BackendWorker` consumes `keyframe`
+(`process_kf`), runs windowed BA behind a swappable engine (`worker=True` runs it
+in a subprocess; `tight=True` switches to the VIO map), and publishes
+`pose.refined`. `OdometryModule` / `BackendModule` are kept as aliases (vio.main +
+the selftests import them). The internal carriers (`step` / `primed` / `tracked`)
+thread one frame's state through the chain; they never go on the bus.
 
-#### TIGHT live pose — `PropagateImu` (`--tight` only)
+The odometry worker holds a `ModuleContext` (a plain `(bus, name, state)` holder,
+NOT the reactive substrate) so the per-run state the step functions thread through
+(`vo` / `priors` / `imu_segs` / the live `live_nav` / `loop_inbox` …) lives in one
+place — and the selftests that reach into `odom.ctx.state` keep working unchanged.
+
+> Naming note: the carrier dataclass is named `Step` (`vio/modules/step.py`) — a
+> real per-frame data record (`estimate_motion` → downstream), **kept as a
+> dataclass**. The framework `Step` base class (the old per-step superclass) is
+> gone from `vio/modules/` now that the steps are plain functions, so the old
+> `Step` / `StepBase` import collision is gone too.
+
+#### TIGHT live pose — `propagate_imu` (`--tight` only)
 
 On `--tight` (`retain_imu=True`) the live `pose.odom` is **IMU forward-propagated**
 between vision solves (Basalt-like `predictState`), so it reacts instantly to motion

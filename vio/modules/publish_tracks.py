@@ -1,7 +1,7 @@
-"""``publish_tracks`` task: emit the frame's KLT tracks on ``frame.tracks``.
+"""``publish_tracks`` step: emit the frame's KLT tracks on ``frame.tracks``.
 
-Sits between :class:`~vio.modules.track_features.TrackFeatures` and
-:class:`~vio.modules.estimate_motion.EstimateMotion` in the frame-chain.
+Sits between :func:`~vio.modules.track_features.track_features` and
+:func:`~vio.modules.estimate_motion.estimate_motion` in the frame-chain.
 It has the freshly tracked ``{id: pixel}`` (from the :class:`Tracked` carrier),
 so it publishes the REAL frontend tracks for the keypoint-depth visualiser to
 subscribe -- no parallel detector. The matching frame image + depth are NOT
@@ -14,26 +14,26 @@ from __future__ import annotations
 
 import numpy as np
 
-from vio.comms import topics
+from vio.comms import LocalPubSub, topics
 from vio.comms.messages import FrameTracks
-from vio.comms import Step
 from .tracked import Tracked
 
 
-class PublishTracks(Step):
-    name = "publish_tracks"
+def publish_tracks(bus: LocalPubSub, tracked: Tracked) -> Tracked:
+    """Publish the frame's KLT tracks on ``frame.tracks``; pass the carrier on.
 
-    def run(self, ctx, tracked: Tracked):
-        obs = tracked.obs
-        if obs:
-            ids_list = list(obs.keys())
-            ids = np.array(ids_list, dtype=np.int64)
-            points = np.array([obs[k] for k in ids_list],
-                              dtype=np.float32).reshape(-1, 2)
-        else:
-            ids = np.empty((0,), dtype=np.int64)
-            points = np.empty((0, 2), dtype=np.float32)
-        frame = tracked.frame
-        ctx.bus.publish(topics.FRAME_TRACKS,
-                        FrameTracks(frame.seq, frame.ts_ns, ids, points))
-        return tracked
+    Was ``PublishTracks(Step)``; identical publish, the bus passed explicitly.
+    """
+    obs = tracked.obs
+    if obs:
+        ids_list = list(obs.keys())
+        ids = np.array(ids_list, dtype=np.int64)
+        points = np.array([obs[k] for k in ids_list],
+                          dtype=np.float32).reshape(-1, 2)
+    else:
+        ids = np.empty((0,), dtype=np.int64)
+        points = np.empty((0, 2), dtype=np.float32)
+    frame = tracked.frame
+    bus.publish(topics.FRAME_TRACKS,
+                FrameTracks(frame.seq, frame.ts_ns, ids, points))
+    return tracked

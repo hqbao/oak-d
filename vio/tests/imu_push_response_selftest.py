@@ -41,7 +41,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from vio.comms.module import ModuleContext                       # noqa: E402
 from vio.comms import LocalPubSub                                # noqa: E402
-from vio.modules.propagate_imu import PropagateImu               # noqa: E402
+from vio.modules.propagate_imu import propagate_imu             # noqa: E402
 from sky.vio.imu import imu_at_rest, predict_state       # noqa: E402
 from sky.vio.window import body_world_to_T_cw    # noqa: E402
 
@@ -194,7 +194,7 @@ def _run_live(lag_frames: int = 0, covered_window=None):
     ts, accel, gyro, pos, _ = _push_profile()
     D = float(pos[-1])
     ctx = _make_ctx()
-    step_obj = PropagateImu()
+    step_obj = propagate_imu
 
     # true forward position sampled at each FRAME boundary (last IMU sample).
     frame_ts = ts[::N_PER_FRAME]
@@ -221,7 +221,7 @@ def _run_live(lag_frames: int = 0, covered_window=None):
         info = {"ok": False, "n_inliers": 0} if covered \
             else {"ok": True, "n_inliers": 64}
         st = _Step(_Frame(seq, int(fts)), _vision_pose(z_vis), info)
-        out = step_obj.run(ctx, st)
+        out = step_obj(ctx, st)
         # out.pose is T_world_cam (camera->world); body == camera, so the
         # body->world forward position is its translation column directly.
         live_z.append(float(out.pose[2, 3]))
@@ -288,7 +288,7 @@ def test_fixed_tracks_push_smoothly() -> None:
 def test_pure_rest_no_drift() -> None:
     """A pure-rest profile: the live pose must not walk off (ZUPT still works)."""
     ctx = _make_ctx()
-    step_obj = PropagateImu()
+    step_obj = propagate_imu
     rest = np.array([0.0, -G, 0.0]) + np.array([0.05, 0.0, 0.05])  # + accel bias
     poses = []
     seq = 0
@@ -300,7 +300,7 @@ def test_pure_rest_no_drift() -> None:
         ctx.state["imu_segs"][seq] = (cts, cg, ca)
         # vision sits at the origin (device truly still).
         st = _Step(_Frame(seq, int(cts[-1])), _vision_pose(0.0), {})
-        out = step_obj.run(ctx, st)
+        out = step_obj(ctx, st)
         poses.append(out.pose[:3, 3].copy())
         seq += 1
     pos = np.array(poses)

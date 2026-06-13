@@ -31,7 +31,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from vio.comms.module import ModuleContext                       # noqa: E402
 from vio.comms import LocalPubSub                                # noqa: E402
-from vio.modules.propagate_imu import PropagateImu               # noqa: E402
+from vio.modules.propagate_imu import propagate_imu             # noqa: E402
 from sky.vio.imu import imu_at_rest, predict_state      # noqa: E402
 
 G = 9.81
@@ -139,7 +139,7 @@ def test_covered_camera_dead_reckons() -> None:
     """THE KEY TEST: vision ABSENT (frozen pose) + real IMU translation ->
     the live published pose.odom MUST advance via the IMU (not freeze)."""
     ctx = _make_ctx()
-    step_obj = PropagateImu()
+    step_obj = propagate_imu
     # Frozen vision pose: PnP failed every frame, so step.pose never changes (the
     # loose-path freeze symptom). The IMU, however, carries a real forward push
     # of 4 m/s^2 -- clearly above the ZUPT band so the live pose dead-reckons.
@@ -164,7 +164,7 @@ def test_covered_camera_dead_reckons() -> None:
         seg = _accel_seg(seq, accel, np.zeros(3), n_per)
         ctx.state["imu_segs"][seq] = seg
         st = _Step(_Frame(seq, int(seg[0][-1])), frozen.copy(), dict(failed_vis))
-        out = step_obj.run(ctx, st)
+        out = step_obj(ctx, st)
         poses.append(out.pose[:3, 3].copy())
         # The TIGHT-only DR flag the UI reads: vision was lost every frame here,
         # so the live pose is inertial dead-reckoning -> inertial_dr must be True.
@@ -195,7 +195,7 @@ def test_inertial_dr_flag_vision_ok() -> None:
     solve is trusted (ok + enough inliers) -> the UI shows OK, not the amber
     inertial-DR badge. Mirrors the covered-camera test but with a GOOD solve."""
     ctx = _make_ctx()
-    step_obj = PropagateImu()
+    step_obj = propagate_imu
     rest = np.array([0.0, -G, 0.0])
     n_per = 5
     # A trusted vision solve every frame: ok=True with inliers above the
@@ -207,7 +207,7 @@ def test_inertial_dr_flag_vision_ok() -> None:
         seg = _accel_seg(seq, rest, np.zeros(3), n_per)
         ctx.state["imu_segs"][seq] = seg
         st = _Step(_Frame(seq, int(seg[0][-1])), np.eye(4), dict(good_vis))
-        out = step_obj.run(ctx, st)
+        out = step_obj(ctx, st)
         flags.append(bool(out.info.get("inertial_dr")))
         seq += 1
     # Frame 0 only seeds the anchor; the flag is still written there too. With a
@@ -220,7 +220,7 @@ def test_stationary_zupt_no_drift() -> None:
     """ZUPT: vision frozen + IMU at rest (accel~g, gyro~0) -> live pose holds
     still (no drift). With a small accel BIAS present, ZUPT must still hold it."""
     ctx = _make_ctx()
-    step_obj = PropagateImu()
+    step_obj = propagate_imu
     frozen = np.eye(4)
     rest = np.array([0.0, -G, 0.0])
     # Add a realistic accel bias so a pure forward-integrator would WALK off;
@@ -233,7 +233,7 @@ def test_stationary_zupt_no_drift() -> None:
         seg = _accel_seg(seq, rest + bias, np.zeros(3), n_per)
         ctx.state["imu_segs"][seq] = seg
         st = _Step(_Frame(seq, int(seg[0][-1])), frozen.copy(), {})
-        out = step_obj.run(ctx, st)
+        out = step_obj(ctx, st)
         poses.append(out.pose[:3, 3].copy())
         seq += 1
     pos = np.array(poses)
@@ -253,16 +253,16 @@ def test_empty_imu_segment_held() -> None:
     (size-0 arrays, as PreintegratePrior stores for a no-sample packet) must NOT
     crash -- the nav pose is held and published, not indexed out of bounds."""
     ctx = _make_ctx()
-    step_obj = PropagateImu()
+    step_obj = propagate_imu
     frozen = np.eye(4)
     # frame 0 seeds the anchor with a normal segment.
     seg0 = _accel_seg(0, np.array([0.0, -G, 0.0]), np.zeros(3), 5)
     ctx.state["imu_segs"][0] = seg0
-    step_obj.run(ctx, _Step(_Frame(0, int(seg0[0][-1])), frozen.copy(), {}))
+    step_obj(ctx, _Step(_Frame(0, int(seg0[0][-1])), frozen.copy(), {}))
     # frame 1 has an EMPTY segment (the live no-IMU packet shape).
     empty = (np.zeros(0, np.int64), np.zeros((0, 3)), np.zeros((0, 3)))
     ctx.state["imu_segs"][1] = empty
-    out = step_obj.run(ctx, _Step(_Frame(1, 0), frozen.copy(), {}))
+    out = step_obj(ctx, _Step(_Frame(1, 0), frozen.copy(), {}))
     assert np.all(np.isfinite(out.pose)), "empty-segment frame produced NaN/Inf"
     print("empty IMU segment: held without crashing  OK")
 
@@ -273,10 +273,10 @@ def test_loose_path_passthrough() -> None:
     ctx = ModuleContext(LocalPubSub(), "odometry")
     ctx.state["retain_imu"] = False
     ctx.state["kf_every"] = 5
-    step_obj = PropagateImu()
+    step_obj = propagate_imu
     vis = np.eye(4); vis[0, 3] = 1.234      # arbitrary vision pose
     st = _Step(_Frame(7, 999), vis.copy(), {"x": 1})
-    out = step_obj.run(ctx, st)
+    out = step_obj(ctx, st)
     assert out is st, "loose path must pass the same Step object through"
     assert np.array_equal(out.pose, vis), "loose path must NOT touch step.pose"
     assert "live_nav" not in ctx.state, "loose path must not allocate nav-state"
