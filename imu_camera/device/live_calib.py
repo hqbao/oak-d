@@ -1,7 +1,7 @@
 """Read the live OAK-D calibration + startup IMU references for the VIO graph.
 
 The unified front-end (``cam`` + ``imu_cam`` off ONE
-:class:`~imu_camera.mathlib.device.oak_live.SharedLiveDevice`) needs the same boot-time facts the
+:class:`~imu_camera.device.oak_live.SharedLiveDevice`) needs the same boot-time facts the
 old monolithic capture flow read in ``LiveCaptureFlow.open()``:
 
 * camera intrinsics ``K`` and the stereo :class:`~imu_camera.io.reader.StereoCalib`
@@ -32,8 +32,8 @@ from sky.sensors.calib_store import (
 from sky.sensors.imu_calib import ImuCalibration
 
 from imu_camera.comms.lib.config.resolution import ResolutionProfile
-from imu_camera.mathlib.resolution_build import sgm_config
-from imu_camera.mathlib.imu.decode import decode_imu_packets
+from imu_camera.resolution_build import sgm_config
+from imu_camera.device.imu_decode import decode_imu_packets
 from imu_camera.io.reader import StereoCalib
 from .camera_calib_store import load_camera_calib
 from .oak_live import SharedLiveDevice
@@ -171,7 +171,7 @@ def select_camera_calib(dev_id: str | None, factory_K: np.ndarray,
     Factored out of :func:`read_live_calibration` so the decision is unit-testable
     HEADLESS (no OAK-D, no depthai) -- the only device-dependent input is the
     already-read factory ``(K, StereoCalib)``; ``user_calib`` is whatever
-    :func:`~imu_camera.mathlib.device.camera_calib_store.load_camera_calib` returned
+    :func:`~imu_camera.device.camera_calib_store.load_camera_calib` returned
     (the caller is expected to pass ``None`` when ``use_camera_calib`` is off, so the
     store is never even read in the default path).
 
@@ -218,7 +218,7 @@ def read_live_calibration(device: SharedLiveDevice, *, width: int, height: int,
                           use_camera_calib: bool = False) -> LiveFrontEndCalib:
     """Acquire the shared device and read all VIO boot references.
 
-    The device is :meth:`~imu_camera.mathlib.device.oak_live.SharedLiveDevice.acquire`-d here and
+    The device is :meth:`~imu_camera.device.oak_live.SharedLiveDevice.acquire`-d here and
     kept open (the caller releases it when the run ends); the camera/IMU sources
     attach to the same reference-counted device when they start.
     """

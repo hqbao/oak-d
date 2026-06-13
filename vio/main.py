@@ -57,7 +57,7 @@ from vio.comms.ring_registry import (                              # noqa: E402
 from vio.modules import BackendModule, OdometryModule              # noqa: E402
 from sky.front.odometry import OdometryConfig           # noqa: E402
 from vio.comms.lib.config.resolution import ResolutionProfile     # noqa: E402
-from vio.mathlib.resolution_build import frontend_config          # noqa: E402
+from vio.resolution_build import frontend_config          # noqa: E402
 
 LOG = logging.getLogger("vio.main")
 

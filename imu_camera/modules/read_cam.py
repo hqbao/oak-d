@@ -76,7 +76,7 @@ class LiveCamSource(CamSource):
     """Grabs synced stereo pairs from a shared OAK-D (raw left + raw right).
 
     Reads the mono pair off a
-    :class:`~imu_camera.mathlib.device.oak_live.SharedLiveDevice` (the OAK-D is
+    :class:`~imu_camera.device.oak_live.SharedLiveDevice` (the OAK-D is
     single-client, so the camera and IMU readers must share ONE device/pipeline).
     It pairs left/right by sequence number -- the cameras are hardware-synced, so a
     shared ``seq`` is a true same-instant pair -- and tags the pair with the left

@@ -5,8 +5,8 @@ Each ``*_step`` takes a live map object + one keyframe snapshot and returns the
 solve result (or ``None`` when there is nothing to publish for that keyframe).
 These are pure functions of (map, snapshot): no threads, no queues, no flow/bus
 knowledge -- they receive the map instance so the same function drives both the
-synchronous :class:`~vio.mathlib.engine.inprocess.InProcessEngine` and the child of
-:class:`~vio.mathlib.engine.subprocess.SubprocessEngine`.
+synchronous :class:`~vio.engine.inprocess.InProcessEngine` and the child of
+:class:`~vio.engine.subprocess.SubprocessEngine`.
 
 The logic is lifted verbatim from the old in-thread ``RunBA`` task so the offline
 path stays identical.

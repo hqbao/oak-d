@@ -24,9 +24,9 @@ Built by replicating the PROVEN ``imu_camera`` / ``vio`` / ``slam`` template:
   capture / VIO topics onto the local bus those sinks read.
 * :mod:`ui.viz` -- the cv2 visualisation helpers (depth colourise, imucam render,
   keypoint overlay), ported from ``ours.lib.viz``.
-* :mod:`ui.mathlib` -- the MINIMAL math the UI owns: the IMU calibration
-  collectors + store the Calibration menu's dialogs drive (forced-vendor of
-  ``ours.lib.imu``, like ``vio`` vendored its IMU helpers).
+* :mod:`ui.calib` -- the MINIMAL calibration math the UI owns: the printable
+  checkerboard target generator + the thin I/O wrapper around the shared corner
+  detector that the Calibration menu's dialogs drive (cv2-free / Qt-free).
 * :mod:`ui.main` -- the UI process: the IPC subscribers (``IpcPoseSource`` +
   ``SlamMapTracker``), the single 5-line viewer + toolbar + menus, and the
   RESTART_EXIT_CODE=42 launcher handshake. Lazy Qt imports in ``run_ui``.

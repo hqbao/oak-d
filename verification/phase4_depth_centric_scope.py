@@ -77,7 +77,7 @@ from sky.front.odometry import OdometryConfig  # noqa: E402
 # Production config builders -> the sparse path uses the SAME frontend/odometry
 # config the live 54x42 ToF pipeline runs (faithful comparison, not ad-hoc).
 from vio.comms.lib.config.resolution import ResolutionProfile  # noqa: E402
-from vio.mathlib.resolution_build import frontend_config, odometry_config  # noqa: E402
+from vio.resolution_build import frontend_config, odometry_config  # noqa: E402
 
 
 GOLD_DIR = Path("sessions/gold")

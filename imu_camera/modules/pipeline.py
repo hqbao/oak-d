@@ -347,8 +347,8 @@ def build_live_frontend(bus: LocalPubSub, *, width: int = 640, height: int = 400
     live-calibration bundle (``cal.imu_calibration`` etc.); the caller starts the
     threads and releases ``device`` when the run ends. Hardware-only.
     """
-    from imu_camera.mathlib.device.oak_live import SharedLiveDevice
-    from imu_camera.mathlib.device.live_calib import read_live_calibration
+    from imu_camera.device.oak_live import SharedLiveDevice
+    from imu_camera.device.live_calib import read_live_calibration
     from .read_cam import LiveCamSource
     from .read_imu import LiveImuSource
 
@@ -359,9 +359,9 @@ def build_live_frontend(bus: LocalPubSub, *, width: int = 640, height: int = 400
     # so the compiled signatures match. Never blocks: a slow warmup just means
     # frame one compiles as it always did.
     import threading as _threading
-    from imu_camera.mathlib.warmup import warmup_sgm
+    from imu_camera.warmup import warmup_sgm
     from imu_camera.comms.lib.config.resolution import ResolutionProfile
-    from imu_camera.mathlib.resolution_build import sgm_config
+    from imu_camera.resolution_build import sgm_config
     _res = ResolutionProfile.for_resolution(width, height)
     # imu_camera warms ONLY its own SGM kernel (it does not run KLT -- vio does
     # and warms KLT in its own process).

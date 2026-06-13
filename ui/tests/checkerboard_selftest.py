@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Self-test for the pure checkerboard calibration-target generator.
 
-The generator (:mod:`ui.mathlib.calib.checkerboard`) is cv2-free / Qt-free: it
+The generator (:mod:`ui.calib.checkerboard`) is cv2-free / Qt-free: it
 returns a ``uint8`` grayscale board and saves it via the project's pure-Python PNG
 codec. Per the repo's "cv2 survives only as a dev-time oracle in self-tests"
 stance, OpenCV appears HERE ONLY -- as the detection oracle that is the REAL gate:
@@ -26,7 +26,7 @@ import cv2          # dev/test ORACLE only -- never imported by the generator
 import numpy as np
 
 from ui.comms.lib.misc.pngio import imread_gray
-from ui.mathlib.calib.checkerboard import (
+from ui.calib.checkerboard import (
     make_checkerboard,
     save_checkerboard,
     square_px_from_mm,

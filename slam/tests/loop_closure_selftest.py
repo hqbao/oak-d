@@ -18,7 +18,8 @@ Huber never engages -- the primary defence against false loops is the front-end
 
 This is the byte-parity guard for the SLAM project's vendored pose-graph math:
 ported VERBATIM from the reference oracle ``ours/tools/posegraph_selftest.py``
-(import roots re-rooted at ``slam.mathlib`` only -- no algorithm change), so the
+(import roots re-rooted at ``sky.slam`` / ``slam.engine`` only -- no algorithm
+change), so the
 numerical result must match the pre-split path exactly.
 
 Run::

@@ -1,14 +1,14 @@
-"""``vio.mathlib.engine`` -- swappable runners for the heavy keyframe optimisers.
+"""``vio.engine`` -- swappable runners for the heavy keyframe optimisers.
 
 A flow picks how its optimiser runs with one ``worker`` flag:
 
 * ``worker=False`` (default, OFFLINE) -> :class:`InProcessEngine` -- synchronous,
   deterministic, byte-identical replay output.
-* ``worker=True`` (LIVE) -> :class:`~vio.mathlib.engine.subprocess.SubprocessEngine`
+* ``worker=True`` (LIVE) -> :class:`~vio.engine.subprocess.SubprocessEngine`
   -- the solve runs in a separate process so it never holds the camera read loop's
   GIL (the fast-push undershoot fix).
 
-The engines wrap the existing algorithm libraries (``vio.mathlib.backend.windowed``
+The engines wrap the shared algorithm libraries (``sky.backend.windowed``
 / ``sky.vio.window``) and know nothing about flows or the bus --
 they are pure machinery (``lib``), called by the flow tasks.
 """
@@ -32,8 +32,8 @@ def make_ba_engine(K: np.ndarray, cfg, *, worker: bool = False,
     """Build a windowed-BA engine (in-process unless ``worker``).
 
     ``capture_window`` (opt-in, ``--ba-window``) selects the RICHER capture step +
-    overlay (:func:`~vio.mathlib.engine.steps.ba_step_capture` /
-    :func:`~vio.mathlib.engine.steps.ba_window_overlay`): the SAME frozen
+    overlay (:func:`~vio.engine.steps.ba_step_capture` /
+    :func:`~vio.engine.steps.ba_window_overlay`): the SAME frozen
     ``run_ba`` solve plus a read-only PRE/POST snapshot for the UI's "BA Window"
     visualiser. Default OFF -> the historical ``ba_step`` / ``ba_overlay`` path,
     byte-identical to before (the oracle relies on this).

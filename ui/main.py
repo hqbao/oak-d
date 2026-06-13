@@ -565,7 +565,7 @@ def install_calib_nag(win, toolbar, status: dict, open_dialog) -> object | None:
     """Surface the startup calibration notification on ``win`` -- NON-BLOCKING.
 
     Given the unified ``status`` dict (from
-    :func:`~imu_camera.mathlib.device.calib_status.calibration_status`):
+    :func:`~imu_camera.device.calib_status.calibration_status`):
 
     * If anything is missing: show a prominent (but auto-fading, dismissible)
       status-bar message naming the missing items + the accuracy risk, AND add a
@@ -641,7 +641,7 @@ def run_ui(*, vio_endpoint: str = DEFAULT_VIO_ENDPOINT,
     from ui.qt.calib_dialogs import GyroCalibDialog, AccelCalibDialog
     from ui.qt.camera_calib_dialog import CameraCalibWizard
     from ui.qt.calib_status_dialog import CalibrationStatusDialog
-    from imu_camera.mathlib.device.calib_status import calibration_status
+    from imu_camera.device.calib_status import calibration_status
     from ui.modules import (
         IpcImuRawSource, IpcStereoRawSource, IpcGyroFuseSource,
         ipc_triplet_factory, ipc_keypoint_factory, ipc_slam_map_factory,

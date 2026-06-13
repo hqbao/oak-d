@@ -5,7 +5,7 @@ capture diverse stereo views off an injected RAW stereo stream (Phase 2) while a
 tested collector gates the dataset (Phase 3 ``collector``), solve the intrinsics +
 extrinsic OFF the UI thread (Phase 3 ``solve``), grade the result with the shipped
 ``calib_check`` suite, and persist a reader-compatible ``calib.json`` (Phase 3
-``writer``). The HEAVY logic lives in :mod:`ui.mathlib.calib` + the worker; this
+``writer``). The HEAVY logic lives in :mod:`ui.calib` + the worker; this
 dialog is thin glue + rendering, so the calibration math stays unit-tested there.
 
 Stream contract (device-free) -- modelled on :mod:`ui.qt.calib_dialogs`
@@ -46,7 +46,7 @@ cv2 POLICY -- the module import must NOT load OpenCV
 The flight runtime is cv2-free and stays so. cv2 is pulled in ONLY transitively, at
 CAPTURE time (``collector.feed`` -> ``detect_corners``) and SOLVE time
 (``solve_stereo``), both of which lazy-import cv2 themselves. This module therefore
-imports NEITHER cv2 NOR :mod:`ui.mathlib.calib` at top level -- the calib helpers
+imports NEITHER cv2 NOR :mod:`ui.calib` at top level -- the calib helpers
 are imported lazily inside the methods that first need them, so merely importing the
 dialog module (e.g. when ``ui.main`` builds its menu) loads no OpenCV.
 """
@@ -469,7 +469,7 @@ class CameraCalibWizard(QDialog):
         instantly inside the running wizard. Dismiss with Esc / double-click.
         cv2-free: the generator pulls no OpenCV.
         """
-        from ui.mathlib.calib.checkerboard import make_checkerboard
+        from ui.calib.checkerboard import make_checkerboard
 
         cols = int(self._cols_spin.value())
         rows = int(self._rows_spin.value())
@@ -968,7 +968,7 @@ class CameraCalibWizard(QDialog):
         # export writes (translation in cm, the loader's convention) and key it by the
         # wizard's device id -- device-agnostic, no OAK-D specifics in the UI.
         from sky.calib.writer import calib_to_dict, write_calib_json
-        from imu_camera.mathlib.device.camera_calib_store import save_camera_calib
+        from imu_camera.device.camera_calib_store import save_camera_calib
 
         applied = ""
         if self._device_id is not None:

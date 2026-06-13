@@ -50,7 +50,7 @@ from PyQt6.QtWidgets import QApplication
 
 from imu_camera.io.reader import StereoCalib
 from imu_camera.tools.calib_check import FAIL, run_checks
-from ui.mathlib.calib.checkerboard import make_checkerboard
+from ui.calib.checkerboard import make_checkerboard
 from sky.calib.collector import CoverageStatus, FrameStatus
 from ui.qt import theme
 from ui.qt.camera_calib_dialog import CameraCalibWizard
@@ -58,7 +58,7 @@ from ui.qt.camera_calib_dialog import CameraCalibWizard
 # The wizard's Save also writes to this per-device store (used opt-in via
 # --use-camera-calib); the store selftest covers it in isolation, here we assert the
 # wizard wires it in.
-from imu_camera.mathlib.device import camera_calib_store
+from imu_camera.device import camera_calib_store
 
 # --------------------------------------------------------------------------- #
 # Synthetic STEREO board frames via a GROUND-TRUTH pinhole rasterizer.
@@ -787,7 +787,7 @@ def test_show_board_window_stays_open() -> None:
     the wizard closes (no orphan window left covering the screen).
     """
     _app()
-    from ui.mathlib.calib.checkerboard import make_checkerboard
+    from ui.calib.checkerboard import make_checkerboard
     from ui.qt.camera_calib_dialog import _BoardWindow
 
     wiz = CameraCalibWizard(None, device_id="selftest-cam",

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Self-test for the UNIFIED calibration status API
-(:func:`imu_camera.mathlib.device.calib_status.calibration_status`).
+(:func:`imu_camera.device.calib_status.calibration_status`).
 
 Fully OFFLINE and CACHE-SAFE: it monkeypatches the three persisted-calib loaders
 that :mod:`calib_status` imported (``load_gyro_bias`` / ``load_accel_calib`` /
@@ -32,7 +32,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from imu_camera.mathlib.device import calib_status as cs       # noqa: E402
+from imu_camera.device import calib_status as cs       # noqa: E402
 
 
 # --------------------------------------------------------------------------- #

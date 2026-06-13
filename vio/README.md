@@ -22,7 +22,8 @@ line-for-line).
 | Package | Role | Source it was ported from |
 |---------|------|---------------------------|
 | `vio/comms/` | the **FROZEN** vendored comms contract | copied **bit-identically** from `imu_camera/comms` |
-| `vio/mathlib/` | the math VIO owns (frontend / odometry / backend / engine / imu) | `ours/lib/{frontend,odometry,backend,engine,imu}` |
+| `vio/engine/` | the swappable in-process / subprocess runners for the heavy keyframe solve (the algorithm lives in shared `sky`) | `ours/lib/engine` |
+| `vio/resolution_build.py`, `vio/warmup.py` | the math-coupled config builders + JIT warmup VIO owns at the project root | `ResolutionProfile.{frontend,odometry,ba_huber_px}` + `ours/lib` warmup |
 | `vio/modules/` | the odometry + backend pipeline (**procedural** step functions + two plain worker threads) | `ours/flows/{odometry,backend}` |
 | `vio/main.py` | the VIO process | `ours/proc/vio.py` |
 | `vio/tests/` | regression self-tests | `ours/tools/{klt,vio_ba}_selftest.py` |
@@ -43,25 +44,31 @@ no longer imports them: its pipeline is plain procedural Python, see below.
 `ModuleContext` is the one comms type still used, as a plain `(bus, name, state)`
 state holder for the odometry worker.)
 
-### `vio/mathlib/` — the math VIO owns + the architecture rule
+### `vio/engine/` — the swappable solve runners
 
-The math sub-packages (`frontend`, `odometry`, `backend`, `engine`, `imu`) are the
-verbatim port. **`imu` is vendored too** because the odometry / backend / pnp math
-(and `vio_ba_selftest`) depend on `imu.imu` (SO(3) helpers + IMU preintegration);
-it is numpy-only and self-contained, mirroring how `imu_camera` vendors `imu`
-under its own `mathlib`.
+After the `sky.*` consolidation the VIO algorithm itself (frontend KLT, RGB-D
+odometry, windowed BA, the tight VIO window, IMU/SO(3) helpers) lives in the shared
+`sky` leaf library; the misnamed grab-bag `vio/mathlib/` has been **dissolved by
+concern**. What VIO still owns is the *execution* glue:
 
-**ARCHITECTURE RULE.** The math-coupled config builders and the JIT warmup live in
-`vio/mathlib/`, **not** in the generic, bit-identical `vio/comms/`:
+- `vio/engine/` — the swappable in-process / subprocess engines that drive the
+  heavy keyframe solve. `make_ba_engine` wraps `sky.backend.windowed.WindowedBAMap`
+  and `make_vi_engine` wraps `sky.vio.window.WindowedVIOMap`; `worker=True` ships
+  each keyframe to a child process so the solve never holds the camera read loop's
+  GIL. The engines know nothing about the bus — pure machinery called by the
+  module steps.
 
-- `vio/mathlib/resolution_build.py` — `frontend_config(res, *, numba)`,
+**ARCHITECTURE RULE.** The math-coupled config builders and the JIT warmup live at
+the **project root**, **not** in the generic, bit-identical `vio/comms/`:
+
+- `vio/resolution_build.py` — `frontend_config(res, *, numba)`,
   `odometry_config(res, **guards)`, `ba_huber_px(res)` (ported verbatim from the
   pre-split `ResolutionProfile.frontend` / `.odometry` / `.ba_huber_px`). They
-  import VIO's own math; the profile in `vio.comms.lib.config.resolution` stays
-  data-only and headless.
-- `vio/mathlib/warmup.py` — `warmup_klt(klt_cfg=None)` warms **only** the KLT
-  numba kernel. VIO consumes `frame.depth` from capture, so it does **not** run
-  SGM (that is `imu_camera`, which warms its own SGM kernel).
+  import VIO's own (now `sky`) math; the profile in `vio.comms.lib.config.resolution`
+  stays data-only and headless.
+- `vio/warmup.py` — `warmup_klt(klt_cfg=None)` warms **only** the KLT numba
+  kernel. VIO consumes `frame.depth` from capture, so it does **not** run SGM (that
+  is `imu_camera`, which warms its own SGM kernel).
 
 ### `vio/modules/` — the procedural pipeline (no reactive `Module` / `Step`)
 

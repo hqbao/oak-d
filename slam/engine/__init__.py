@@ -1,15 +1,15 @@
-"""``slam.mathlib.engine`` -- swappable runners for the heavy keyframe optimisers.
+"""``slam.engine`` -- swappable runners for the heavy keyframe optimisers.
 
 A flow picks how its optimiser runs with one ``worker`` flag:
 
 * ``worker=False`` (default, OFFLINE) -> :class:`InProcessEngine` -- synchronous,
   deterministic, byte-identical replay output.
-* ``worker=True`` (LIVE) -> :class:`~slam.mathlib.engine.subprocess.SubprocessEngine`
+* ``worker=True`` (LIVE) -> :class:`~slam.engine.subprocess.SubprocessEngine`
   -- the solve runs in a separate process so it never holds the camera read loop's
   GIL (the fast-push undershoot fix).
 
-The engine wraps the existing loop-closure SLAM library (``sky.slam.slam``)
-and knows nothing about flows or the bus -- it is pure machinery (``mathlib``),
+The engine wraps the shared loop-closure SLAM library (``sky.slam.slam``)
+and knows nothing about flows or the bus -- it is pure machinery (``lib``),
 called by the module steps.
 """
 from __future__ import annotations

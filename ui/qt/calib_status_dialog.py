@@ -16,7 +16,7 @@ multi-chip-generic and offline-unit-testable (a test passes a stub provider + st
 openers; see ``ui/tests/calib_status_dialog_selftest.py``).
 
 The provider returns the dict from
-:func:`imu_camera.mathlib.device.calib_status.calibration_status` (an ``items`` list
+:func:`imu_camera.device.calib_status.calibration_status` (an ``items`` list
 of ``{"name", "calibrated", "detail"}`` rows). The caller keys it by the resolved
 ``dev_id`` and wires the three openers to the existing
 ``_open_gyro_calib`` / ``_open_accel_calib`` / ``_open_camera_calib`` handlers.
@@ -45,7 +45,7 @@ class CalibrationStatusDialog(QDialog):
     ----------
     status_provider:
         Zero-arg callable returning the
-        :func:`~imu_camera.mathlib.device.calib_status.calibration_status` dict.
+        :func:`~imu_camera.device.calib_status.calibration_status` dict.
         Re-invoked on every show so the rows reflect the latest on-disk state.
     openers:
         Maps each item ``name`` ("gyro" / "accel" / "camera") to a zero-arg callable

@@ -12,7 +12,7 @@ Python; see :mod:`vio.modules.pipeline`):
   2-input multi-END join (``expected_ends == 2``) explicitly.
 * :class:`~vio.modules.pipeline.BackendWorker` -- consumes ``keyframe``, runs the
   sliding-window bundle adjustment behind a swappable
-  :class:`~vio.mathlib.engine.base.Engine`, and publishes the refined pose on
+  :class:`~vio.engine.base.Engine`, and publishes the refined pose on
   ``pose.refined``.
 
 ``OdometryModule`` / ``BackendModule`` are kept as public aliases (vio.main + the

@@ -5,8 +5,8 @@
 solve result (or ``None`` when there is nothing to publish for that keyframe).
 It is a pure function of (map, snapshot): no threads, no queues, no flow/bus
 knowledge -- it receives the map instance so the same function drives both the
-synchronous :class:`~slam.mathlib.engine.inprocess.InProcessEngine` and the child of
-:class:`~slam.mathlib.engine.subprocess.SubprocessEngine`.
+synchronous :class:`~slam.engine.inprocess.InProcessEngine` and the child of
+:class:`~slam.engine.subprocess.SubprocessEngine`.
 
 The logic is lifted verbatim from the old in-thread ``SlamStep`` task so the
 offline path stays identical.

@@ -75,7 +75,7 @@ def _build_arg_parser() -> "object":
     import textwrap
 
     parser = argparse.ArgumentParser(
-        prog="python -m ui.mathlib.calib.checkerboard",
+        prog="python -m ui.calib.checkerboard",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         description=textwrap.dedent("""\
             Generate a printable / displayable checkerboard calibration target.

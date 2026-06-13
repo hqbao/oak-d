@@ -40,7 +40,7 @@ import numpy as np
 
 from imu_camera.io.reader import StereoCalib
 from imu_camera.tools.calib_check import FAIL, run_checks
-from ui.mathlib.calib.checkerboard import make_checkerboard
+from ui.calib.checkerboard import make_checkerboard
 from sky.calib.collector import CollectorConfig, StereoCheckerboardCollector
 from sky.calib.detect import reconcile_lr
 from sky.calib.solve import solve_stereo
@@ -976,14 +976,14 @@ def test_writer_roundtrip_and_calib_check() -> None:
 # cv2 hygiene: importing the calib package must NOT pull OpenCV.
 # --------------------------------------------------------------------------- #
 def test_package_import_is_cv2_free() -> None:
-    """A bare `import ui.mathlib.calib` (+ submodules) must not load cv2.
+    """A bare `import ui.calib` (+ submodules) must not load cv2.
 
     Runs in a clean subprocess so this test process's own `import cv2` (the oracle)
     cannot mask the result.
     """
     code = (
         "import sys; "
-        "import ui.mathlib.calib; "
+        "import ui.calib; "
         "import sky.calib.detect; "
         "import sky.calib.collector; "
         "import sky.calib.solve; "
@@ -1000,7 +1000,7 @@ def test_package_import_is_cv2_free() -> None:
     assert proc.returncode == 0, (
         f"cv2-free import check failed:\nSTDOUT:{proc.stdout}\nSTDERR:{proc.stderr}")
     assert proc.stdout.strip() == "clean"
-    print("[ok] bare `import ui.mathlib.calib` (+ submodules) does NOT load cv2 "
+    print("[ok] bare `import ui.calib` (+ submodules) does NOT load cv2 "
           "(under -W error)")
 
 

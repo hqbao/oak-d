@@ -26,7 +26,7 @@ import numpy as np
 
 from slam.comms import LocalPubSub, topics
 from slam.comms.messages import LoopMatch
-from slam.mathlib.engine import Engine
+from slam.engine import Engine
 
 
 def publish_loops(engine: Engine, bus: LocalPubSub) -> None:

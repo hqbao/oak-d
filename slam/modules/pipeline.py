@@ -36,7 +36,7 @@ import numpy as np
 
 from slam.comms import LocalPubSub, topics
 from slam.comms.messages import END, Keyframe
-from slam.mathlib.engine import Engine, make_slam_engine
+from slam.engine import Engine, make_slam_engine
 from sky.slam.slam import SlamConfig
 
 from .slam_step import slam_submit

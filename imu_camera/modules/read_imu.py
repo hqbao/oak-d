@@ -32,7 +32,7 @@ from typing import Callable
 import numpy as np
 
 from imu_camera.io.reader import SessionReader
-from imu_camera.mathlib.imu.decode import decode_imu_packets
+from imu_camera.device.imu_decode import decode_imu_packets
 
 # (t_ns, gyro(3,), accel(3,)) -> None
 SampleCallback = Callable[[int, np.ndarray, np.ndarray], None]
@@ -113,7 +113,7 @@ class LiveImuSource(ImuSource):
     """Streams the OAK-D IMU (accelerometer + gyroscope) from a shared device.
 
     Reads the IMU output queue of a
-    :class:`~imu_camera.mathlib.device.oak_live.SharedLiveDevice` -- the SAME
+    :class:`~imu_camera.device.oak_live.SharedLiveDevice` -- the SAME
     device/pipeline the camera reader uses, because the OAK-D is single-client --
     and pushes every decoded sample to the callback, tagged with the gyro device
     timestamp (the clock shared with the camera frames).
@@ -140,7 +140,7 @@ class LiveImuSource(ImuSource):
 
     def _run(self, on_sample: SampleCallback) -> None:
         try:
-            from imu_camera.mathlib.imu.decode import decode_imu_packets
+            from imu_camera.device.imu_decode import decode_imu_packets
         except Exception as e:                                    # noqa: BLE001
             self.error = f"depthai not available: {e}"
             return

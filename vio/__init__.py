@@ -12,10 +12,13 @@ Built by replicating the PROVEN ``imu_camera`` template:
 * :mod:`vio.comms` -- the FROZEN vendored comms contract, COPIED bit-identically
   from ``imu_camera.comms`` (a CI ``diff -r`` gate enforces byte-parity); this
   project only consumes its public API.
-* :mod:`vio.mathlib` -- the math VIO owns (frontend KLT, odometry, backend BA +
-  VIO window, the engine runners, and the IMU/SO(3) helpers they depend on),
-  ported verbatim from ``ours.lib`` with the math-coupled config builders +
-  JIT warmup living in ``vio.mathlib`` per the architecture rule.
+* :mod:`vio.engine` -- the swappable in-process / subprocess runners that drive
+  the heavy keyframe solve (windowed BA + tight VIO window); the algorithm itself
+  lives in the shared :mod:`sky` library (``sky.backend.windowed`` /
+  ``sky.vio.window``).
+* :mod:`vio.resolution_build` / :mod:`vio.warmup` -- the resolution-driven
+  frontend/odometry config builders and the JIT warmup, the math-coupled glue VIO
+  owns at the project root.
 * :mod:`vio.modules` -- the odometry + backend reactive modules (was
   ``ours.flows.{odometry,backend}``), wired by
   :class:`~vio.modules.pipeline.OdometryModule` /

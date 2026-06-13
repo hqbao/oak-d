@@ -1,16 +1,22 @@
-"""``imu_camera.mathlib.device`` -- live OAK-D acquisition + boot-time calibration.
+"""``imu_camera.device`` -- live OAK-D acquisition + boot-time calibration.
 
-The only hardware-touching corner of the project's mathlib: opening the single
-shared device and reading the boot references the live pipeline needs. ``depthai``
-is imported lazily inside these modules, so importing this package never pulls the
-device library (keeps the offline / replay path depthai-free).
+The only hardware-touching corner of the project: opening the single shared
+device, reading the boot references the live pipeline needs, and decoding the
+device's raw IMU packets. ``depthai`` is imported lazily inside these modules, so
+importing this package never pulls the device library (keeps the offline / replay
+path depthai-free).
 
-* :class:`~imu_camera.mathlib.device.oak_live.SharedLiveDevice` -- one
+* :class:`~imu_camera.device.oak_live.SharedLiveDevice` -- one
   reference-counted pipeline (stereo + IMU) shared by the cam / imu reader
   modules.
-* :func:`~imu_camera.mathlib.device.live_calib.read_live_calibration` --
+* :func:`~imu_camera.device.live_calib.read_live_calibration` --
   intrinsics + IMU->camera extrinsics + the startup gravity-align / cached gyro
   bias.
+* :mod:`~imu_camera.device.imu_decode` -- decode the OAK device's raw IMU
+  packets into ``(ts, gyro, accel)`` samples (live only).
+* :mod:`~imu_camera.device.calib_status` /
+  :mod:`~imu_camera.device.camera_calib_store` -- the per-device user-calibration
+  status check + on-disk store.
 """
 from __future__ import annotations
 

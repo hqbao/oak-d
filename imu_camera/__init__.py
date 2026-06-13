@@ -9,9 +9,12 @@ Layers
 ------
 * :mod:`imu_camera.comms` -- the FROZEN vendored comms contract (bit-identical
   across all five projects); this project only consumes its public API.
-* :mod:`imu_camera.mathlib` -- the math it owns (live device, IMU calibration +
-  preintegration buffers); the SGM stereo it runs inline now lives in the shared
-  :mod:`sky.depth.stereo`.
+* :mod:`imu_camera.device` -- the device layer it owns: the shared live OAK-D
+  acquisition + boot-time calibration, the per-device camera-calib store, and the
+  depthai IMU-packet decode (:mod:`~imu_camera.device.imu_decode`).
+* :mod:`imu_camera.resolution_build` / :mod:`imu_camera.warmup` -- the
+  resolution-driven config builder and the JIT warmup for the inline SGM (the SGM
+  stereo it runs now lives in the shared :mod:`sky.depth.stereo`).
 * :mod:`imu_camera.io` -- recorded-session reading (the replay data source).
 * :mod:`imu_camera.modules` -- the threaded acquisition pipeline (``cam`` +
   ``imu_cam`` with its inline depth steps), wired by

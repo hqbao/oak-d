@@ -11,7 +11,7 @@ from __future__ import annotations
 import numpy as np
 
 from vio.comms.messages import Keyframe, PoseMsg
-from vio.mathlib.engine import Engine
+from vio.engine import Engine
 
 
 def run_ba(engine: Engine, tight: bool, kf: Keyframe):

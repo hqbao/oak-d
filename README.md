@@ -238,11 +238,16 @@ python3.13 -m venv .venv && .venv/bin/pip install -r requirements.txt
 ## The five projects
 
 Each project is a standalone Python package with its own `main.py` (the process),
-`comms/` (the vendored contract), `mathlib/` (the algorithm code it owns), and
-`modules/` (its reactive pipeline). The shared algorithm code those processes
-call lives once in the top-level [`sky/`](#the-sky-shared-library) library
-(`sky.math` primitives + `sky.depth` SGM stereo). The data
-flow between processes is fixed by the topic strings on the `comms` bus:
+`comms/` (the vendored contract), `modules/` (its pipeline), and its
+process-coupled glue organised **by concern** at the project root — e.g.
+`imu_camera/device/` (the OAK-D driver), `vio/engine/` and `slam/engine/` (the
+swappable solve runners), `<proj>/resolution_build.py` + `<proj>/warmup.py` (the
+math-coupled config builders + JIT warmup), and `ui/calib/` (the UI calib math).
+The shared algorithm code those processes call lives once in the top-level
+[`sky/`](#the-sky-shared-library) library (`sky.math` primitives + `sky.depth` SGM
+stereo + `sky.front` / `sky.backend` / `sky.vio` / `sky.slam` / `sky.imu` /
+`sky.sensors` / `sky.calib`). The data flow between processes is fixed by the
+topic strings on the `comms` bus:
 
 ```
 imu_camera.main ──(oak.capture)──▶ vio.main ──(oak.vio)──▶ slam.main ──(oak.slam)──▶ ui.main
@@ -333,8 +338,8 @@ to the C `libsky*` layering. Sub-packages so far:
   (opt-in) sqrt marginalization helper.
 - **`sky.imu`** (`imu`, `inertial_filter`, `timed_buffer`) — the **loose** IMU
   path: Forster on-manifold preintegration, the complementary inertial filter, and
-  the time-aligned sample buffer. (`vio`'s tight-VIO superset stays in
-  `vio/mathlib/imu/imu.py` for Phase 4.)
+  the time-aligned sample buffer. (`vio`'s tight-VIO superset lives in
+  `sky.vio` — `sky/vio/imu.py` + `sky/vio/window.py`.)
 - **`sky.sensors`** (`imu_calib`, `accel_calib`, `calib_collect`, `calib_store`)
   — the IMU gyro/accel calibration math + the on-device collection / persistence.
 - **`sky.slam`** (`orb`, `loopclosure`, `posegraph`, `slam`) — the loop-closure
@@ -350,13 +355,15 @@ process / `comms` / `io` module. `sky.assert_import_clean()` checks this after a
 bare `import sky.*` (run by the consolidation self-tests), keeping the library a
 leaf so it stays portable as-is.
 
-What REMAINS in each project's `mathlib/` is the process-coupled glue, not the
-shared algorithms: `imu_camera` keeps `device/*` (live OAK-D handles) + the IMU
-`decode.py` + `resolution_build` / `warmup`; `vio` keeps its tight-VIO Phase-4
-code (`backend/vio_window.py`, the `imu/imu.py` superset) + `engine/` +
-`resolution_build` / `warmup`; `slam` keeps `engine/` + `resolution_build`; `ui`
-keeps a thin `calib/checkerboard.py` wrapper (re-exports `sky.calib.checkerboard`
-plus the Qt / PNG-save side); `depth`'s `mathlib/` is now empty.
+What REMAINS in each project (now organised **by concern** at the project root,
+the misnamed `mathlib/` grab-bag having been dissolved) is the process-coupled
+glue, not the shared algorithms: `imu_camera` keeps `device/*` (live OAK-D handles
++ the IMU `imu_decode.py` + the camera-calib store) + `resolution_build.py` /
+`warmup.py`; `vio` keeps `engine/` + `resolution_build.py` / `warmup.py` (its
+tight-VIO Phase-4 code now lives in `sky.vio`); `slam` keeps `engine/` +
+`resolution_build.py`; `ui` keeps a thin `calib/checkerboard.py` wrapper
+(re-exports `sky.calib.checkerboard` plus the Qt / PNG-save side); `depth` keeps
+no math at all (its SGM runs from `sky.depth`).
 
 | New name | Was | Role |
 |---|---|---|
@@ -558,7 +565,7 @@ The menu bar renders **in-window on every platform** (`setNativeMenuBar(False)`)
   (`device_id` from the calib bundle) and **takes effect on the next capture
   start**, not live mid-run. On launch the UI queries the unified
   `calibration_status(dev_id)` (a small **cv2/depthai-free** API in
-  `imu_camera/mathlib/device/calib_status.py`): if anything is missing it shows a
+  `imu_camera/device/calib_status.py`): if anything is missing it shows a
   **non-blocking** nag — a status-bar message naming the missing items + the
   accuracy risk, plus a persistent clickable **"⚠ CALIB INCOMPLETE"** toolbar
   indicator that opens the status dialog; when all three are done it just confirms
@@ -705,7 +712,7 @@ startup nag only fires for an uncalibrated gyro/accel, not for an empty camera s
 
 Operator flow:
 
-1. **Generate the board** — `.venv/bin/python -m ui.mathlib.calib.checkerboard`
+1. **Generate the board** — `.venv/bin/python -m ui.calib.checkerboard`
    (`--cols/--rows` = INNER corners, not squares; `--square-mm`/`--dpi` for print,
    `--show` to display it fullscreen). Print at **100%** ("fit to page" OFF), or
    display it on a **second** monitor.
@@ -735,7 +742,7 @@ Operator flow:
 The capture process owns the device, so a saved calibration takes effect on the
 **next capture start** (like the IMU wizards), not live mid-run. The store lives at
 `.cache/camera_calib.json` (gitignored), keyed by device id — multiple cameras never
-clobber each other, and `imu_camera/mathlib/device/camera_calib_store.py`
+clobber each other, and `imu_camera/device/camera_calib_store.py`
 (`save_camera_calib` / `load_camera_calib`) is the only thing that reads/writes it.
 
 ## Status
@@ -748,7 +755,7 @@ clobber each other, and `imu_camera/mathlib/device/camera_calib_store.py`
 - [x] Gyro complementary fusion (loosely-coupled): gyro rotation prior + vision
       correction gated on inliers AND vision/gyro disagreement; no-op on
       well-tracked frames (gold ATE unchanged)
-- [~] Tight-coupled VIO core (`vio/mathlib/backend/vio_window.py`): Forster
+- [~] Tight-coupled VIO core (`sky/vio/window.py`): Forster
       on-manifold IMU preintegration + joint visual-inertial window solve, self-test
       validated, wired offline as the `vio` backend. Experimental: still regresses
       vs `ba` on healthy gold; needs online gravity estimation
@@ -775,11 +782,11 @@ clobber each other, and `imu_camera/mathlib/device/camera_calib_store.py`
       extrinsics) against physical sanity bands and the recorded frames; nonzero
       exit on any FAIL (`--strict` also fails on WARN) → a pre-run / CI gate
 - [x] Stereo camera-calibration wizard: a checkerboard generator
-      (`ui/mathlib/calib/checkerboard.py` + `python -m ui.mathlib.calib.checkerboard`)
+      (`ui/calib/checkerboard.py` + `python -m ui.calib.checkerboard`)
       and a UI wizard ("Camera (stereo) calibration…", `ui/qt/camera_calib_dialog.py`)
       that captures diverse + tilted stereo views off capture's RAW `imucam.sample`
       pair, solves K_l/K_r + distortion + the `T_left_right` extrinsic
-      (`ui/mathlib/calib`), and writes a reader-compatible `calib.json` with a live
+      (`ui/calib`), and writes a reader-compatible `calib.json` with a live
       `calib_check` PASS/WARN/FAIL verdict — this *re-derives* a calibration (the
       check tool above only *validates* one). cv2 stays lazy → flight path cv2-free
 - [ ] Port to RPi5

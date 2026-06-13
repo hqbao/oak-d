@@ -94,7 +94,7 @@ def main() -> int:
     # Camera is factory-by-default (opt-in via --use-camera-calib), so an empty
     # camera store must NEVER make the nag fire. Stub the three loaders the status
     # module imported so no real cache is touched.
-    from imu_camera.mathlib.device import calib_status as cs
+    from imu_camera.device import calib_status as cs
     orig = (cs.load_gyro_bias, cs.load_accel_calib, cs.load_camera_calib)
 
     def _stub(present):

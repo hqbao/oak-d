@@ -13,11 +13,11 @@ Built by replicating the PROVEN ``imu_camera`` / ``vio`` template:
 * :mod:`slam.comms` -- the FROZEN vendored comms contract, COPIED bit-identically
   from ``imu_camera.comms`` (a ``diff -r`` gate enforces byte-parity); this
   project only consumes its public API.
-* :mod:`slam.mathlib` -- the math SLAM owns (ORB loop closure + pose-graph backend
-  + the engine runners), ported verbatim from ``ours.lib.{loop,engine}`` plus the
-  FORCED dependencies of the loop import graph (PnP RANSAC, the SO(3)/SE(3)
-  helpers). The math-coupled config builder (:mod:`slam.mathlib.resolution_build`)
-  lives in ``slam.mathlib`` per the architecture rule.
+* :mod:`slam.engine` -- the swappable in-process / subprocess runners that drive
+  the heavy keyframe solve (ORB loop closure + SE(3) pose-graph optimisation); the
+  algorithm itself lives in the shared :mod:`sky.slam` library.
+* :mod:`slam.resolution_build` -- the resolution-driven, math-coupled config
+  builder SLAM owns at the project root.
 * :mod:`slam.modules` -- the loop-closure pipeline (was ``ours.flows.slam``),
   now PROCEDURAL: the plain function :func:`~slam.modules.pipeline.process_keyframe`
   driven by the plain worker thread :class:`~slam.modules.pipeline.SlamWorker`

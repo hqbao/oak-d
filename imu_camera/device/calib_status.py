@@ -14,7 +14,7 @@ cv2-free and depthai-free:
 
 * :func:`sky.sensors.calib_store.load_gyro_bias`
 * :func:`sky.sensors.calib_store.load_accel_calib`
-* :func:`imu_camera.mathlib.device.camera_calib_store.load_camera_calib`
+* :func:`imu_camera.device.camera_calib_store.load_camera_calib`
 
 So the multi-chip-generic UI can import :func:`calibration_status` directly, keyed by
 the abstract ``device_id`` -- no OAK-D / depthai specifics ever reach this file. The
@@ -43,7 +43,7 @@ from __future__ import annotations
 
 from sky.sensors.calib_store import load_accel_calib, load_gyro_bias
 
-from imu_camera.mathlib.device.camera_calib_store import load_camera_calib
+from imu_camera.device.camera_calib_store import load_camera_calib
 
 # Stable item keys/names. The dialog renders rows in THIS order (gyro, accel,
 # camera), and ``missing`` preserves it, so the operator always sees the same layout.

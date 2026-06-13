@@ -1,4 +1,4 @@
-"""``ui.mathlib.calib`` -- the ``ui``-COUPLED half of camera calibration.
+"""``ui.calib`` -- the ``ui``-COUPLED half of camera calibration.
 
 The device-free calibration MATH (corner detect, diversity-gated collector, stereo
 solve, calib.json writer, and the pure checkerboard generator) was RELOCATED into
@@ -6,7 +6,7 @@ the shared :mod:`sky.calib` leaf library (R5) -- ``ui`` was its only consumer.
 What stays here is only the part that genuinely needs the ``ui`` process and so
 CANNOT be a leaf (it would import ``ui.comms`` / PyQt6):
 
-* :mod:`ui.mathlib.calib.checkerboard` -- the thin I/O WRAPPER around the shared
+* :mod:`ui.calib.checkerboard` -- the thin I/O WRAPPER around the shared
   generator. It re-exports the pure :func:`sky.calib.checkerboard.make_checkerboard`
   / :func:`~sky.calib.checkerboard.square_px_from_mm`, and adds ``save_checkerboard``
   (writes the board via the project's pure-Python PNG codec
@@ -55,5 +55,5 @@ calibration wizard is an operator/dev tool, so OpenCV is acceptable in Phases 1 
 but every module that needs cv2 (``detect``, ``solve``) LAZY-imports it inside its
 functions; ``checkerboard`` and ``writer`` are cv2-free outright. Importing this
 package (or any of its submodules) therefore never loads OpenCV. The submodules are
-NOT eagerly imported here, so ``import ui.mathlib.calib`` stays import-light.
+NOT eagerly imported here, so ``import ui.calib`` stays import-light.
 """

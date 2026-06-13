@@ -4,15 +4,15 @@ The calibration WIZARD (:mod:`ui.qt.camera_calib_dialog`) lets the operator solv
 their OWN stereo intrinsics + left->right extrinsic. This module persists that solve
 so the LIVE pipeline can auto-apply it on the next capture start instead of falling
 back to the OAK-D FACTORY calibration -- exactly mirroring how
-:mod:`imu_camera.mathlib.imu.calib_store` persists the per-device IMU calibration.
+:mod:`sky.sensors.calib_store` persists the per-device IMU calibration.
 
 Why a SEPARATE module from the IMU ``calib_store``
 --------------------------------------------------
-The IMU store lives under ``mathlib/imu/`` because it stores IMU-domain data (gyro
-bias + accel affine) and depends on :class:`~imu_camera.mathlib.imu.accel_calib.AccelCalibration`.
-This store keeps CAMERA-domain data (a :class:`~imu_camera.io.reader.StereoCalib`),
-so it belongs next to its sole live consumer, :mod:`live_calib`, under
-``mathlib/device/`` -- not mislabelled under ``imu/``.
+The IMU store lives in the shared :mod:`sky.sensors` library because it stores
+IMU-domain data (gyro bias + accel affine) and depends on
+:class:`~sky.sensors.accel_calib.AccelCalibration`. This store keeps CAMERA-domain
+data (a :class:`~imu_camera.io.reader.StereoCalib`), so it belongs next to its sole
+live consumer, :mod:`live_calib`, in this project's ``device/`` layer.
 
 Device-agnostic by construction (so the UI can import it)
 ---------------------------------------------------------
@@ -44,9 +44,9 @@ from pathlib import Path
 from imu_camera.io.reader import StereoCalib
 
 # Repo-root/.cache/camera_calib.json (.cache is gitignored). This file is
-# imu_camera/mathlib/device/camera_calib_store.py, so parents[3] is the repo root
-# (matching the IMU store's parents[3] from mathlib/imu/calib_store.py).
-_CACHE_DIR = Path(__file__).resolve().parents[3] / ".cache"
+# imu_camera/device/camera_calib_store.py, so parents[2] is the repo root
+# (matching the IMU store's parents[2] from sky/sensors/calib_store.py).
+_CACHE_DIR = Path(__file__).resolve().parents[2] / ".cache"
 _DEFAULT_PATH = _CACHE_DIR / "camera_calib.json"
 
 

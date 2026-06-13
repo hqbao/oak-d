@@ -5,7 +5,7 @@ Two halves, both fully OFFLINE (no OAK-D, no depthai) and writing ONLY to a tmp
 cache path so the real ``.cache/camera_calib.json`` is never touched:
 
 1. STORE round-trip
-   (:func:`~imu_camera.mathlib.device.camera_calib_store.save_camera_calib` /
+   (:func:`~imu_camera.device.camera_calib_store.save_camera_calib` /
    :func:`load_camera_calib`):
      (a) save a calib dict for a device, reload it -> a ``StereoCalib`` whose
          intrinsics + baseline match the source dict,
@@ -14,7 +14,7 @@ cache path so the real ``.cache/camera_calib.json`` is never touched:
      (d) a CORRUPT file returns ``None`` (clean fall-back, no crash).
 
 2. OVERRIDE selection
-   (:func:`~imu_camera.mathlib.device.live_calib.select_camera_calib` -- the live
+   (:func:`~imu_camera.device.live_calib.select_camera_calib` -- the live
    decision factored out so it runs HEADLESS with a stubbed device-calib read).
    FACTORY is the DEFAULT; the user calib is opt-in via ``use_camera_calib``:
      (e) flag OFF (default) + a stored calib present -> still FACTORY (the store is
@@ -41,9 +41,9 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from imu_camera.io.reader import StereoCalib                  # noqa: E402
-from imu_camera.mathlib.device.camera_calib_store import (    # noqa: E402
+from imu_camera.device.camera_calib_store import (    # noqa: E402
     load_camera_calib, save_camera_calib)
-from imu_camera.mathlib.device.live_calib import select_camera_calib  # noqa: E402
+from imu_camera.device.live_calib import select_camera_calib  # noqa: E402
 
 
 # --------------------------------------------------------------------------- #

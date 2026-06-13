@@ -16,7 +16,7 @@ calls the single-purpose step functions in order:
 :data:`~slam.modules.pipeline.SlamModule`) is the plain thread that drains the
 keyframe inbox -- with the LOAD-BEARING ``latest_only`` coalescing kept explicit
 -- and runs ``process_keyframe``. The heavy ORB + pose-graph solve runs behind a
-swappable :class:`~slam.mathlib.engine.base.Engine` (in-process offline,
+swappable :class:`~slam.engine.base.Engine` (in-process offline,
 subprocess live).
 """
 from .pipeline import SlamModule, SlamWorker, process_keyframe

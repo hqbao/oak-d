@@ -13,7 +13,7 @@ responsive marker rides ``pose.odom`` and never waits on this.
 from __future__ import annotations
 
 from slam.comms.messages import Keyframe, LoopCorrection
-from slam.mathlib.engine import Engine, SlamResult
+from slam.engine import Engine, SlamResult
 
 
 def slam_submit(engine: Engine, kf: Keyframe) -> LoopCorrection | None:

@@ -59,7 +59,7 @@ from sky.front.odometry import OdometryConfig, RGBDVisualOdometry
 from sky.backend.bundle import BAConfig
 from sky.backend.windowed import WindowedConfig
 from sky.vio.window import WindowedVIOConfig
-from vio.mathlib.engine import make_ba_engine, make_vi_engine
+from vio.engine import make_ba_engine, make_vi_engine
 from .preintegrate_prior import preintegrate_prior
 from .track_features import track_features
 from .publish_tracks import publish_tracks
@@ -391,7 +391,7 @@ class BackendWorker(threading.Thread):
       (``imu_info_weight=True``); ``run_ba`` then submits the SUPERSET snapshot
       (keyframe ts + raw inter-keyframe IMU block).
 
-    The heavy solve runs behind an :class:`~vio.mathlib.engine.base.Engine`:
+    The heavy solve runs behind an :class:`~vio.engine.base.Engine`:
     ``worker=False`` (default, offline) runs it synchronously in-thread --
     byte-identical to the old path; ``worker=True`` (live) runs it in a separate
     process so it cannot hold the read loop's GIL (the fast-push undershoot fix).

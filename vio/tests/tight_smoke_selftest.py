@@ -43,7 +43,7 @@ from sky.front.odometry import (                          # noqa: E402
 from sky.backend.windowed import (                           # noqa: E402
     WindowedConfig, WindowedRGBDOdometry)
 from sky.vio.window import WindowedVIOConfig         # noqa: E402
-from vio.mathlib.engine import make_vi_engine                        # noqa: E402
+from vio.engine import make_vi_engine                        # noqa: E402
 
 
 def _slice_imu_seg(ts_all: np.ndarray, gyro_cam: np.ndarray,
