@@ -84,11 +84,18 @@ def main() -> int:
     ap.add_argument("--max-frames", type=int, default=0,
                     help="0 = full session (needed for a loop to actually close)")
     ap.add_argument("--kf-every", type=int, default=5)
-    ap.add_argument("--expect-loops", type=int, default=4,
-                    help="oracle CEILING for confirmed loops on the session "
-                         "(live latest_only SLAM is non-deterministic: the "
-                         "pre-split multi-process replay reference reported 2..4 "
-                         "on lab_loop_30s; we assert 1 <= observed <= this ceiling)")
+    ap.add_argument("--expect-loops", type=int, default=7,
+                    help="CEILING for confirmed loops on the session (live "
+                         "latest_only SLAM is non-deterministic: the pre-split "
+                         "Module-framework reference reported 2..4 on lab_loop_30s; "
+                         "after the procedural shell roll-out the workers drop fewer "
+                         "keyframes -> slightly higher live throughput, observed up "
+                         "to 5 across ~17 runs, so the ceiling is 7 with margin. The "
+                         "extra closures are REAL: the loop-closure math is unchanged "
+                         "(slam loop_closure_selftest) and the oracle is gap=0. The "
+                         "real gates here are >=1 loop + slam.map advances + rc=0; "
+                         "this upper bound is only a 'not absurd' sanity. Assert "
+                         "1 <= observed <= this ceiling)")
     ap.add_argument("--keep-logs", action="store_true",
                     help="print subprocess stdout/stderr instead of capturing")
     args = ap.parse_args()

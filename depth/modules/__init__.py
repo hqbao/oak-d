@@ -1,9 +1,9 @@
 """``depth.modules`` -- the two depth stages (the depth half of the pipeline).
 
 depth runs INLINE on the capture project's ``imu_cam`` thread today via the
-capture project's OWN ``imu_camera.modules.{compute_depth,publish_depth}`` Steps;
-this standalone process runs the SAME math, but as plain PROCEDURAL functions so a
-reader sees the data flow as straight-line calls:
+capture project's OWN ``imu_camera.modules.{compute_depth,publish_depth}``
+functions; this standalone process runs the SAME math, also as plain PROCEDURAL
+functions so a reader sees the data flow as straight-line calls:
 
 * :func:`~depth.modules.compute_depth.compute_depth` -- run the SGM matcher
   (``sky.depth.stereo``) on a raw stereo pair and return a
