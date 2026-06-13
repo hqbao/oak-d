@@ -1,23 +1,22 @@
-"""``depth.modules`` -- the two depth steps (the depth half of the pipeline).
+"""``depth.modules`` -- the two depth stages (the depth half of the pipeline).
 
-depth runs INLINE on the capture project's ``imu_cam`` thread today, so these two
-steps are BYTE-IDENTICAL (modulo the project import prefix) to
-``imu_camera/modules/{compute_depth,publish_depth}.py``:
+depth runs INLINE on the capture project's ``imu_cam`` thread today via the
+capture project's OWN ``imu_camera.modules.{compute_depth,publish_depth}`` Steps;
+this standalone process runs the SAME math, but as plain PROCEDURAL functions so a
+reader sees the data flow as straight-line calls:
 
-* :class:`~depth.modules.compute_depth.ComputeDepthStep` -- run the SGM matcher
-  (``sky.depth.stereo``) on a raw stereo pair and emit a
+* :func:`~depth.modules.compute_depth.compute_depth` -- run the SGM matcher
+  (``sky.depth.stereo``) on a raw stereo pair and return a
   :class:`~depth.comms.messages.DepthFrame` (rectified-left + metric depth).
-* :class:`~depth.modules.publish_depth.PublishDepthStep` -- publish that frame on
+* :func:`~depth.modules.publish_depth.publish_depth` -- publish that frame on
   ``frame.depth``.
 
-The standalone process (:mod:`depth.main`) composes them on a
-:class:`~depth.comms.LocalPubSub` behind an
-:class:`~depth.comms.IPCSubscriber` bridge that feeds the raw ``cam.sync``
-stereo in over IPC, mirroring how the capture project composes them inline (see
-``imu_camera.modules.pipeline.ImuCamModule``).
+The standalone process (:mod:`depth.main`) calls them BACK-TO-BACK from the
+:class:`~depth.comms.IPCSubscriber` callback for each raw ``cam.sync`` -- no
+reactive ``Module`` / ``Step`` orchestration layer in between.
 """
 
-from .compute_depth import ComputeDepthStep
-from .publish_depth import PublishDepthStep
+from .compute_depth import compute_depth
+from .publish_depth import publish_depth
 
-__all__ = ["ComputeDepthStep", "PublishDepthStep"]
+__all__ = ["compute_depth", "publish_depth"]

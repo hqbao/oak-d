@@ -6,6 +6,17 @@ canonical SGM matcher in :mod:`sky.depth.stereo`), so the launcher never spawns
 this process. ``depth.main`` exists to prove the depth source tree runs as its
 OWN independent project -- it is the promotable "depth as its own process".
 
+This shell is deliberately PROCEDURAL: there is no reactive ``Module`` / ``Step``
+graph. The raw ``cam.sync`` stereo arrives over IPC on the
+:class:`~depth.comms.IPCSubscriber` recv thread, which is single-threaded and
+strictly FIFO; the subscribed callback (:func:`_on_cam_sync`) runs the depth flow
+straight through -- ``compute_depth(matcher, msg) -> publish_depth(bus, frame)``
+-- one published ``frame.depth`` per consumed ``cam.sync``, in order. END from
+``cam.sync`` is forwarded onto ``frame.depth`` by a second callback. The compute
+runs ON the recv thread on purpose: it back-pressures the socket (the next
+``recv_bytes`` only happens after this frame's depth is published), so a slow SGM
+never drops a frame -- the FIFO 1:1 contract the harness proves.
+
 Data flow::
 
     capture (oak.capture)                 depth (oak.depth)
@@ -13,7 +24,7 @@ Data flow::
     cam.sync  (raw L/R) ----IPC--->  IPCSubscriber -> LocalPubSub
     imucam.sample / imu.raw ...           |  cam.sync
     calib.bundle (retained) --IPC-->      v
-                                     DepthModule [compute_depth -> publish_depth]
+                                     _on_cam_sync: compute_depth -> publish_depth
                                           |  frame.depth (rectified-left + depth_m)
                                           v
                                      IPCPublisher -> IPCPubSub server (oak.depth)
@@ -49,7 +60,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from depth.comms import (                                          # noqa: E402
-    IPCPublisher, IPCPubSub, IPCSubscriber, LocalPubSub, Module,
+    IPCPublisher, IPCPubSub, IPCSubscriber, LocalPubSub,
     RingRegistry, topics,
 )
 from depth.comms.messages import END                               # noqa: E402
@@ -57,8 +68,7 @@ from depth.comms.ring_registry import default_capture_specs        # noqa: E402
 from depth.comms.wire import WireCalibBundle                       # noqa: E402
 from depth.io.reader import SessionReader                          # noqa: E402
 from sky.depth.stereo import SGMConfig, SGMStereoMatcher  # noqa: E402
-from depth.modules.compute_depth import ComputeDepthStep           # noqa: E402
-from depth.modules.publish_depth import PublishDepthStep           # noqa: E402
+from depth.modules import compute_depth, publish_depth             # noqa: E402
 
 LOG = logging.getLogger("depth.main")
 
@@ -76,36 +86,6 @@ _INPUT_TOPIC = topics.CAM_SYNC
 #: consumer connecting to THIS endpoint boots with the bundle already cached.
 _OUTPUT_TOPIC = topics.FRAME_DEPTH
 _CALIB_TOPIC = topics.CALIB_BUNDLE
-
-
-class DepthModule(Module):
-    """Reactive module: SGM dense depth per raw ``cam.sync`` trigger.
-
-    Mirrors how the capture project composes the SAME two steps inline on its
-    ``imu_cam`` module (see ``imu_camera.modules.pipeline.ImuCamModule``): the
-    matcher lives in ``ctx.state["matcher"]`` and the chain
-    ``compute_depth -> publish_depth`` runs on every trigger. The trigger here is
-    a :class:`~depth.comms.messages.CamSync` (raw left/right) arriving over the
-    IPC subscriber bridge -- ``ComputeDepthStep`` reads ``msg.gray_left`` /
-    ``msg.gray_right`` (which ``CamSync`` carries, identically to the
-    ``ImuCamPacket`` the capture project feeds it), so the depth math is wired
-    byte-for-byte the same way.
-
-    ``latest_only`` defaults to FIFO: the depth-as-a-process harness proves every
-    consumed raw frame yields exactly one published ``frame.depth``, so it must
-    not coalesce triggers. Backpressure belongs at the IPC boundary
-    (``IPCPubSub(blocking=False)``), not at this module's inbox.
-    """
-
-    def __init__(self, bus: LocalPubSub, matcher: SGMStereoMatcher, *,
-                 latest_only: bool = False) -> None:
-        super().__init__("depth", bus, latest_only=latest_only)
-        self.ctx.state["matcher"] = matcher
-        # Depth forwards END from its input (cam.sync) onto its output
-        # (frame.depth) so a frame.depth consumer drains cleanly when capture
-        # ends the replay session.
-        self.forwards_to(_OUTPUT_TOPIC)
-        self.on(_INPUT_TOPIC, [ComputeDepthStep(), PublishDepthStep()])
 
 
 # --------------------------------------------------------------------------- #
@@ -187,9 +167,9 @@ def run_depth(*,
     depth_rings = RingRegistry().create_all(default_capture_specs(
         endpoint=endpoint, width=width, height=height))
 
-    # 5. Local bus + the depth graph.
+    # 5. Local bus -- pure plumbing between the two IPC bridges. The depth flow
+    #    itself runs in the cam.sync callback below, NOT a reactive module.
     local = LocalPubSub()
-    depth_module = DepthModule(local, matcher, latest_only=False)
 
     # 6. Output IPCPubSub server + publisher bridge. Non-blocking (drop-oldest on
     #    stall) so a slow frame.depth consumer never stalls the SGM thread.
@@ -205,26 +185,39 @@ def run_depth(*,
     # is cached for any late subscriber.
     server.publish(_CALIB_TOPIC, bundle)
 
-    # 7. Input IPCPubSub client + subscriber bridge: capture's cam.sync -> local.
+    # 7. Procedural depth flow + END/shutdown bookkeeping. Both run on the
+    #    IPCSubscriber recv thread (single-threaded, strictly FIFO), so the
+    #    per-frame compute->publish is ordered AND END is forwarded only after the
+    #    last data frame's depth has been published (it follows in the FIFO).
+    finished = threading.Event()    # set when capture's END drains through us
+    published = [0]                 # frame.depth count emitted (harness report)
+
+    def _on_cam_sync(msg) -> None:
+        """One raw stereo pair -> exactly one published frame.depth."""
+        if msg is END:
+            # END-forwarding: capture publishes WireEnd on cam.sync when the
+            # replay session finishes; mirror it onto frame.depth so a downstream
+            # consumer drains cleanly, then signal the run is done. (The Module
+            # framework did this via forwards_to + _handle_end; here it is one
+            # explicit branch.)
+            local.publish(_OUTPUT_TOPIC, END)
+            finished.set()
+            return
+        frame = compute_depth(matcher, msg)
+        publish_depth(local, frame)
+        published[0] += 1
+
+    local.subscribe(_INPUT_TOPIC, _on_cam_sync)
+
+    # 8. Input IPCPubSub client + subscriber bridge: capture's cam.sync -> local
+    #    bus -> _on_cam_sync. Subscribe the flow BEFORE the bridge starts so no
+    #    cam.sync published during boot is lost.
     in_client = IPCPubSub(capture_endpoint, role="client")
     in_bridge = IPCSubscriber(local, in_client, cap_rings, [_INPUT_TOPIC])
-
-    # 8. END-detection sink: capture publishes WireEnd on cam.sync when the replay
-    #    session finishes; the bridge translates it to the local-bus END. One END
-    #    expected (cam.sync is depth's only input).
-    finished = threading.Event()
-
-    def _end_watch(_msg) -> None:
-        if _msg is END:
-            finished.set()
-    local.subscribe(_INPUT_TOPIC, _end_watch)
 
     LOG.info("depth[%s] subscribing to %s for %s (max_frames=%d)",
              endpoint, capture_endpoint, _INPUT_TOPIC, max_frames)
 
-    # 9. Start everything. The consumer (depth_module) starts BEFORE the input
-    #    bridge so cam.sync messages published while the module boots are not lost.
-    depth_module.start()
     in_bridge.start()
 
     stop = [False]
@@ -232,15 +225,6 @@ def run_depth(*,
     def _on_sigterm(_signo, _frame):
         stop[0] = True
     signal.signal(signal.SIGTERM, _on_sigterm)
-
-    # Count published frame.depth for the harness report (subscribe AFTER the
-    # depth module so we only count what compute->publish actually emitted).
-    published = [0]
-
-    def _count(_msg) -> None:
-        if _msg is not END:
-            published[0] += 1
-    local.subscribe(_OUTPUT_TOPIC, _count)
 
     try:
         # Run until: (a) capture sends END on cam.sync -> finished, (b) the
@@ -253,22 +237,17 @@ def run_depth(*,
     except KeyboardInterrupt:
         LOG.info("depth: SIGINT -> stopping")
     finally:
-        # Drain order: stop the input bridge so no more cam.sync arrives, wait for
-        # the depth module to chew through its inbox + the END (so the last
-        # frame.depth is published), then tear down the output side.
-        #
-        # Under SIGTERM / max-frames the operator wants a fast exit -- END may
-        # never arrive from a half-killed / still-running capture, so cap the
-        # wait at 2 s. Natural end-of-replay keeps the generous 120 s ceiling.
+        # Drain order: stop the input bridge so no more cam.sync arrives (and so
+        # the recv thread is no longer running _on_cam_sync), then tear down the
+        # output side. Because compute->publish ran inline on the recv thread,
+        # once the bridge has stopped every frame it delivered is already
+        # published -- there is no separate worker inbox left to drain.
         in_bridge.stop()
-        drain_timeout = 2.0 if (stop[0] or not finished.is_set()) else 120.0
-        LOG.info("depth: waiting for depth module to drain (timeout=%.1fs) ...",
-                 drain_timeout)
-        ok = depth_module.done.wait(timeout=drain_timeout)
-        LOG.info("depth: depth_module.done=%s published=%d", ok, published[0])
-        depth_module.stop()
-        # Give the bridge a brief window to flush buffered wire frames (incl. the
-        # END the module forwards onto frame.depth) before tearing down the server.
+        LOG.info("depth: input bridge stopped, finished=%s published=%d",
+                 finished.is_set(), published[0])
+        # Give the publisher bridge a brief window to flush buffered wire frames
+        # (incl. the END forwarded onto frame.depth) before tearing down the
+        # server.
         time.sleep(0.3)
         pub.stop()
         server.close()
@@ -285,8 +264,9 @@ def main() -> int:
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s %(name)s %(levelname)s %(message)s")
 
-    # Surface uncaught thread exceptions (otherwise a crashed module drain
-    # silently leaves the process alive with no published data).
+    # Surface uncaught thread exceptions (otherwise a crashed callback on the IPC
+    # recv thread is swallowed by the recv loop's try/except and the process
+    # lingers with no published data).
     def _excepthook(args):
         LOG.error("THREAD CRASH in %s: %s: %s", args.thread.name,
                   args.exc_type.__name__, args.exc_value, exc_info=(

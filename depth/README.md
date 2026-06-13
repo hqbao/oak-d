@@ -29,8 +29,8 @@ imu_camera.main ──(oak.capture: cam.sync raw L/R + calib.bundle)──▶ de
 | `depth/comms/` | the **FROZEN** vendored comms contract | copied **bit-identically** from `imu_camera/comms` |
 | `sky/depth/stereo.py` | the SGM matcher + rectifiers (shared, **one canonical copy**) | the top-level `sky.depth` library; imported by both `depth` and `imu_camera` |
 | `depth/io/` | recorded-session reading (used **only** for the full stereo calibration) | re-rooted copy of `imu_camera/io` |
-| `depth/modules/` | the `compute_depth` + `publish_depth` steps | re-rooted copy of `imu_camera/modules/{compute_depth,publish_depth}.py` |
-| `depth/main.py` | the standalone depth process | new (mirrors `imu_camera.modules.pipeline` wiring + `vio.main` IPC topology) |
+| `depth/modules/` | the `compute_depth` + `publish_depth` **functions** | same SGM math as `imu_camera/modules/{compute_depth,publish_depth}.py`, but flattened from `Step` classes to plain functions (matcher passed explicitly) |
+| `depth/main.py` | the standalone depth process (**procedural** shell) | new (runs the depth flow straight from the `cam.sync` IPC callback; `vio.main` IPC topology) |
 | `depth/tests/` | the SGM-vs-chip-depth regression self-test | re-rooted copy of `imu_camera/tests/stereo_sgm_selftest.py` |
 | `depth/tools/` | standalone learning/diagnostic tools (e.g. the SGM cost-volume explorer) | new; offline, opt-in, never on the data path |
 
@@ -42,8 +42,11 @@ All its internal imports are RELATIVE, so the copy works as `depth.comms`
 unchanged. **Never hand-edit it** — change `imu_camera/comms` and re-vendor.
 
 Public API depth uses: `LocalPubSub`, `IPCPubSub(role="server"|"client")`,
-`IPCPublisher`, `IPCSubscriber`, `Module`, `Step`, `RingRegistry`, `topics`,
+`IPCPublisher`, `IPCSubscriber`, `RingRegistry`, `topics`,
 `messages.{DepthFrame,CamSync,END}`, `converters`, and `wire.WireCalibBundle`.
+depth's process shell is **plain procedural** (straight-line functions, no
+reactive `Module` / `Step` graph — see `depth.main` below); `Module` / `Step`
+still ship in `comms` for the other projects + the byte-parity diff.
 
 ### `sky.depth.stereo` — the shared canonical SGM math
 
@@ -113,6 +116,14 @@ boots with the bundle cached.
 
 ## `depth.main` — the standalone depth process
 
+The shell is **procedural**: there is no reactive module graph. The raw stereo
+arrives over IPC on the `IPCSubscriber` recv thread (single-threaded, strictly
+FIFO), and the subscribed callback runs the depth flow straight through —
+`compute_depth(matcher, msg) → publish_depth(bus, frame)` — one published
+`frame.depth` per consumed `cam.sync`, in order. The compute runs **on the recv
+thread on purpose**: it back-pressures the socket (the next `recv_bytes` waits for
+this frame's depth to publish), so a slow SGM never drops a frame.
+
 1. Open a **calib client** on the capture endpoint; block until the retained
    `calib.bundle` arrives (readiness barrier + frame size).
 2. Build the `SGMStereoMatcher` from the session's full `StereoCalib`.
@@ -121,15 +132,24 @@ boots with the bundle cached.
    for the `frame.depth` output.
 4. Open depth's **output** `IPCPubSub` server (`blocking=False`) + an
    `IPCPublisher` for `frame.depth`; re-broadcast the retained `calib.bundle`.
-5. Wire a `DepthModule` on a `LocalPubSub` running `[ComputeDepthStep,
-   PublishDepthStep]` on `cam.sync` (matcher in `ctx.state["matcher"]`) — the
-   **same two steps, wired the same way** the capture project composes them inline
-   in `imu_camera.modules.pipeline.ImuCamModule`.
+5. Subscribe a plain callback on the `LocalPubSub` for `cam.sync`: it runs
+   `compute_depth(matcher, msg)` then `publish_depth(bus, frame)` — the **same two
+   stages** the capture project runs inline (as `ComputeDepthStep` /
+   `PublishDepthStep`) in `imu_camera.modules.pipeline.ImuCamModule`, here as plain
+   functions with the matcher passed explicitly. A sibling branch forwards `END`
+   from `cam.sync` onto `frame.depth`.
 6. Open the **input** `IPCPubSub` client + `IPCSubscriber` bridge for `cam.sync`.
 7. Run until capture sends `END` on `cam.sync`, the `--max-frames` cap is hit, or
-   SIGTERM / Ctrl-C; then a clean drain → stop bridges → flush → close server →
-   unlink rings (mirrors the `imu_camera.main` / `vio.main` shutdown lifecycle,
-   with `os._exit` so no lingering thread holds the process open).
+   SIGTERM / Ctrl-C; then stop the input bridge (after which every delivered frame
+   is already published — the compute ran inline, so there is no worker inbox to
+   drain) → flush the publisher → close server → unlink rings (mirrors the
+   `imu_camera.main` / `vio.main` shutdown lifecycle, with `os._exit` so no
+   lingering thread holds the process open).
+
+The **process-level gate** is `depth.tests.proc_depth_smoke_selftest` (spawns
+`imu_camera.main` → `depth.main` over IPC, asserts both rc=0, the 1:1 FIFO
+contract via gap-free observed `frame.depth` seqs + the producer count, the
+`END` forwarding, and clean shutdown).
 
 CLI: `--capture-endpoint` (default `oak.capture`), `--endpoint` (default
 `oak.depth`), `--session`, `--max-frames`, `--depth-fast`, `--calib-timeout`.
