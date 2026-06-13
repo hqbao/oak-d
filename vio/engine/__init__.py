@@ -18,8 +18,8 @@ import numpy as np
 
 from .base import Engine
 from .inprocess import InProcessEngine
-from .steps import (ba_step, vio_step, ba_overlay, vio_overlay,
-                    ba_step_capture, ba_window_overlay)
+from .steps import ba_step, vio_step, ba_overlay, vio_overlay
+from .ba_capture import ba_step_capture, ba_window_overlay
 from .subprocess import (SubprocessEngine, _ba_worker_main,
                          _ba_capture_worker_main, _vio_worker_main)
 
@@ -32,8 +32,8 @@ def make_ba_engine(K: np.ndarray, cfg, *, worker: bool = False,
     """Build a windowed-BA engine (in-process unless ``worker``).
 
     ``capture_window`` (opt-in, ``--ba-window``) selects the RICHER capture step +
-    overlay (:func:`~vio.engine.steps.ba_step_capture` /
-    :func:`~vio.engine.steps.ba_window_overlay`): the SAME frozen
+    overlay (:func:`~vio.engine.ba_capture.ba_step_capture` /
+    :func:`~vio.engine.ba_capture.ba_window_overlay`): the SAME frozen
     ``run_ba`` solve plus a read-only PRE/POST snapshot for the UI's "BA Window"
     visualiser. Default OFF -> the historical ``ba_step`` / ``ba_overlay`` path,
     byte-identical to before (the oracle relies on this).

@@ -105,11 +105,11 @@ def _ba_capture_worker_main(K, cfg, in_q, out_q, ov_q, stop_evt, reset_evt) -> N
 
     Identical to :func:`_ba_worker_main` (same ``WindowedBAMap`` + same frozen
     ``run_ba``) except it runs ``ba_step_capture`` and the ``ba_window_overlay``,
-    so ``ov_q`` carries a :class:`~vio.engine.steps.BaWindowSnap` (picklable
+    so ``ov_q`` carries a :class:`~vio.engine.ba_capture.BaWindowSnap` (picklable
     under spawn) instead of the ``{kf_id: pos}`` dict. Module-level => picklable.
     """
     from sky.backend.windowed import WindowedBAMap
-    from .steps import ba_step_capture, ba_window_overlay
+    from .ba_capture import ba_step_capture, ba_window_overlay
     _serve(lambda: WindowedBAMap(K, cfg), ba_step_capture, ba_window_overlay,
            in_q, out_q, ov_q, stop_evt, reset_evt)
 

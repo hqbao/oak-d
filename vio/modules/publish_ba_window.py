@@ -5,7 +5,7 @@ OPT-IN (``--ba-window``). The default backend worker does NOT wire this step
 builds the capture engine and this step never runs -- the byte-parity oracle is
 UNAFFECTED. When enabled, the backend builds the capture-aware engine (see
 :func:`vio.engine.make_ba_engine` with ``capture_window=True``) whose
-``ba_step_capture`` stashes a :class:`~vio.engine.steps.BaWindowSnap` on
+``ba_step_capture`` stashes a :class:`~vio.engine.ba_capture.BaWindowSnap` on
 the overlay channel every keyframe the solve actually ran.
 
 This step is chained AFTER :func:`~vio.modules.run_ba.run_ba` (so the engine has
@@ -24,7 +24,7 @@ from __future__ import annotations
 from vio.comms import LocalPubSub, topics
 from vio.comms.messages import BaWindow, PoseMsg
 from vio.engine import Engine
-from vio.engine.steps import BaWindowSnap
+from vio.engine.ba_capture import BaWindowSnap
 
 
 def publish_ba_window(engine: Engine, bus: LocalPubSub, msg: PoseMsg) -> PoseMsg:
