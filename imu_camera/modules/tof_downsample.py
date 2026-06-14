@@ -21,8 +21,12 @@ an anisotropically scaled K), so the whole pipeline stays self-consistent.
 
 Downsampling rules (deliberately different per channel):
 
-* GRAY -> ``cv2.resize(..., INTER_AREA)`` -- area averaging is the correct
-  anti-aliasing reduction for an intensity image.
+* GRAY -> area-average downsample (:func:`_area_resize_gray`) -- area averaging
+  is the correct anti-aliasing reduction for an intensity image. This is a pure
+  NumPy reimplementation of ``cv2.resize(..., INTER_AREA)`` (each output pixel is
+  the fractional-AREA-weighted average of the source pixels it overlaps), so the
+  flight runtime needs no OpenCV. Verified bit-exact against ``cv2.INTER_AREA``
+  (max abs diff 0 on gold frames).
 * DEPTH (metres) -> BLOCK-MEDIAN of the VALID (>0) source pixels per output cell,
   0 where a cell has no valid source depth. We must NOT use cv2/linear on depth:
   linear interpolation would blend across depth discontinuities (object edges)
@@ -33,7 +37,6 @@ Downsampling rules (deliberately different per channel):
 """
 from __future__ import annotations
 
-import cv2
 import numpy as np
 
 from imu_camera.comms import LocalPubSub, topics
@@ -73,6 +76,59 @@ def _block_median_valid(depth: np.ndarray, out_h: int, out_w: int) -> np.ndarray
     return out
 
 
+def _area_weights(n_in: int, n_out: int) -> np.ndarray:
+    """1-D fractional-AREA averaging matrix ``(n_out, n_in)`` for a downscale.
+
+    Row ``o`` holds the weights with which the ``n_in`` source samples contribute
+    to output sample ``o``: output cell ``o`` covers the source interval
+    ``[o*s, (o+1)*s)`` with ``s = n_in / n_out``, and each source pixel ``i``
+    contributes the LENGTH of its overlap with that interval (its fractional
+    area). The row is normalised to sum to 1, so the result is the area-weighted
+    AVERAGE. This is exactly the 1-D kernel ``cv2.resize(..., INTER_AREA)``
+    applies (verified bit-exact for the 640->54 / 400->42 ToF reduction).
+
+    Downscale only (``n_out <= n_in``); the ToF grid is always smaller than the
+    source, so the upscale branch INTER_AREA falls back to (bilinear) is never
+    needed here.
+    """
+    scale = n_in / n_out
+    w = np.zeros((n_out, n_in), dtype=np.float64)
+    for o in range(n_out):
+        start = o * scale
+        end = (o + 1) * scale
+        i = int(np.floor(start))
+        # Accumulate each source pixel's overlap length with [start, end).
+        while i < end and i < n_in:
+            lo = max(start, float(i))
+            hi = min(end, float(i + 1))
+            w[o, i] = hi - lo
+            i += 1
+    # Normalise each output row to a weighted average (guards the tiny
+    # floating-point drift in the boundary cells so rows sum to exactly 1).
+    w /= w.sum(axis=1, keepdims=True)
+    return w
+
+
+def _area_resize_gray(gray: np.ndarray, out_h: int, out_w: int) -> np.ndarray:
+    """Pure-NumPy ``cv2.resize(gray, (out_w, out_h), INTER_AREA)`` (downscale).
+
+    Separable area averaging: average along rows then columns via the 1-D
+    fractional-area matrices from :func:`_area_weights`. Rounding matches OpenCV's
+    ``saturate_cast<uchar>`` (round-half-AWAY-from-zero, then clamp to [0, 255]),
+    so the uint8 output is bit-identical to ``cv2.INTER_AREA`` on these inputs.
+    """
+    src = np.asarray(gray, dtype=np.float64)
+    src_h, src_w = src.shape
+    # (out_h, src_h) @ (src_h, src_w) @ (src_w, out_w) -> (out_h, out_w).
+    wr = _area_weights(src_h, out_h)
+    wc = _area_weights(src_w, out_w)
+    avg = wr @ src @ wc.T
+    # OpenCV rounds half away from zero (not numpy's round-half-to-even) before
+    # the uint8 saturating cast; all values here are >= 0, so floor(x + 0.5).
+    rounded = np.floor(avg + 0.5)
+    return np.clip(rounded, 0.0, 255.0).astype(np.uint8)
+
+
 def tof_downsample(matcher: SGMStereoMatcher, bus: LocalPubSub,
                    out_w: int, out_h: int, msg: ImuCamPacket) -> None:
     """Simulate a VL53L9CX ToF frame: SGM at source res, then reduce to 54x42.
@@ -96,11 +152,8 @@ def tof_downsample(matcher: SGMStereoMatcher, bus: LocalPubSub,
     if gray_track.dtype != np.uint8:
         gray_track = np.clip(gray_track, 0.0, 255.0).astype(np.uint8)
 
-    # GRAY -> ToF grid by area averaging (cv2 size arg is (W, H)).
-    gray_tof = cv2.resize(gray_track, (out_w, out_h),
-                          interpolation=cv2.INTER_AREA)
-    if gray_tof.dtype != np.uint8:                  # INTER_AREA keeps dtype
-        gray_tof = gray_tof.astype(np.uint8)        # defensive
+    # GRAY -> ToF grid by area averaging (pure NumPy, bit-exact vs INTER_AREA).
+    gray_tof = _area_resize_gray(gray_track, out_h, out_w)
 
     # DEPTH (metres) -> ToF grid by block-median of valid pixels (NOT linear).
     depth_tof = _block_median_valid(depth, out_h, out_w)

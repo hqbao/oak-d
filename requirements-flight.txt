@@ -1,0 +1,28 @@
+# Lean FLIGHT install for the Pi (no OpenCV, no Qt/UI, no calib/oracle deps).
+#
+# The from-scratch VIO/SLAM flight runtime is library-free by design: own
+# KLT/PnP/corners, own ORB loop closure, own SGM stereo + dense direct VO, a
+# pure-Python PNG codec, and factory calibration (no on-device cv2 calibrate).
+# So the heavy `opencv-python` wheel is NOT installed here -- proven by
+# `python -m verification.cv2_absent_flight_litmus` (the full --vl53l9cx --direct
+# replay runs imu_camera -> vio -> slam at rc=0 with cv2 unimportable).
+#
+# Use the full `requirements.txt` for development, the Qt UI, the calibration
+# wizard, the dev-only PnP A/B oracle, and the parity/oracle tooling -- those
+# still use OpenCV.
+
+# Numerics: every flight math op (gradients, pyramids, area-resize, stereo
+# denoise, ORB, PnP, KLT) is implemented on top of NumPy.
+numpy>=2.0
+
+# JIT-accelerates the pure-NumPy hot paths (SGM cost volume / speckle / median,
+# optical flow) so the library-free frontend runs in real time. Strongly
+# recommended on the Pi; the code falls back to pure NumPy if it is absent.
+numba>=0.61
+
+# IMU serial transport.
+pyserial>=3.5
+
+# OAK-D / camera device driver -- needed for `--live` on the actual board (the
+# real ToF/stereo source). Omit it if the Pi only ever replays recorded sessions.
+depthai>=3.6

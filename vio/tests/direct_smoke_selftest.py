@@ -46,10 +46,9 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-import cv2                                                       # noqa: E402
-
 from imu_camera.io.reader import SessionReader                  # noqa: E402
-from imu_camera.modules.tof_downsample import _block_median_valid  # noqa: E402
+from imu_camera.modules.tof_downsample import (                 # noqa: E402
+    _area_resize_gray, _block_median_valid)
 from imu_camera.modules.pipeline import TOF_W, TOF_H            # noqa: E402
 from sky.depth.stereo import SGMConfig, SGMStereoMatcher        # noqa: E402
 
@@ -151,8 +150,10 @@ def run_direct_smoke(session_dir: Path, max_frames: int = 60,
             f.gray_left, f.gray_right)
         if gray_src.dtype != np.uint8:
             gray_src = np.clip(gray_src, 0.0, 255.0).astype(np.uint8)
-        gray_tof = cv2.resize(gray_src, (TOF_W, TOF_H),
-                              interpolation=cv2.INTER_AREA).astype(np.uint8)
+        # Use the SAME pure-NumPy downsample the production tof_downsample step
+        # uses (bit-exact vs cv2.INTER_AREA) so this smoke exercises the real
+        # flight path and carries no cv2 dependency itself.
+        gray_tof = _area_resize_gray(gray_src, TOF_H, TOF_W)
         depth_tof = _block_median_valid(depth_src, TOF_H, TOF_W)
 
         t0 = prev_ts if prev_ts is not None else (int(f.ts_ns) - 1)

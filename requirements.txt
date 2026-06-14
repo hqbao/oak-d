@@ -1,9 +1,12 @@
 depthai>=3.6
 numpy>=2.0
-# cv2 is no longer in the from-scratch VIO production/live path (own KLT + own
-# PnP + pure-Python PNG codec; live `ours`/`ours-ba` is cv2-free). It is still
-# imported lazily for: ORB loop closure (ours-slam) and the dev-only PnP A/B
-# oracle (OAKD_OWN_PNP=0). Drop it once loop closure moves to library-free too.
+# cv2 is NOT in the FLIGHT runtime any more -- the whole imu_camera -> vio -> slam
+# path (incl. --vl53l9cx ToF + --direct dense VO + ORB loop closure) runs with
+# opencv-python uninstalled (see requirements-flight.txt and
+# verification/cv2_absent_flight_litmus.py). It is kept here for DEV/TOOLING only:
+# the Qt UI overlays (ui/viz/*), the camera-calibration wizard (sky/calib/*,
+# --use-camera-calib), the dev-only PnP A/B oracle (OAKD_OWN_PNP=0), and the
+# parity/oracle/bench tooling.
 opencv-python>=4.10
 pyqtgraph>=0.13
 PyQt6>=6.6

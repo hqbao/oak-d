@@ -905,6 +905,59 @@ def _try_cv2():
     return _try_cv2._mod
 
 
+@njit(cache=True, parallel=True, fastmath=True)
+def _median_blur_replicate(img, ksize):
+    """Sliding ``ksize x ksize`` median, ``BORDER_REPLICATE`` -- ``cv2.medianBlur``.
+
+    A pure-numba reimplementation of ``cv2.medianBlur`` for a finite float32
+    image, used as the cv2-free fallback in :func:`_denoise_disparity`. The
+    border is edge-replicated and the window median is the middle element of the
+    sorted ``ksize*ksize`` neighbourhood (odd window -> a single middle element),
+    matching OpenCV exactly so the cv2-present and cv2-absent paths agree
+    bit-for-bit. Invalid pixels are already mapped to a finite sentinel by the
+    caller, so they sort like any other value (the contract cv2 also relies on).
+
+    Rows are processed in parallel (``prange``) -- each row owns a private window
+    buffer, so there is no shared state -- which roughly halves the cost-per-frame
+    of the cv2-free path versus a scalar loop on the live downscaled disparity
+    grid.
+    """
+    H, W = img.shape
+    r = ksize // 2
+    n = ksize * ksize
+    mid = n // 2
+    out = np.empty((H, W), dtype=np.float32)
+    for v in prange(H):                              # parallel over rows
+        buf = np.empty(n, dtype=np.float32)          # per-row private window
+        for u in range(W):
+            k = 0
+            for dv in range(-r, r + 1):
+                vv = v + dv
+                # BORDER_REPLICATE: clamp the sample coordinate to the edge.
+                if vv < 0:
+                    vv = 0
+                elif vv >= H:
+                    vv = H - 1
+                for du in range(-r, r + 1):
+                    uu = u + du
+                    if uu < 0:
+                        uu = 0
+                    elif uu >= W:
+                        uu = W - 1
+                    buf[k] = img[vv, uu]
+                    k += 1
+            # Insertion sort the small window, then take the middle element.
+            for a in range(1, n):
+                key = buf[a]
+                b = a - 1
+                while b >= 0 and buf[b] > key:
+                    buf[b + 1] = buf[b]
+                    b -= 1
+                buf[b + 1] = key
+            out[v, u] = buf[mid]
+    return out
+
+
 def _denoise_disparity(disp: np.ndarray, cfg: SGMConfig) -> None:
     """Density-preserving disparity cleanup, IN PLACE (no thresholds touched).
 
@@ -919,15 +972,22 @@ def _denoise_disparity(disp: np.ndarray, cfg: SGMConfig) -> None:
     if not use_median and cfg.speckle_window <= 0:
         return  # nothing enabled -> byte-identical to the legacy path
     cv2 = _try_cv2()
-    if use_median and cv2 is not None:
-        # cv2.medianBlur needs a finite float32 image; map NaN -> sentinel.
+    if use_median:
+        # 3x3 median strips lone salt-pepper mismatches. The median of a window
+        # that is mostly valid returns a valid disparity, so density is preserved
+        # -- a pixel only becomes invalid if the MAJORITY of its neighbours were
+        # already invalid (genuinely isolated), which is the noise we want gone.
+        # NaN is bridged to a sentinel both ways (cv2.medianBlur / the numba
+        # fallback both need a finite image).
         finite = np.where(np.isfinite(disp), disp, _INVALID).astype(np.float32)
-        # 3x3 median is the cheap, edge-preserving case (cv2 special-cases small
-        # apertures for float32). The median of a window that is mostly valid
-        # returns a valid disparity, so density is preserved -- a pixel only
-        # becomes invalid if the MAJORITY of its 3x3 neighbours were already
-        # invalid (genuinely isolated), which is the noise we want gone.
-        med = cv2.medianBlur(finite, median_ap)
+        if cv2 is not None:
+            med = cv2.medianBlur(finite, median_ap)
+        else:
+            # cv2-free fallback: a numba sliding median with the SAME
+            # BORDER_REPLICATE convention cv2.medianBlur uses, so the result is
+            # bit-identical to the OpenCV path (verified on gold frames). Keeps
+            # the live ToF depth quality intact when OpenCV is not installed.
+            med = _median_blur_replicate(finite, median_ap)
         # Map the sentinel back to NaN; everything else is the cleaned disparity.
         disp[:, :] = np.where(med <= _INVALID + 0.5, np.nan, med)
 

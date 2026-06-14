@@ -131,11 +131,13 @@ in metres, not intensity units) so the two robust weightings do not interfere.
 
 LEAF / PORT RULES
 -----------------
-Keeps ``sky.*`` a leaf: imports only ``numpy``, :mod:`sky.math`, and -- lazily,
-inside the functions that need it, mirroring :mod:`sky.front.odometry` -- ``cv2``
-(for Sobel gradients + the image pyramid resize). ``sky.assert_import_clean()``
-passes. No process / comms / io module is reachable. Maps onto the C
-``libskyfront`` layer alongside the KLT/PnP front-end.
+Keeps ``sky.*`` a leaf: imports only ``numpy`` and :mod:`sky.math`. The image
+gradients (Sobel) and the Gaussian image pyramid (pyrDown) are pure-NumPy
+separable convolutions (:func:`_sobel3`, :func:`_pyr_down`) that reproduce the
+matching ``cv2`` ops bit-for-bit (``BORDER_REFLECT_101``), so the flight runtime
+needs NO OpenCV. ``sky.assert_import_clean()`` passes. No process / comms / io
+module is reachable. Maps onto the C ``libskyfront`` layer alongside the KLT/PnP
+front-end.
 """
 from __future__ import annotations
 
@@ -259,8 +261,9 @@ def build_pyramid(
     Returned list is ordered FINE -> COARSE: index 0 is full resolution, index
     ``levels-1`` is the coarsest. Each entry is ``(gray_f32, depth_or_None, K_l)``.
 
-    * GRAY is reduced with ``cv2.pyrDown`` (Gaussian + 2x decimation), the
-      standard intensity reduction, returned as float32.
+    * GRAY is reduced with :func:`_pyr_down` (5-tap Gaussian + 2x decimation, a
+      pure-NumPy bit-exact ``cv2.pyrDown`` reimplementation), the standard
+      intensity reduction, returned as float32.
     * DEPTH is reduced VALID-AWARE: a 2x2 block reduces to the MEDIAN of its
       valid (in ``[depth_min, depth_max]``) members, or 0 (invalid) if the whole
       block is holes. This never blends a real depth with a 0-hole or across a
@@ -273,8 +276,6 @@ def build_pyramid(
     ``depth`` may be None (the CURRENT frame needs only intensity, not depth);
     then every level's depth entry is None.
     """
-    import cv2  # lazy (leaf rule -- mirrors sky.front.odometry)
-
     g0 = np.ascontiguousarray(gray, dtype=np.float32)
     d0 = None if depth is None else np.ascontiguousarray(depth, dtype=np.float32)
     K0 = np.asarray(K, dtype=np.float64).copy()
@@ -282,10 +283,11 @@ def build_pyramid(
     pyr: list[tuple[np.ndarray, np.ndarray | None, np.ndarray]] = [(g0, d0, K0)]
     for _ in range(1, levels):
         g_prev, d_prev, K_prev = pyr[-1]
-        # cv2.pyrDown DEFINES the canonical level size ((W+1)//2 x (H+1)//2 for
-        # odd dims). We reduce depth valid-aware to THAT EXACT shape so the gray
-        # and depth grids never disagree (the 54x42 odd-dim trap).
-        g_next = cv2.pyrDown(g_prev)
+        # _pyr_down DEFINES the canonical level size ((W+1)//2 x (H+1)//2 for
+        # odd dims, matching cv2.pyrDown). We reduce depth valid-aware to THAT
+        # EXACT shape so the gray and depth grids never disagree (the 54x42
+        # odd-dim trap).
+        g_next = _pyr_down(g_prev)
         nh, nw = g_next.shape[:2]
         d_next = (None if d_prev is None
                   else _downsample_depth_valid(d_prev, nh, nw, depth_min, depth_max))
@@ -380,16 +382,77 @@ def _bilinear_sample(img: np.ndarray, u: np.ndarray, v: np.ndarray):
     return val, valid
 
 
+def _reflect101_pad(img: np.ndarray, pad: int) -> np.ndarray:
+    """Pad ``img`` by ``pad`` on every side with ``BORDER_REFLECT_101``.
+
+    Reflect-101 mirrors WITHOUT repeating the edge sample (``...c b | a b c ...``,
+    NOT ``...b a | a b c``), which is OpenCV's default border for both
+    ``cv2.Sobel`` and ``cv2.pyrDown``. NumPy's ``mode="reflect"`` is exactly this
+    convention, so the convolutions below match cv2 at the borders too.
+    """
+    return np.pad(img, ((pad, pad), (pad, pad)), mode="reflect")
+
+
+# Separable Sobel-3 kernels: gx = smooth_y [1,2,1] outer diff_x [-1,0,1] (and the
+# transpose for gy). The /8 normalisation makes the operator a central difference
+# in magnitude (cv2.Sobel(...) / 8), matching the prior behaviour exactly.
+_SOBEL_SMOOTH = np.array([1.0, 2.0, 1.0], dtype=np.float64)
+_SOBEL_DIFF = np.array([-1.0, 0.0, 1.0], dtype=np.float64)
+# pyrDown 5-tap binomial Gaussian (normalised), applied separably; cv2 uses the
+# same [1,4,6,4,1]/16 kernel before dropping the odd rows/cols.
+_PYR_KERNEL = np.array([1.0, 4.0, 6.0, 4.0, 1.0], dtype=np.float64) / 16.0
+
+
+def _sep_conv(img: np.ndarray, kx: np.ndarray, ky: np.ndarray) -> np.ndarray:
+    """Separable 2-D correlation: kernel ``ky`` down the rows, ``kx`` across cols.
+
+    Reflect-101 padding + a sliding-window dot makes this a drop-in for the cv2
+    separable filters used here. ``img`` is treated as float64 internally for
+    accuracy and returned float32 by the callers.
+    """
+    pad = len(kx) // 2
+    p = _reflect101_pad(np.asarray(img, dtype=np.float64), pad)
+    h, w = img.shape
+    # Convolve along columns (x) first, then rows (y); both via shifted-add over
+    # the small (3- or 5-tap) kernels -- cheap and exact, no scipy dependency.
+    tmp = np.zeros((h + 2 * pad, w), dtype=np.float64)
+    for i, c in enumerate(kx):
+        if c != 0.0:
+            tmp += c * p[:, i:i + w]
+    out = np.zeros((h, w), dtype=np.float64)
+    for j, c in enumerate(ky):
+        if c != 0.0:
+            out += c * tmp[j:j + h, :]
+    return out
+
+
+def _sobel3(img: np.ndarray, dx: int, dy: int) -> np.ndarray:
+    """Pure-NumPy ``cv2.Sobel(img, CV_32F, dx, dy, ksize=3)`` (one of dx/dy is 1)."""
+    if dx == 1:
+        return _sep_conv(img, _SOBEL_DIFF, _SOBEL_SMOOTH)
+    return _sep_conv(img, _SOBEL_SMOOTH, _SOBEL_DIFF)
+
+
+def _pyr_down(img: np.ndarray) -> np.ndarray:
+    """Pure-NumPy ``cv2.pyrDown(img)``: 5-tap Gaussian blur then 2x decimation.
+
+    Blurs with the separable ``[1,4,6,4,1]/16`` binomial kernel (reflect-101
+    border) and keeps the even rows/cols, giving the canonical ``((H+1)//2,
+    (W+1)//2)`` output shape -- bit-exact with cv2.pyrDown on these float images.
+    """
+    blurred = _sep_conv(img, _PYR_KERNEL, _PYR_KERNEL)
+    return np.ascontiguousarray(blurred[0::2, 0::2], dtype=np.float32)
+
+
 def _image_gradients(img: np.ndarray):
     """Central-difference image gradients ``(gx, gy)`` (intensity / px), via Sobel.
 
-    Uses a normalised Sobel (``cv2.Sobel`` / 8) so the result matches a central
-    difference in magnitude. ``img`` is float32; returns two float32 arrays.
+    Uses a normalised Sobel (:func:`_sobel3` / 8, a pure-NumPy ``cv2.Sobel``
+    reimplementation) so the result matches a central difference in magnitude.
+    ``img`` is float32; returns two float32 arrays.
     """
-    import cv2  # lazy (leaf rule)
-
-    gx = cv2.Sobel(img, cv2.CV_32F, 1, 0, ksize=3) / 8.0
-    gy = cv2.Sobel(img, cv2.CV_32F, 0, 1, ksize=3) / 8.0
+    gx = (_sobel3(img, 1, 0) / 8.0).astype(np.float32)
+    gy = (_sobel3(img, 0, 1) / 8.0).astype(np.float32)
     return gx, gy
 
 

@@ -232,7 +232,14 @@ directly, so run it only when the live pipeline is not holding the device:
 ### Bootstrap
 
 ```bash
+# Full dev/UI/tools/calib install (includes OpenCV for the Qt overlays, the
+# calibration wizard, the PnP A/B oracle, and the parity/bench tooling):
 python3.13 -m venv .venv && .venv/bin/pip install -r requirements.txt
+
+# Lean FLIGHT install for the Pi -- NO OpenCV (numpy + numba + pyserial +
+# depthai). The whole imu_camera -> vio -> slam runtime runs with cv2
+# uninstalled; proven by `python -m verification.cv2_absent_flight_litmus`:
+.venv/bin/pip install -r requirements-flight.txt
 ```
 
 ## The five projects
@@ -330,9 +337,12 @@ to the C `libsky*` layering. Sub-packages so far:
   be vendored byte-identically in both `imu_camera/mathlib/stereo` and
   `depth/mathlib/stereo` under a `diff -r` lock-step gate; consolidating to a
   single import here retired that gate.
-- **`sky.front`** (`pnp`, `klt`, `klt_numba`, `corners`, `frontend`, `odometry`)
-  — the VIO front-end: library-free RGB-D PnP RANSAC, the Numba-JIT KLT tracker +
-  Shi-Tomasi corners, the frame-to-frame frontend, and the loose `RGBDVisualOdometry`.
+- **`sky.front`** (`pnp`, `klt`, `klt_numba`, `corners`, `frontend`, `odometry`,
+  `direct`) — the VIO front-end: library-free RGB-D PnP RANSAC, the Numba-JIT KLT
+  tracker + Shi-Tomasi corners, the frame-to-frame frontend, the loose
+  `RGBDVisualOdometry`, and the dense **direct** photometric VO (`--direct`; its
+  Sobel gradients + Gaussian pyramid are pure-NumPy, bit-exact vs `cv2`, so the
+  flight path carries no OpenCV).
 - **`sky.backend`** (`bundle`, `windowed`, `marginalize`) — the optimizer core:
   the factor-agnostic Gauss-Newton/Schur `bundle`, the windowed-BA map, and the
   (opt-in) sqrt marginalization helper.
@@ -349,11 +359,15 @@ to the C `libsky*` layering. Sub-packages so far:
   stereo camera-calibration wizard math: checkerboard detection / generation, view
   collection, the K + distortion + `T_left_right` solve, and the `calib.json` writer.
 
-**Movability rule (enforced).** `sky.*` may import only `numpy` (+ `cv2` / `numba`
-where the moved algorithm already used them) and must NEVER import any oak-d
-process / `comms` / `io` module. `sky.assert_import_clean()` checks this after a
-bare `import sky.*` (run by the consolidation self-tests), keeping the library a
-leaf so it stays portable as-is.
+**Movability rule (enforced).** `sky.*` may import only `numpy` (+ optional
+`numba` JIT) and must NEVER import any oak-d process / `comms` / `io` module.
+`cv2` is no longer in any `sky.*` flight path — the gradients/pyramids
+(`sky.front.direct`), stereo denoise (`sky.depth.stereo`), ORB loop closure
+(`sky.slam.orb`), KLT/corners/PnP are all pure-NumPy; cv2 is imported lazily ONLY
+by the dev-only PnP A/B oracle (`OAKD_OWN_PNP=0`) and the calibration wizard
+(`sky.calib`, `--use-camera-calib`). `sky.assert_import_clean()` checks the leaf
+rule after a bare `import sky.*` (run by the consolidation self-tests), keeping
+the library portable as-is.
 
 What REMAINS in each project (now organised **by concern** at the project root,
 the misnamed `mathlib/` grab-bag having been dissolved) is the process-coupled
@@ -762,6 +776,12 @@ clobber each other, and `imu_camera/device/camera_calib_store.py`
 - [x] Own pure-NumPy optical flow + Shi-Tomasi corners (Numba-JIT KLT, optional)
       replacing cv2; own library-free PnP, SGM dense depth, ORB loop closure, and
       8-bit PNG codec — no cv2 in any runtime path
+- [x] **cv2-free FLIGHT runtime** (`requirements-flight.txt`, no `opencv-python`):
+      the last flight-path cv2 calls are now pure-NumPy and bit-exact vs OpenCV —
+      `tof_downsample` area-resize (`INTER_AREA`), `sky.front.direct` Sobel +
+      pyrDown, `sky.depth.stereo` median (numba fallback for `medianBlur`). The
+      full `--vl53l9cx --direct` replay (imu_camera → vio → slam) runs at rc=0
+      with cv2 unimportable; proven by `verification/cv2_absent_flight_litmus.py`
 - [x] Logging + offline replay (`baseline/tools/record_session.py` +
       `baseline/tools/viz_session.py`)
 - [x] Gold regression suite (see `docs/GOLD_SESSIONS.md`)

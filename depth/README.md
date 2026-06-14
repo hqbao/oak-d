@@ -81,14 +81,18 @@ WTA/uniqueness/LR gates — so they never reject more matches (keypoint depth
 density is preserved; the rejection thresholds — `uniqueness` / `lr_max_diff` /
 census — are left untouched, which would otherwise starve PnP):
 
-* `median_disp` — `cv2.medianBlur` aperture on the disparity (e.g. `3` for 3×3;
+* `median_disp` — `medianBlur` aperture on the disparity (e.g. `3` for 3×3;
   `0` = off). Kills salt-pepper without shifting edges; a median over a
   mostly-valid window stays valid, so a hole only opens where the neighbourhood
-  was already mostly invalid.
+  was already mostly invalid. Uses `cv2.medianBlur` when OpenCV is present and a
+  **bit-exact numba sliding median** (`_median_blur_replicate`, `BORDER_REPLICATE`)
+  when it is not, so the cv2-free flight install keeps the same depth.
 * `speckle_window` / `speckle_range` + `speckle_cv2` — small-blob removal. With
-  `speckle_cv2=True` it uses `cv2.filterSpeckles` (fast C, quantised int16 grid
-  used only to GROUP blobs — survivors keep their float sub-pixel disparity);
-  otherwise it falls back to the numba `_speckle_filter` flood fill.
+  `speckle_cv2=True` AND OpenCV present it uses `cv2.filterSpeckles` (fast C,
+  quantised int16 grid used only to GROUP blobs — survivors keep their float
+  sub-pixel disparity); otherwise it falls back to the numba `_speckle_filter`
+  flood fill (same keep/drop result on the gold disparities — verified 0
+  divergence). So the live ToF depth is identical with or without cv2.
 
 Both run at the **computed** (post-downscale) resolution, where the map is small,
 so the measured per-frame cost is a fraction of a millisecond. They are **OFF by
