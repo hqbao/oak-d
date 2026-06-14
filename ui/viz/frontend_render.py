@@ -19,7 +19,7 @@ finds + tracks features:
 
 All data is REAL: the heatmap, corners, and flow are the VIO frontend's own
 per-frame output, published on ``frame.frontend`` (see
-``vio.modules.publish_frontend_viz``). Nothing is invented or re-derived UI-side.
+``vio.modules.publishers.publish_frontend_viz``). Nothing is invented or re-derived UI-side.
 
 ``render_frontend(None)`` returns a "waiting" placeholder.
 

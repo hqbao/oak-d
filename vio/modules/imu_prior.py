@@ -1,27 +1,27 @@
-"""``preintegrate_prior`` step: build this frame's IMU prior from the packet.
+"""IMU prior + gravity chain feeding the visual solve.
 
-In the unified front-end the odometry worker consumes the SAME synced
-:class:`~vio.comms.messages.ImuCamPacket` the imu_cam worker's depth step does
-(one acquisition stream, no separate capture monolith). The IMU->prior fusion now
-lives HERE, per packet:
+The IMU-side steps of the odometry frame-chain, in pipeline order:
 
-* ``R_prior`` -- the inter-frame camera-frame rotation integrated from the
-  packet's gyro (already bias-corrected by the imu_cam worker's apply_calibration),
-  conjugated into the camera frame by ``R_imu_cam``. ``None`` when gyro fusion is
-  off or the packet carries fewer than two samples (e.g. the first frame).
-* ``accel_cam`` / ``at_rest`` -- the camera-frame accelerometer this frame and a
-  stillness flag, so a keyframe can carry a gravity prior into the back-end.
-
-The result is stashed in the worker's ``priors[seq]`` dict so the matching depth
-frame (:func:`~vio.modules.estimate_motion.estimate_motion`) picks it up by
-``seq`` (the join lives in :func:`~vio.modules.pull_prior.pull_prior`).
+* :func:`preintegrate_prior` -- on the ``imucam.sample`` edge: build this frame's
+  :class:`~vio.comms.messages.ImuPrior` (gyro inter-frame rotation + gravity accel
+  + at-rest / moving flags) and stash it by ``seq`` for the matching depth frame.
+* :func:`align_gravity` -- one-shot startup attitude leveling to the front-end's
+  ``accel_align`` reference; fires once then never again.
+* :func:`pull_prior` -- the IMU<->vision join: pop the prior preintegrated for this
+  frame's ``seq`` and thread it forward on the :class:`~vio.modules.carriers.Primed`
+  carrier the visual solve consumes.
+* :func:`correct_tilt` -- LIVE-only: continuously level roll/pitch from gravity
+  while at rest, AFTER the motion solve (no-op on the offline / oracle path).
 """
 from __future__ import annotations
 
 import numpy as np
 
-from vio.comms.messages import ImuCamPacket, ImuPrior
+from sky.front.odometry import RGBDVisualOdometry
 from sky.vio.imu import integrate_gyro_camera
+
+from vio.comms.messages import ImuCamPacket, ImuPrior
+from .carriers import Primed, Step, Tracked
 
 # Stillness gate for the keyframe gravity prior: low angular rate and accel close
 # to 1 g. Mirrors the live capture flow's at-rest thresholds.
@@ -111,3 +111,39 @@ def preintegrate_prior(state: dict, msg: ImuCamPacket) -> None:
             for seq in sorted(imu_segs)[:-512]:
                 imu_segs.pop(seq, None)
     return None
+
+
+def align_gravity(vo: RGBDVisualOdometry, state: dict, tracked: Tracked) -> Tracked:
+    """One-shot: level the initial attitude to the startup gravity reference.
+
+    Was ``AlignGravity(Step)``. ``vo`` is the odometry instance; ``state`` is the
+    worker's shared state dict (``ctx.state``), holding the one-shot ``aligned``
+    latch and the ``accel_align`` seed. Passes the carrier through unchanged.
+    """
+    if not state.get("aligned") and "accel_align" in state:
+        vo.align_to_gravity(state["accel_align"])
+        state["aligned"] = True
+    return tracked
+
+
+def pull_prior(priors: dict, tracked: Tracked) -> Primed:
+    """Pop this frame's preintegrated IMU prior and join it onto the carrier.
+
+    Was ``PullPrior(Step)``; ``priors`` (the worker's ``ctx.state["priors"]``
+    seq->prior dict) is passed explicitly. ``None`` when none was preintegrated.
+    """
+    prior = priors.pop(tracked.frame.seq, None)
+    return Primed(tracked.frame, tracked.obs, prior)
+
+
+def correct_tilt(vo: RGBDVisualOdometry, level_tilt: bool, step: Step) -> Step:
+    """At-rest roll/pitch leveling (LIVE-only); return the carrier (pose updated).
+
+    Was ``CorrectTilt(StepBase)``; the odometry instance + the ``level_tilt``
+    gate (was ``ctx.state["level_tilt"]``) are passed explicitly. A no-op on the
+    offline / oracle path (``level_tilt`` False) -> byte-identical ``pose.odom``.
+    """
+    if (level_tilt and step.at_rest and step.accel_cam is not None):
+        if vo.correct_tilt(step.accel_cam):
+            step.pose = vo.pose.copy()       # publish the leveled attitude
+    return step

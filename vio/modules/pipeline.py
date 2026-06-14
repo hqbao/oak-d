@@ -63,24 +63,15 @@ from sky.vio.window import WindowedVIOConfig
 from vio.engine import make_ba_engine, make_vi_engine
 from vio.comms.messages import FrameInliers, FrameTracks, Keyframe, PoseMsg
 from .direct_odometry import DirectOdometryEngine
-from .preintegrate_prior import preintegrate_prior
-from .track_features import track_features
-from .publish_tracks import publish_tracks
-from .align_gravity import align_gravity
-from .pull_prior import pull_prior
-from .estimate_motion import estimate_motion
-from .correct_tilt import correct_tilt
-from .publish_inliers import publish_inliers
-from .publish_gyrofuse import publish_gyrofuse
-from .publish_frontend_viz import publish_frontend_viz
+from .frontend import estimate_motion, track_features
+from .imu_prior import (
+    align_gravity, correct_tilt, preintegrate_prior, pull_prior)
+from .backend import emit_keyframe, run_ba
+from .publishers import (
+    publish_ba_window, publish_frontend_viz, publish_gyrofuse, publish_inliers,
+    publish_pose, publish_refined, publish_tracks, publish_vo)
 from .propagate_imu import propagate_imu
 from .loop_inbox import LoopCorrectionInbox
-from .publish_pose import publish_pose
-from .publish_vo import publish_vo
-from .emit_keyframe import emit_keyframe
-from .run_ba import run_ba
-from .publish_refined import publish_refined
-from .publish_ba_window import publish_ba_window
 
 LOG = logging.getLogger("vio.pipeline")
 

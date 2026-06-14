@@ -182,8 +182,8 @@ def test_diagnostic() -> bool:
 def test_publisher_empty() -> bool:
     print("== 2. publish_inliers empty-array contract (PnP failed) ==")
     from vio.comms import LocalPubSub, topics
-    from vio.modules.publish_inliers import publish_inliers
-    from vio.modules.step import Step
+    from vio.modules.publishers import publish_inliers
+    from vio.modules.carriers import Step
 
     captured: list = []
     bus = LocalPubSub()

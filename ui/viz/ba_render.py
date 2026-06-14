@@ -19,7 +19,7 @@ PNG-verifiable, mirrors :mod:`ui.viz.loop_render`):
 
 All data is REAL: the poses + landmarks + per-observation reprojection error are
 the VIO windowed-BA solve's own output, published on ``ba.window`` (see
-``vio.modules.publish_ba_window``). Nothing is invented.
+``vio.modules.publishers.publish_ba_window``). Nothing is invented.
 
 cv2 is only a drawing backend here -- importing this module is what pulls it, not
 the base UI (mirrors :mod:`ui.viz.loop_render` / :mod:`ui.viz.gyrofuse_render`).

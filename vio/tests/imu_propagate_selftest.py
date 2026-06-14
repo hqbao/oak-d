@@ -40,7 +40,7 @@ DT_NS = 5_000_000                     # 5 ms IMU step (200 Hz)
 
 
 # --------------------------------------------------------------------------- #
-# Minimal Step carrier stand-in (matches vio.modules.step.Step's fields used).
+# Minimal Step carrier stand-in (matches vio.modules.carriers.Step's fields used).
 # --------------------------------------------------------------------------- #
 @dataclass
 class _Frame:

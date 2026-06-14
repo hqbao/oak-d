@@ -194,8 +194,8 @@ class _Frame:
 def test_publisher_emits() -> bool:
     print("== 2. publish_gyrofuse emits on gyro-fused frames ==")
     from vio.comms import LocalPubSub, topics
-    from vio.modules.publish_gyrofuse import publish_gyrofuse
-    from vio.modules.step import Step
+    from vio.modules.publishers import publish_gyrofuse
+    from vio.modules.carriers import Step
 
     K = np.eye(3, dtype=np.float64) * 600.0
     K[2, 2] = 1.0
@@ -235,8 +235,8 @@ def test_publisher_emits() -> bool:
 def test_publisher_silent() -> bool:
     print("== 3. publish_gyrofuse stays silent when gyro off ==")
     from vio.comms import LocalPubSub, topics
-    from vio.modules.publish_gyrofuse import publish_gyrofuse
-    from vio.modules.step import Step
+    from vio.modules.publishers import publish_gyrofuse
+    from vio.modules.carriers import Step
 
     K = np.eye(3, dtype=np.float64) * 600.0
     K[2, 2] = 1.0

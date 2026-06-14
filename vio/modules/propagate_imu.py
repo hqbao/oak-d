@@ -10,7 +10,7 @@ selftest's), so all the per-frame nav-state lives there as before.
 The gap this closes
 -------------------
 On the loose path the live displayed position is ``pose.odom``, published EVERY
-frame by :class:`~vio.modules.publish_pose.PublishPose` from the per-frame
+frame by :func:`~vio.modules.publishers.publish_pose` from the per-frame
 VISION-ONLY odometry (PnP). When vision is absent (covered camera) or too weak to
 solve (white wall) the PnP either fails or freezes translation, so the live pose
 FREEZES even while the device is physically moving -- the "covered camera + move =
@@ -129,7 +129,7 @@ from sky.vio.window import T_cw_to_body_world, body_world_to_T_cw
 from sky.vio.imu import (
     apply_se3_left, complementary_correct, imu_at_rest, loop_correction_delta,
     predict_state, scale_se3_delta)
-from .step import Step
+from .carriers import Step
 
 LOG = logging.getLogger("vio.propagate_imu")
 
