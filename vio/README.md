@@ -77,6 +77,15 @@ Python: every step is a function with explicit args (no `ctx.state` lookups), an
 each reactive module became a plain `threading.Thread` worker that owns its inbox,
 coalescing, END handling, and downstream-END forward explicitly.
 
+The files are grouped by **role in the data flow** (the package `__init__.py` carries
+the full module-map): `pipeline.py` (read first — the workers that orchestrate),
+`carriers.py` (the per-frame dataclass records), `frontend.py` (sparse visual VO),
+`imu_prior.py` (IMU prior + gravity + tilt), `backend.py` (keyframe + windowed BA),
+`publishers.py` (emit results on topics), plus `propagate_imu.py` (the `--tight` live
+nav), `direct_odometry.py` (the `--direct` alternative front-end), and `loop_inbox.py`
+(SLAM loop-correction feedback). Flow: `frame → frontend → imu_prior → backend →
+publishers`.
+
 `OdometryWorker` joins `imucam.sample` (IMU prior, `process_imucam`) +
 `frame.depth` (KLT track → RGB-D PnP → gyro fusion → pose, `process_frame`) and
 publishes `pose.odom`, `keyframe`, `frame.tracks`, `frame.inliers` (+ `pose.vo`
@@ -88,15 +97,15 @@ the old `Module` gave for free. `BackendWorker` consumes `keyframe`
 (`process_kf`), runs windowed BA behind a swappable engine (`worker=True` runs it
 in a subprocess; `tight=True` switches to the VIO map), and publishes
 `pose.refined`. `OdometryModule` / `BackendModule` are kept as aliases (vio.main +
-the selftests import them). The internal carriers (`step` / `primed` / `tracked`)
-thread one frame's state through the chain; they never go on the bus.
+the selftests import them). The internal carriers (`Step` / `Primed` / `Tracked`, in
+`carriers.py`) thread one frame's state through the chain; they never go on the bus.
 
 The odometry worker holds a `ModuleContext` (a plain `(bus, name, state)` holder,
 NOT the reactive substrate) so the per-run state the step functions thread through
 (`vo` / `priors` / `imu_segs` / the live `live_nav` / `loop_inbox` …) lives in one
 place — and the selftests that reach into `odom.ctx.state` keep working unchanged.
 
-> Naming note: the carrier dataclass is named `Step` (`vio/modules/step.py`) — a
+> Naming note: the carrier dataclass is named `Step` (`vio/modules/carriers.py`) — a
 > real per-frame data record (`estimate_motion` → downstream), **kept as a
 > dataclass**. The framework `Step` base class (the old per-step superclass) is
 > gone from `vio/modules/` now that the steps are plain functions, so the old
